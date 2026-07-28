@@ -1,0 +1,118 @@
+"""
+config.py
+Central configuration for the MomentumMaster Deriv trading bot.
+"""
+
+import os
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv() -> bool:
+        return False
+
+load_dotenv()
+
+
+def _streamlit_secret(name: str) -> str:
+    try:
+        import streamlit as st
+        return str(st.secrets.get(name, ""))
+    except Exception:
+        return ""
+
+
+# --- Deriv credentials -----------------------------------------------------
+DERIV_APP_ID = os.getenv("DERIV_APP_ID") or _streamlit_secret("DERIV_APP_ID") or ""
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN") or _streamlit_secret("DERIV_API_TOKEN") or ""
+DERIV_WS_URL = ""  # compatibility only; the OTP WebSocket URL is obtained at runtime
+
+
+# --- Markets ---------------------------------------------------------------
+# Synthetic 1-second volatility indices. Available on every Deriv account and
+# what the tick-momentum strategy is calibrated for. Symbols are case-sensitive
+# and must be sent to Deriv exactly as written here.
+AVAILABLE_MARKETS = {
+    "Volatility 10 (1s)": "1HZ10V",
+    "Volatility 25 (1s)": "1HZ25V",
+    "Volatility 50 (1s)": "1HZ50V",
+    "Volatility 75 (1s)": "1HZ75V",
+    "Volatility 100 (1s)": "1HZ100V",
+}
+
+DEFAULT_MARKET_DISPLAY = "Volatility 10 (1s)"
+SYMBOL = AVAILABLE_MARKETS[DEFAULT_MARKET_DISPLAY]
+SYMBOL_DISPLAY = DEFAULT_MARKET_DISPLAY
+
+
+# --- Strategy parameters ---------------------------------------------------
+TREND_WINDOW_MIN = 8
+TREND_WINDOW_MAX = 12
+VELOCITY_THRESHOLD = 0.55
+BURST_WINDOW_MIN = 4
+BURST_WINDOW_MAX = 6
+BURST_VELOCITY_THRESHOLD = 0.72
+MAX_TRADES_PER_TREND = 1
+TICK_BUFFER_SIZE = 50
+MOMENTUM_CONFIRM_TICKS = 1
+ENTRY_SCORE_THRESHOLD = 7
+EARLY_TREND_MAX_AGE = 10
+MICRO_BIAS_WINDOW = 45
+VOLATILITY_WINDOW = 20
+MIN_TICK_VOLATILITY = None
+MAX_TICK_VOLATILITY = None
+ACCELERATION_MIN_RATIO = 0
+
+
+# --- Contract --------------------------------------------------------------
+CONTRACT_TYPE_BUY = "ONETOUCH"
+CONTRACT_TYPE_SELL = "ONETOUCH"
+CONTRACT_DURATION = 5
+CONTRACT_DURATION_UNIT = "t"
+BARRIER_BUY = "+0.08"
+BARRIER_SELL = "-0.08"
+CURRENCY = "USD"
+
+
+# --- Multi-timeframe -------------------------------------------------------
+MTF_GRANULARITIES = {"5m": 300, "15m": 900, "30m": 1800}
+MTF_CANDLE_COUNT = 10
+MTF_MIN_AGREEMENT = 2
+
+
+# --- Sensitivity presets (keys must have NO trailing spaces) ---------------
+STRATEGY_SENSITIVITY_PRESETS = {
+    "Conservative": {
+        "velocity_threshold": 0.68,
+        "burst_threshold": 0.82,
+        "mtf_min_agreement": 3,
+        "entry_score_threshold": 9,
+    },
+    "Balanced": {
+        "velocity_threshold": VELOCITY_THRESHOLD,
+        "burst_threshold": BURST_VELOCITY_THRESHOLD,
+        "mtf_min_agreement": MTF_MIN_AGREEMENT,
+        "entry_score_threshold": ENTRY_SCORE_THRESHOLD,
+    },
+    "Aggressive": {
+        "velocity_threshold": 0.50,
+        "burst_threshold": 0.68,
+        "mtf_min_agreement": 2,
+        "entry_score_threshold": 5,
+    },
+}
+
+DEFAULT_STRATEGY_SENSITIVITY = "Balanced"
+
+
+# --- Martingale ------------------------------------------------------------
+STAKE_MODE = "MARTINGALE"
+MARTINGALE_MULTIPLIER = 2.5
+DEFAULT_INITIAL_STAKE = 1.0
+DEFAULT_MAX_MARTINGALE_STEPS = 3
+
+
+# --- Logging ---------------------------------------------------------------
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_FILE = os.path.join(LOG_DIR, "deriv_bot.log")
+LOG_LEVEL = "INFO"
