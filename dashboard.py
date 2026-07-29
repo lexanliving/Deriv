@@ -4,6 +4,11 @@ The engine runs in a background asyncio thread, independent of the UI. A
 watchdog relaunches it if it dies while you intend it to run (resuming the
 stake plan, results, and daily cap). The Decision Log records every 15-minute
 review plus the result and reason of every setup, and offers a CSV export.
+
+Robustness: every sidebar widget is value-safe (its value is always coerced
+into its option list), the header has safe fall-back defaults so a sidebar
+short-circuit can never leave a variable undefined, and the header render is
+wrapped so a glitch shows inline instead of whiting out the page.
 """
 import asyncio
 import html
@@ -41,6 +46,18 @@ _STAGE_LABEL = {"IDLE": "Scanning", "TREND": "Trend set", "SIGNAL": "Setup armed
                 "PULLBACK": "Pullback", "MOMENTUM": "Momentum"}
 _MODE_LABEL = {"DEMO": "Demo", "REAL": "Live", "BLOCKED": "Paused",
                "UNCONFIGURED": "No account", "SIGNAL_ONLY": "Preview"}
+
+# --- Safe fall-back defaults so the header can never hit an undefined name,
+# even if the sidebar pass short-circuits on a bad widget value. ---
+market_options = list(AVAILABLE_MARKETS.keys()) or [DEFAULT_MARKET_DISPLAY]
+market_display = DEFAULT_MARKET_DISPLAY if DEFAULT_MARKET_DISPLAY in AVAILABLE_MARKETS else market_options[0]
+selected_symbol = AVAILABLE_MARKETS.get(market_display, next(iter(AVAILABLE_MARKETS.values()), ""))
+selected_account = None
+account_id = ""
+account_currency = "USD"
+selected_account_type = "UNKNOWN"
+real_execution_confirmed = False
+execution_mode = "UNCONFIGURED"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -112,6 +129,9 @@ html,body,.stApp{background-color:#060912;color:#c7d2e0;font-family:'IBM Plex Sa
 .mm-scorefill{height:100%;border-radius:5px;background:linear-gradient(90deg,#3884ff,#10b981);transition:width .4s ease;}
 .mm-hb{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#6b7c97;margin-top:12px;}
 .mm-ledger-head{font-family:'Space Grotesk',sans-serif;font-size:.7rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;margin:22px 0 10px 0;padding-bottom:7px;border-bottom:1px solid #1b2740;}
+.mm-glitch{margin:14px 0;padding:14px 16px;border-radius:11px;background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);}
+.mm-glitch .t{font-family:'Space Grotesk',sans-serif;font-weight:600;color:#fb7185;font-size:.82rem;letter-spacing:.04em;}
+.mm-glitch .s{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#9fb0c9;margin-top:6px;line-height:1.5;}
 [data-testid="stDataFrame"]{border:0;}
 [data-testid="stButton"] button{border-radius:8px;font-family:'Space Grotesk',sans-serif;font-weight:600;min-height:2.6rem;letter-spacing:.05em;transition:filter .15s ease,transform .12s ease;}
 [data-testid="stButton"] button:hover{filter:brightness(1.14);}
@@ -143,6 +163,17 @@ if "last_auto_restart" not in st.session_state:
     st.session_state.last_auto_restart = 0.0
 
 state: StateManager = st.session_state.state_manager
+
+
+def _glitch(where, exc):
+    st.markdown(
+        f'<div class="mm-glitch"><div class="t">⚠ {where} hit a snag</div>'
+        f'<div class="s">The bot is fine — a rendering edge case, not a trading fault. '
+        f'Details are in the expander below; the controls stay live so you can change a '
+        f'setting and retry without refreshing.</div></div>',
+        unsafe_allow_html=True)
+    with st.expander("Technical details"):
+        st.exception(exc)
 
 
 def _run_engine_in_thread(engine: TradingEngine, loop: asyncio.AbstractEventLoop):
@@ -294,7 +325,8 @@ def stop_bot():
 
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# Sidebar — every widget value is coerced into its option list so a stale or
+# whitespace-mismatched value can never raise and take the page down.
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown(
@@ -305,7 +337,7 @@ with st.sidebar:
     accounts = []
     account_load_error = ""
     if not DERIV_APP_ID or not configured_pat:
-        account_load_error = "Add DERIV_APP_ID and DERIV_API_TOKEN to your Streamlit Secrets."
+        account_load_error = "Add DERIV_APP_ID and DERIV_API_TOKEN to Streamlit Secrets."
     else:
         try:
             accounts = _load_accounts(DERIV_APP_ID, configured_pat)
@@ -313,13 +345,6 @@ with st.sidebar:
             account_load_error = f"Could not verify the access token: {exc.message}"
         except Exception:
             account_load_error = "Account check failed — confirm the App ID, token, and connection."
-
-    account_id = ""
-    account_currency = "USD"
-    selected_account = None
-    selected_account_type = "UNKNOWN"
-    real_execution_confirmed = False
-    execution_mode = "UNCONFIGURED"
 
     if account_load_error:
         st.error(account_load_error)
@@ -330,34 +355,39 @@ with st.sidebar:
         if not account_map:
             st.warning("No usable account IDs were returned.")
         else:
+            _acct_opts = list(account_map)
+            _acct_val = st.session_state.get("dash_account_pick", _acct_opts[0])
+            if _acct_val not in _acct_opts:
+                _acct_val = _acct_opts[0]
             account_id = st.selectbox(
-                "Account", options=list(account_map), disabled=state.is_running,
+                "Account", options=_acct_opts, index=_acct_opts.index(_acct_val),
+                key="dash_account_pick", disabled=state.is_running,
                 format_func=lambda v: (
                     f"{normalize_account_type(account_map[v].get('account_type', 'unknown'))} · "
                     f"{v} · {account_map[v].get('currency', 'USD')} "
                     f"{float(account_map[v].get('balance', 0)):,.2f}"))
-            selected_account = account_map[account_id]
-            selected_account_type = normalize_account_type(selected_account.get("account_type", "unknown"))
-            account_currency = str(selected_account.get("currency", "USD")).upper()
-            st.success("Connected")
-            st.metric("Balance", f"{account_currency} {float(selected_account.get('balance', 0)):,.2f}")
+            selected_account = account_map.get(account_id)
+            if selected_account:
+                selected_account_type = normalize_account_type(selected_account.get("account_type", "unknown"))
+                account_currency = str(selected_account.get("currency", "USD")).upper()
+                st.success("Connected")
+                st.metric("Balance", f"{account_currency} {float(selected_account.get('balance', 0)):,.2f}")
 
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Market</div>", unsafe_allow_html=True)
-    market_options = list(AVAILABLE_MARKETS.keys())
     try:
         market_index = market_options.index(DEFAULT_MARKET_DISPLAY)
     except ValueError:
         market_index = 0
     market_display = st.selectbox("Market", options=market_options, index=market_index, disabled=state.is_running)
-    selected_symbol = AVAILABLE_MARKETS[market_display]
-    st.caption("Up = Call · Down = Put. Direction only — no barriers. Running several tabs? Avoid mirror-image markets (a pair and its USD-inverse) — they move as one doubled bet.")
+    selected_symbol = AVAILABLE_MARKETS.get(market_display, next(iter(AVAILABLE_MARKETS.values()), ""))
+    st.caption("Up = Call · Down = Put. Direction only — no barriers.")
 
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Contract</div>", unsafe_allow_html=True)
     default_duration = CONTRACT_DURATION if CONTRACT_DURATION_UNIT == "m" else 30
     duration_minutes = st.select_slider("Length (minutes)", options=[5, 15, 30, 60], value=default_duration, disabled=state.is_running)
-    st.caption("Up to 10 trades a day, per tab.")
+    st.caption("Up to 10 trades a day.")
 
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Account safety</div>", unsafe_allow_html=True)
@@ -388,15 +418,17 @@ with st.sidebar:
 
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Selectivity</div>", unsafe_allow_html=True)
-    strategy_sensitivity = st.select_slider("How strict", options=list(STRATEGY_SENSITIVITY_PRESETS.keys()), value=DEFAULT_STRATEGY_SENSITIVITY, disabled=state.is_running)
-    preset = STRATEGY_SENSITIVITY_PRESETS[strategy_sensitivity]
+    _sens_opts = list(STRATEGY_SENSITIVITY_PRESETS.keys()) or ["Conservative"]
+    _sens_val = DEFAULT_STRATEGY_SENSITIVITY if DEFAULT_STRATEGY_SENSITIVITY in _sens_opts else _sens_opts[0]
+    strategy_sensitivity = st.select_slider("How strict", options=_sens_opts, value=_sens_val, disabled=state.is_running)
+    preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, {}) or {}
     if duration_minutes <= 15:
         regime_note = "short contract → 30m + 5m trending & decisive trigger"
     elif duration_minutes <= 30:
         regime_note = "medium contract → 30m + 1h must agree"
     else:
         regime_note = "long contract → 30m + 1h agree, 1h ADX & MACD confirm"
-    st.caption(f"Needs {preset['entry_score_threshold']}/{SCORE_MAX} · 15m ADX ≥ {preset['entry_adx_floor']} · {regime_note}")
+    st.caption(f"Needs {preset.get('entry_score_threshold', SCORE_MAX)}/{SCORE_MAX} · 15m ADX ≥ {preset.get('entry_adx_floor', ADX_MIN_TREND if 'ADX_MIN_TREND' in dir() else 15)} · {regime_note}")
 
     st.divider()
     col_start, col_stop = st.columns(2)
@@ -425,44 +457,46 @@ with st.sidebar:
     st.caption(f"**Market** {market_display} · {selected_symbol}\n\n**Contract** Call / Put · {duration_minutes}m\n\n**Trend** 15m trigger, confirmed by 30m + 1h")
 
 # ---------------------------------------------------------------------------
-# Header
+# Header (wrapped so a glitch shows inline, never a white screen)
 # ---------------------------------------------------------------------------
-active_ctx = state.get_execution_context()
-if state.is_running:
-    display_account_id = active_ctx.get("account_id", "")
-    display_account_type = active_ctx.get("account_type", "UNKNOWN")
-    display_currency = active_ctx.get("currency", "USD")
-    display_mode = active_ctx.get("execution_mode", "UNCONFIGURED")
-elif selected_account:
-    display_account_id = account_id
-    display_account_type = selected_account_type
-    display_currency = account_currency
-    display_mode = execution_mode
-else:
-    display_account_id = ""
-    display_account_type = "UNKNOWN"
-    display_currency = account_currency
-    display_mode = "UNCONFIGURED"
+try:
+    active_ctx = state.get_execution_context()
+    if state.is_running:
+        display_account_id = active_ctx.get("account_id", "")
+        display_account_type = active_ctx.get("account_type", "UNKNOWN")
+        display_currency = active_ctx.get("currency", "USD")
+        display_mode = active_ctx.get("execution_mode", "UNCONFIGURED")
+    elif selected_account:
+        display_account_id = account_id
+        display_account_type = selected_account_type
+        display_currency = account_currency
+        display_mode = execution_mode
+    else:
+        display_account_id = ""
+        display_account_type = "UNKNOWN"
+        display_currency = account_currency
+        display_mode = "UNCONFIGURED"
 
-mode_line = _MODE_LABEL.get(display_mode, "Paused")
-acct_id_short = html.escape(display_account_id[:8]) if display_account_id else "—"
-
-st.markdown(
-    f"""
+    mode_line = _MODE_LABEL.get(display_mode, "Paused")
+    acct_id_short = html.escape(display_account_id[:8]) if display_account_id else "—"
+    st.markdown(
+        f"""
 <div class="mm-header">
   <div>
     <div class="mm-logo">Momentum<span class="mm-dot">·</span>Master <span style="color:#6b7c97;font-weight:500;font-size:0.8rem;letter-spacing:0.1em;">TF</span></div>
     <div class="mm-eyebrow">Multi-timeframe trend system</div>
-    <div class="mm-sub">{html.escape(market_display)} · {html.escape(selected_symbol)}</div>
+    <div class="mm-sub">{html.escape(str(market_display))} · {html.escape(str(selected_symbol))}</div>
   </div>
   <div class="mm-acct">
-    <div class="mm-mode">{html.escape(mode_line)}</div>
-    <div class="mm-id">{html.escape(display_account_type)} · {acct_id_short} · {html.escape(display_currency)}</div>
+    <div class="mm-mode">{html.escape(str(mode_line))}</div>
+    <div class="mm-id">{html.escape(str(display_account_type))} · {acct_id_short} · {html.escape(str(display_currency))}</div>
   </div>
 </div>
 """,
-    unsafe_allow_html=True,
-)
+        unsafe_allow_html=True,
+    )
+except Exception as _e:
+    _glitch("Header", _e)
 
 # ---------------------------------------------------------------------------
 # Live fragments
@@ -494,95 +528,102 @@ def _kpi(label, value, sub="", accent="#33507e", val_color="#eef3fb", hero=False
 
 @st.fragment(run_every=2.0)
 def metrics_fragment():
-    stats = state.get_performance_stats()
-    ctx = state.get_execution_context()
-    currency = ctx.get("currency", "USD")
-    pnl = stats["total_pnl"]
-    pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
-    pnl_accent = "#10b981" if pnl > 0 else "#f43f5e" if pnl < 0 else "#33507e"
-    pnl_val = "#34d399" if pnl > 0 else "#fb7185" if pnl < 0 else "#eef3fb"
-    exp = stats["expectancy"]
-    exp_str = f"+{exp:.2f}" if exp > 0 else f"{exp:.2f}"
-    exp_accent = "#10b981" if exp > 0 else "#f43f5e" if exp < 0 else "#33507e"
-    exp_val = "#34d399" if exp > 0 else "#fb7185" if exp < 0 else "#9fb0c9"
-    wr = stats["win_rate"]
-    wr_accent = "#10b981" if wr >= 55 else "#f43f5e" if wr < 45 and stats["total_trades"] > 0 else "#3884ff"
-    mart = state.get_martingale_state()
-    step = mart["step"]
-    sub_trades = f"{stats['wins']}W · {stats['losses']}L"
-    if step > 0:
-        sub_trades += f" · step {step}"
-    cards = (
-        _kpi("Net result", pnl_str, f"{currency} · this session", pnl_accent, pnl_val, hero=True)
-        + _kpi("Edge / trade", exp_str, "expected value", exp_accent, exp_val)
-        + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed", wr_accent)
-        + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades, "#3884ff"))
-    st.markdown(f'<div class="mm-kpi-grid">{cards}</div>', unsafe_allow_html=True)
+    try:
+        stats = state.get_performance_stats()
+        ctx = state.get_execution_context()
+        currency = ctx.get("currency", "USD")
+        pnl = stats["total_pnl"]
+        pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
+        pnl_accent = "#10b981" if pnl > 0 else "#f43f5e" if pnl < 0 else "#33507e"
+        pnl_val = "#34d399" if pnl > 0 else "#fb7185" if pnl < 0 else "#eef3fb"
+        exp = stats["expectancy"]
+        exp_str = f"+{exp:.2f}" if exp > 0 else f"{exp:.2f}"
+        exp_accent = "#10b981" if exp > 0 else "#f43f5e" if exp < 0 else "#33507e"
+        exp_val = "#34d399" if exp > 0 else "#fb7185" if exp < 0 else "#9fb0c9"
+        wr = stats["win_rate"]
+        wr_accent = "#10b981" if wr >= 55 else "#f43f5e" if wr < 45 and stats["total_trades"] > 0 else "#3884ff"
+        mart = state.get_martingale_state()
+        step = mart["step"]
+        sub_trades = f"{stats['wins']}W · {stats['losses']}L"
+        if step > 0:
+            sub_trades += f" · step {step}"
+        cards = (
+            _kpi("Net result", pnl_str, f"{currency} · this session", pnl_accent, pnl_val, hero=True)
+            + _kpi("Edge / trade", exp_str, "expected value", exp_accent, exp_val)
+            + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed", wr_accent)
+            + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades, "#3884ff"))
+        st.markdown(f'<div class="mm-kpi-grid">{cards}</div>', unsafe_allow_html=True)
+    except Exception as _e:
+        _glitch("Metrics", _e)
 
 
 @st.fragment(run_every=5.0)
 def chart_fragment():
-    ticks = state.get_recent_ticks()
-    if not ticks:
-        st.info("Waiting for market data — the chart fills in as prices arrive.")
-        return
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=list(range(len(ticks))), y=ticks, mode="lines",
-        line=dict(color="#3884ff", width=1.6), name="Price",
-        hovertemplate="idx %{x}<br>price %{y:.5f}<extra></extra>"))
-    fig.add_trace(go.Scatter(
-        x=[len(ticks) - 1], y=[ticks[-1]], mode="markers",
-        marker=dict(color="#10b981", size=9, symbol="circle", line=dict(color="#06281f", width=1)),
-        hovertemplate="last %{y:.5f}<extra></extra>"))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0a1120",
-        font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
-        xaxis=dict(title="", gridcolor="#16223c", showgrid=True, zeroline=False, tickcolor="#16223c", showticklabels=False),
-        yaxis=dict(title="", gridcolor="#16223c", showgrid=True, zeroline=False, tickcolor="#16223c"),
-        margin=dict(l=8, r=8, t=8, b=8), height=300, showlegend=False)
-    st.plotly_chart(fig, width="stretch")
+    try:
+        ticks = state.get_recent_ticks()
+        if not ticks:
+            st.info("Waiting for market data — the chart fills in as prices arrive.")
+            return
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=list(range(len(ticks))), y=ticks, mode="lines",
+            line=dict(color="#3884ff", width=1.6), name="Price",
+            hovertemplate="idx %{x}<br>price %{y:.5f}<extra></extra>"))
+        fig.add_trace(go.Scatter(
+            x=[len(ticks) - 1], y=[ticks[-1]], mode="markers",
+            marker=dict(color="#10b981", size=9, symbol="circle", line=dict(color="#06281f", width=1)),
+            hovertemplate="last %{y:.5f}<extra></extra>"))
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0a1120",
+            font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
+            xaxis=dict(title="", gridcolor="#16223c", showgrid=True, zeroline=False, tickcolor="#16223c", showticklabels=False),
+            yaxis=dict(title="", gridcolor="#16223c", showgrid=True, zeroline=False, tickcolor="#16223c"),
+            margin=dict(l=8, r=8, t=8, b=8), height=300, showlegend=False)
+        st.plotly_chart(fig, width="stretch")
+    except Exception as _e:
+        _glitch("Chart", _e)
 
 
 @st.fragment(run_every=2.0)
 def state_panel_fragment():
-    s = state.get_strategy_state()
-    price = state.current_price
-    trend = s.get("trend_direction") or "—"
-    t_cls = "mm-up" if trend == "UP" else ("mm-down" if trend == "DOWN" else "mm-flat")
-    t_arrow = "▲" if trend == "UP" else ("▼" if trend == "DOWN" else "—")
-    tf_biases = s.get("mtf_tf_biases", {})
-    chips = []
-    for tf in ["5m", "15m", "30m", "1h"]:
-        if tf in tf_biases:
-            v = tf_biases[tf]
-            c = "#34d399" if v == "UP" else ("#fb7185" if v == "DOWN" else "#8294b0")
-            ic = "▲" if v == "UP" else ("▼" if v == "DOWN" else "·")
-            chips.append(f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>')
-    chips_html = f'<div class="mm-chips">{"".join(chips)}</div>' if chips else ""
-    stage = s.get("pattern_stage", "IDLE")
-    stage_colors = {"IDLE": ("#5b6b85", "#10182b"), "TREND": ("#a78bfa", "#1a1430"),
-                    "PULLBACK": ("#fbbf24", "#241c08"), "MOMENTUM": ("#3884ff", "#0c1730"),
-                    "SIGNAL": ("#34d399", "#08241a")}
-    sc, sbg = stage_colors.get(stage, ("#5b6b85", "#10182b"))
-    stage_label = _STAGE_LABEL.get(stage, stage)
-    score = int(s.get("last_signal_score", 0))
-    pct = max(0, min(100, int(round(score / SCORE_MAX * 100))))
-    hb = state.get_tick_heartbeat()
-    total = hb.get("total_ticks_processed", 0)
-    last_t = hb.get("last_tick_time")
-    if last_t is not None:
-        age = time.time() - last_t
-        if age <= 35:
-            hb_html = f'<span style="color:#34d399;">●</span> live · {total:,} ticks'
-        elif age <= 90:
-            hb_html = f'<span style="color:#fbbf24;">●</span> {age:.0f}s ago · {total:,} ticks'
+    try:
+        s = state.get_strategy_state()
+        price = state.current_price
+        trend = s.get("trend_direction") or "—"
+        t_cls = "mm-up" if trend == "UP" else ("mm-down" if trend == "DOWN" else "mm-flat")
+        t_arrow = "▲" if trend == "UP" else ("▼" if trend == "DOWN" else "—")
+        tf_biases = s.get("mtf_tf_biases", {})
+        chips = []
+        for tf in ["5m", "15m", "30m", "1h"]:
+            if tf in tf_biases:
+                v = tf_biases[tf]
+                c = "#34d399" if v == "UP" else ("#fb7185" if v == "DOWN" else "#8294b0")
+                ic = "▲" if v == "UP" else ("▼" if v == "DOWN" else "·")
+                chips.append(f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>')
+        chips_html = f'<div class="mm-chips">{"".join(chips)}</div>' if chips else ""
+        stage = s.get("pattern_stage", "IDLE")
+        stage_colors = {"IDLE": ("#5b6b85", "#10182b"), "TREND": ("#a78bfa", "#1a1430"),
+                        "PULLBACK": ("#fbbf24", "#241c08"), "MOMENTUM": ("#3884ff", "#0c1730"),
+                        "SIGNAL": ("#34d399", "#08241a")}
+        sc, sbg = stage_colors.get(stage, ("#5b6b85", "#10182b"))
+        stage_label = _STAGE_LABEL.get(stage, stage)
+        score = int(s.get("last_signal_score", 0))
+        pct = max(0, min(100, int(round(score / SCORE_MAX * 100))))
+        hb = state.get_tick_heartbeat()
+        total = hb.get("total_ticks_processed", 0)
+        last_t = hb.get("last_tick_time")
+        if last_t is not None:
+            age = time.time() - last_t
+            if age <= 35:
+                hb_html = f'<span style="color:#34d399;">●</span> live · {total:,} ticks'
+            elif age <= 90:
+                hb_html = f'<span style="color:#fbbf24;">●</span> {age:.0f}s ago · {total:,} ticks'
+            else:
+                hb_html = f'<span style="color:#fb7185;">●</span> waiting · {age:.0f}s'
         else:
-            hb_html = f'<span style="color:#fb7185;">●</span> waiting · {age:.0f}s'
-    else:
-        hb_html = '<span style="color:#fb7185;">●</span> awaiting first tick'
-    st.markdown(
-        f"""
+            hb_html = '<span style="color:#fb7185;">●</span> awaiting first tick'
+        st.markdown(
+            f"""
 <div class="mm-rail">
   <div class="mm-rail__label">Price</div>
   <div class="mm-price">{price:.5f} <span class="mm-caret">▌</span></div>
@@ -591,71 +632,79 @@ def state_panel_fragment():
   <div class="mm-rail__label">Timeframes</div>
   {chips_html}
   <div class="mm-rail__label">Status</div>
-  <span class="mm-stage" style="color:{sc};background:{sbg};border:1px solid {sc}55;">{html.escape(stage_label)}</span>
+  <span class="mm-stage" style="color:{sc};background:{sbg};border:1px solid {sc}55;">{html.escape(str(stage_label))}</span>
   <div class="mm-rail__label">Setup score</div>
   <div style="font-family:'JetBrains Mono',monospace;font-weight:700;color:#eef3fb;">{score} / {SCORE_MAX}</div>
   <div class="mm-scorebar"><div class="mm-scorefill" style="width:{pct}%;"></div></div>
   <div class="mm-hb">{hb_html}</div>
 </div>
 """,
-        unsafe_allow_html=True)
+            unsafe_allow_html=True)
+    except Exception as _e:
+        _glitch("Status rail", _e)
 
 
 @st.fragment(run_every=10.0)
 def ledger_fragment():
-    st.markdown('<div class="mm-ledger-head">Trades</div>', unsafe_allow_html=True)
-    history = state.get_trade_history()
-    if not history:
-        st.markdown(
-            '<div style="color:#6b7c97;font-size:0.82rem;padding:18px 0;text-align:center;">'
-            "No trades yet. MomentumMaster only acts when the trend agrees for your contract length and a 15m candle confirms it.</div>",
-            unsafe_allow_html=True)
-        return
-    records = []
-    for t in history[:50]:
-        pnl_str = f"+{t.pnl:.2f}" if t.pnl > 0 else f"{t.pnl:.2f}" if t.pnl < 0 else "0.00"
-        records.append({"Time": t.timestamp, "Side": t.direction, "Stake": t.stake,
-                        "Entry": t.entry_price, "Result": t.status, "P&L": pnl_str,
-                        "Step": t.martingale_step})
-    df = pd.DataFrame(records)
+    try:
+        st.markdown('<div class="mm-ledger-head">Trades</div>', unsafe_allow_html=True)
+        history = state.get_trade_history()
+        if not history:
+            st.markdown(
+                '<div style="color:#6b7c97;font-size:0.82rem;padding:18px 0;text-align:center;">'
+                "No trades yet. MomentumMaster only acts when the trend agrees for your contract length and a 15m candle confirms it.</div>",
+                unsafe_allow_html=True)
+            return
+        records = []
+        for t in history[:50]:
+            pnl_str = f"+{t.pnl:.2f}" if t.pnl > 0 else f"{t.pnl:.2f}" if t.pnl < 0 else "0.00"
+            records.append({"Time": t.timestamp, "Side": t.direction, "Stake": t.stake,
+                            "Entry": t.entry_price, "Result": t.status, "P&L": pnl_str,
+                            "Step": t.martingale_step})
+        df = pd.DataFrame(records)
 
-    def st_status(v):
-        return {"WON": "color:#34d399;font-weight:700;", "LOST": "color:#fb7185;font-weight:700;",
-                "OPEN": "color:#fbbf24;font-weight:600;", "CANCELLED": "color:#6b7c97;"}.get(v, "")
+        def st_status(v):
+            return {"WON": "color:#34d399;font-weight:700;", "LOST": "color:#fb7185;font-weight:700;",
+                    "OPEN": "color:#fbbf24;font-weight:600;", "CANCELLED": "color:#6b7c97;"}.get(v, "")
 
-    def st_pnl(v):
-        try:
-            n = float(str(v).replace("+", ""))
-            return "color:#34d399;font-weight:700;" if n > 0 else ("color:#fb7185;font-weight:700;" if n < 0 else "")
-        except Exception:
-            return ""
+        def st_pnl(v):
+            try:
+                n = float(str(v).replace("+", ""))
+                return "color:#34d399;font-weight:700;" if n > 0 else ("color:#fb7185;font-weight:700;" if n < 0 else "")
+            except Exception:
+                return ""
 
-    def st_dir(v):
-        return "color:#34d399;" if v == "BUY" else ("color:#fb7185;" if v == "SELL" else "")
+        def st_dir(v):
+            return "color:#34d399;" if v == "BUY" else ("color:#fb7185;" if v == "SELL" else "")
 
-    styled = df.style.map(st_status, subset=["Result"]).map(st_pnl, subset=["P&L"]).map(st_dir, subset=["Side"])
-    st.dataframe(styled, width="stretch", height=320, hide_index=True)
+        styled = df.style.map(st_status, subset=["Result"]).map(st_pnl, subset=["P&L"]).map(st_dir, subset=["Side"])
+        st.dataframe(styled, width="stretch", height=320, hide_index=True)
+    except Exception as _e:
+        _glitch("Trades ledger", _e)
 
 
 @st.fragment(run_every=15.0)
 def journal_fragment():
-    journal = get_journal()
-    st.markdown('<div class="mm-ledger-head">Decision log · every 15-minute review</div>', unsafe_allow_html=True)
-    csv_bytes = journal.to_csv_bytes()
-    if csv_bytes:
-        st.download_button(
-            "Download decision log (CSV)",
-            data=csv_bytes, file_name="momentummaster_journal.csv", mime="text/csv",
-            width="stretch")
-    rows = journal.read_rows()
-    if not rows:
-        st.caption("Every 15-minute review is recorded here — whether it traded or stood aside — along with the result and the reason.")
-        return
-    df = pd.DataFrame(rows).tail(40).iloc[::-1]
-    cols = ["timestamp_utc", "symbol", "direction", "trend", "taken", "score", "threshold",
-            "rejection_reason", "note", "outcome", "pnl"]
-    cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols], width="stretch", height=300, hide_index=True)
+    try:
+        journal = get_journal()
+        st.markdown('<div class="mm-ledger-head">Decision log · every 15-minute review</div>', unsafe_allow_html=True)
+        csv_bytes = journal.to_csv_bytes()
+        if csv_bytes:
+            st.download_button(
+                "Download decision log (CSV)",
+                data=csv_bytes, file_name="momentummaster_journal.csv", mime="text/csv",
+                width="stretch")
+        rows = journal.read_rows()
+        if not rows:
+            st.caption("Every 15-minute review is recorded here — whether it traded or stood aside — along with the result and the reason.")
+            return
+        df = pd.DataFrame(rows).tail(40).iloc[::-1]
+        cols = ["timestamp_utc", "symbol", "direction", "trend", "taken", "score", "threshold",
+                "rejection_reason", "note", "outcome", "pnl"]
+        cols = [c for c in cols if c in df.columns]
+        st.dataframe(df[cols], width="stretch", height=300, hide_index=True)
+    except Exception as _e:
+        _glitch("Decision log", _e)
 
 
 # ---------------------------------------------------------------------------
