@@ -4,6 +4,9 @@ The engine runs in a background asyncio thread, independent of the UI. A
 watchdog relaunches it if it dies while you intend it to run (resuming the
 stake plan, results, and daily cap). The Decision Log records every 15-minute
 review plus the result and reason of every setup, and offers a CSV export.
+When several markets run at once (one per tab), their reviews share one log
+file; the preview table below shows the Market column so the combined stream
+stays legible.
 """
 import asyncio
 import html
@@ -640,7 +643,7 @@ def ledger_fragment():
 @st.fragment(run_every=15.0)
 def journal_fragment():
     journal = get_journal()
-    st.markdown('<div class="mm-ledger-head">Decision log · every 15-minute review</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mm-ledger-head">Decision log · every 15-minute review (all running markets)</div>', unsafe_allow_html=True)
     csv_bytes = journal.to_csv_bytes()
     if csv_bytes:
         st.download_button(
@@ -649,10 +652,14 @@ def journal_fragment():
             width="stretch")
     rows = journal.read_rows()
     if not rows:
-        st.caption("Every 15-minute review is recorded here — whether it traded or stood aside — along with the result and the reason.")
+        st.caption("Every 15-minute review is recorded here — whether it traded or stood aside — along with the market, the result and the reason.")
         return
     df = pd.DataFrame(rows).tail(40).iloc[::-1]
-    cols = ["timestamp_utc", "direction", "trend", "taken", "score", "threshold",
+    # `symbol` is shown so that, when several markets run at once and share this
+    # log, you can see at a glance which market each row belongs to. Near-identical
+    # timestamps on opposite directions are simply two markets reviewing the same
+    # clock-aligned 15m candle close — not one market double-firing.
+    cols = ["timestamp_utc", "symbol", "direction", "trend", "taken", "score", "threshold",
             "rejection_reason", "note", "outcome", "pnl"]
     cols = [c for c in cols if c in df.columns]
     st.dataframe(df[cols], width="stretch", height=300, hide_index=True)
