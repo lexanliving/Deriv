@@ -1,29 +1,32 @@
 """
-bubbles.py — MomentumMaster TF · Performance Scope (READ-ONLY, crash-proof)
-A crypto-bubble-map style view of your REAL recorded trades. It reads the
-append-only journal archive (logs/journal_archive.csv), so a day's data never
-disappears even if the live trade_journal.csv is cleared. No filters, no
-toggles, no uploader — it shows the full history since the bot started.
-
-SIZE = stake (volume) · COLOUR = net P&L (red -> green) · HOVER = full record.
-No connection to the live engine; reads only via the journal module.
-Run standalone:  streamlit run bubbles.py   (or drop into a pages/ folder)
+Performance Scope — a read-only bubble map of your real recorded trades.
+It reads the append-only journal archive, so a cleared live log never erases a
+day from this view. Switch back to the Terminal with the button below or via
+the sidebar.
 """
 import math
 import os
 import random
+import sys
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+# Locate src/ whether this file lives in pages/ or at the project root.
+_here = os.path.dirname(os.path.abspath(__file__))
+for _c in (_here, os.path.dirname(_here)):
+    if os.path.isdir(os.path.join(_c, "src")) and _c not in sys.path:
+        sys.path.insert(0, _c)
+        break
+
 from src.journal import get_journal, COLUMNS
 
 GREEN, RED, NEUTRAL = (52, 211, 153), (251, 113, 133), (58, 74, 102)
 PER_TRADE_CAP = 90
 
-st.set_page_config(page_title="Performance Scope", page_icon="◎", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Performance Scope", page_icon="◎", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown(
     """
@@ -36,21 +39,24 @@ html,body,.stApp{background-color:#060912;color:#c7d2e0;font-family:'IBM Plex Sa
     radial-gradient(820px 440px at 100% 110%, rgba(56,132,255,0.09), transparent 60%),
     radial-gradient(rgba(120,150,190,0.05) 1px, transparent 1px);
   background-size:auto,auto,22px 22px;background-attachment:fixed;}
-[data-testid="stMainBlockContainer"]{max-width:1480px;padding-top:1.2rem;}
-[data-testid="stSidebar"]{display:none;}
-.ps-head{display:flex;align-items:flex-end;justify-content:space-between;padding:4px 2px 14px 2px;position:relative;}
+[data-testid="stMainBlockContainer"]{max-width:1480px;padding-top:1.1rem;}
+[data-testid="stSidebar"]{background-color:#0a0f1c;border-right:1px solid #1b2740;}
+[data-testid="stSidebarNav"]{padding-top:6px;margin-bottom:6px;}
+[data-testid="stSidebarNav"] li button,[data-testid="stSidebarNav"] a{font-family:'Space Grotesk',sans-serif;letter-spacing:.04em;}
+.ps-head{display:flex;align-items:flex-end;justify-content:space-between;padding:4px 2px 12px 2px;position:relative;}
 .ps-head::after{content:" ";position:absolute;left:0;right:0;bottom:0;height:2px;
   background:linear-gradient(90deg,#10b981,#3884ff 45%,transparent 92%);background-size:220% 100%;
   animation:ps-scan 6s linear infinite;border-radius:2px;}
 @keyframes ps-scan{0%{background-position:120% 0;}100%{background-position:-120% 0;}}
 .ps-logo{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.3rem;letter-spacing:.18em;color:#eef3fb;text-transform:uppercase;}
 .ps-logo .d{color:#10b981;}
-.ps-sub{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#6b7c97;letter-spacing:.04em;margin-top:3px;}
+.ps-eyebrow{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;letter-spacing:.22em;color:#4f6080;text-transform:uppercase;margin-top:5px;}
+.ps-sub{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:#8294b0;letter-spacing:.03em;margin-top:2px;}
 .ps-tag{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#6b7c97;text-align:right;}
 .ps-tag b{color:#34d399;}
 .ps-readonly{font-family:'JetBrains Mono',monospace;font-size:.66rem;color:#6b7c97;margin:2px 2px 0 2px;}
 .ps-readonly .lock{color:#fbbf24;}
-.ps-kpi{display:grid;grid-template-columns:1.7fr 1fr 1fr 1fr 1fr;gap:13px;margin:16px 0 6px 0;}
+.ps-kpi{display:grid;grid-template-columns:1.7fr 1fr 1fr 1fr 1fr;gap:13px;margin:14px 0 6px 0;}
 @media(max-width:1000px){.ps-kpi{grid-template-columns:1fr 1fr;}}
 .ps-card{position:relative;background:linear-gradient(150deg,#0c1426,#0e1830);border:1px solid #1d2c49;
   border-radius:11px;padding:14px 16px;overflow:hidden;transition:transform .16s,border-color .16s,box-shadow .16s;}
@@ -65,7 +71,7 @@ html,body,.stApp{background-color:#060912;color:#c7d2e0;font-family:'IBM Plex Sa
 .ps-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:7px;
   animation:ps-p 2.2s ease-in-out infinite;vertical-align:middle;}
 @keyframes ps-p{0%,100%{box-shadow:0 0 4px rgba(16,185,129,.5);}50%{box-shadow:0 0 14px rgba(16,185,129,.95);}}
-.ps-scope{position:relative;margin:18px 0 6px 0;border:1px solid #1d2c49;border-radius:14px;
+.ps-scope{position:relative;margin:16px 0 6px 0;border:1px solid #1d2c49;border-radius:14px;
   background:radial-gradient(120% 120% at 50% 0%, #0b1426 0%, #070b16 70%);padding:10px;overflow-x:auto;overflow-y:hidden;}
 .ps-scope::before{content:" ";position:absolute;inset:0;border-radius:14px;pointer-events:none;
   box-shadow:inset 0 0 60px rgba(56,132,255,.06);animation:ps-breathe 7s ease-in-out infinite;}
@@ -90,8 +96,14 @@ html,body,.stApp{background-color:#060912;color:#c7d2e0;font-family:'IBM Plex Sa
     unsafe_allow_html=True,
 )
 
+# Explicit, same-session way back to the Terminal (sidebar nav also works).
+try:
+    st.page_link("dashboard.py", label="←  Back to Terminal", use_container_width=False)
+except Exception:
+    st.caption("← Open the Terminal from the sidebar.")
+
 # ---------------------------------------------------------------------------
-# Data — read the crash-proof archive (full history), merged decision+outcome
+# Data — crash-proof archive, full history, decision + outcome merged
 # ---------------------------------------------------------------------------
 def _coerce(rows) -> pd.DataFrame:
     if not rows:
@@ -109,11 +121,11 @@ def _coerce(rows) -> pd.DataFrame:
 df = _coerce(get_journal().read_archive_merged())
 
 settled = df[df["outcome"].isin(["WON", "LOST"])].copy()
+reviewed_n = len(df)
 taken_n = int((df["taken"].astype(str) == "TRUE").sum()) if len(df) else 0
-rejected_n = int((df["taken"].astype(str) == "FALSE").sum()) if len(df) else 0
-executed_n = int(df["outcome"].isin(["WON", "LOST"]).sum()) if len(df) else 0
-cancelled_n = int((df["outcome"].astype(str) == "CANCELLED").sum()) if len(df) else 0
-skipped_n = int((df["outcome"].astype(str) == "SKIPPED").sum()) if len(df) else 0
+executed_n = len(settled)
+won_n = int((settled["outcome"] == "WON").sum())
+lost_n = int((settled["outcome"] == "LOST").sum())
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -204,21 +216,22 @@ def render_scope(labels, sizes_val, pnl_arr, hover_rows, hover_tpl, title, r_max
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Header (static, read-only) — full execution funnel
+# Header
 # ---------------------------------------------------------------------------
 st.markdown(
     f"""<div class="ps-head">
   <div><div class="ps-logo">Performance <span class="d">◎</span> Scope</div>
-  <div class="ps-sub">REAL TRADE JOURNAL · FULL HISTORY · {len(settled)} SETTLED TRADES</div></div>
-  <div class="ps-tag">taken <b>{taken_n}</b> · executed {executed_n} · cancelled {cancelled_n}<br>
-  skipped {skipped_n} · strategy-rejected {rejected_n}</div>
+  <div class="ps-eyebrow">Your real results, visualised</div>
+  <div class="ps-sub">{len(settled)} closed trades on record</div></div>
+  <div class="ps-tag">reviewed <b>{reviewed_n}</b> · setups {taken_n} · traded {executed_n}<br>
+  won {won_n} · lost {lost_n}</div>
 </div>
-<div class="ps-readonly"><span class="lock">🔒</span> READ-ONLY · reads the append-only archive · survives a cleared CSV · nothing here is editable</div>""",
+<div class="ps-readonly"><span class="lock">🔒</span> Read-only record · built from your saved history · clearing the live log won't erase past days</div>""",
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="ps-legend"><span>SIZE = stake (volume)</span>'
-            '<span>COLOUR = net P&L</span>'
+st.markdown('<div class="ps-legend"><span>SIZE = stake</span>'
+            '<span>COLOUR = result</span>'
             '<span style="display:flex;align-items:center;gap:7px;">loss<span class="ps-grad"></span>profit</span>'
             '<span>hover any bubble for the full record</span></div>', unsafe_allow_html=True)
 
@@ -226,13 +239,13 @@ st.markdown('<div class="ps-legend"><span>SIZE = stake (volume)</span>'
 # Empty state
 # ---------------------------------------------------------------------------
 if len(settled) == 0:
-    st.markdown('<div class="ps-empty">No settled trades recorded yet. The scope lights up the moment your first '
-                'trade closes — until then the journal is recording every 15m decision in the dashboard.</div>',
+    st.markdown('<div class="ps-empty">No closed trades yet — the scope fills in as soon as your first trade settles. '
+                'Until then, every 15-minute review is saved in the Terminal’s Decision Log.</div>',
                 unsafe_allow_html=True)
     st.stop()
 
 # ---------------------------------------------------------------------------
-# 1) Per-trade bubbles (most recent settled)
+# Per-trade bubbles
 # ---------------------------------------------------------------------------
 pt = settled.sort_values("ts").tail(PER_TRADE_CAP).reset_index(drop=True)
 pt_labels = [r.direction for _, r in pt.iterrows()]
@@ -242,12 +255,12 @@ pt_hover = [[r["ts"].strftime("%m-%d %H:%M") if pd.notna(r["ts"]) else "-",
             for _, r in pt.iterrows()]
 pt_tpl = ("⏵ %{customdata[0]}<br>%{customdata[1]} · %{customdata[2]}"
           "<br>score %{customdata[3]} · stake %{customdata[4]}"
-          "<br>P&L <b>%{customdata[5]}</b> · step %{customdata[6]}<extra></extra>")
+          "<br>result <b>%{customdata[5]}</b> · step %{customdata[6]}<extra></extra>")
 render_scope(pt_labels, pt["stake"].values, pt["pnl"].values, pt_hover, pt_tpl,
-             f"PER-TRADE · last {len(pt)} settled · sized by volume")
+             f"Per trade · most recent {len(pt)} · sized by stake")
 
 # ---------------------------------------------------------------------------
-# 2) Daily / Monthly / By-market bubbles (aggregated)
+# Aggregated bubbles
 # ---------------------------------------------------------------------------
 def _agg(key_series):
     g = settled.copy(); g["key"] = key_series
@@ -262,16 +275,16 @@ def _agg_render(a, title):
     hover = [[str(r["key"]), int(r["trades"]), int(r["wins"]), f"{r['wr']:.0f}",
               f"{r['stake']:.2f}", f"{r['pnl']:+.2f}"] for _, r in a.iterrows()]
     tpl = ("%{customdata[0]}<br>trades %{customdata[1]} · wins %{customdata[2]}"
-           "<br>win rate %{customdata[3]}% · volume %{customdata[4]}"
-           "<br>net P&L <b>%{customdata[5]}</b><extra></extra>")
+           "<br>win rate %{customdata[3]}% · stake %{customdata[4]}"
+           "<br>net result <b>%{customdata[5]}</b><extra></extra>")
     render_scope(labels, a["stake"].values, a["pnl"].values, hover, tpl, title)
 
-_agg_render(_agg(settled["ts"].dt.strftime("%m-%d")), "DAILY · sized by volume")
-_agg_render(_agg(settled["ts"].dt.strftime("%Y-%m")), "MONTHLY · sized by volume")
-_agg_render(_agg(settled["symbol"].map(short_sym)), "BY MARKET · sized by volume")
+_agg_render(_agg(settled["ts"].dt.strftime("%m-%d")), "By day · sized by stake")
+_agg_render(_agg(settled["ts"].dt.strftime("%Y-%m")), "By month · sized by stake")
+_agg_render(_agg(settled["symbol"].map(short_sym)), "By market · sized by stake")
 
 # ---------------------------------------------------------------------------
-# KPI baseline strip (full history)
+# KPI strip
 # ---------------------------------------------------------------------------
 n = len(settled); wins = int((settled["outcome"] == "WON").sum()); losses = n - wins
 net = float(settled["pnl"].sum()); wr = wins / n * 100 if n else 0.0
@@ -291,15 +304,15 @@ def _c(v, good=True):
 net_c = "#34d399" if net > 0 else "#fb7185" if net < 0 else "#eef3fb"
 st.markdown(
     f"""<div class="ps-kpi">
- <div class="ps-card hero" style="--a:{net_c};--c:{net_c};"><div class="l"><span class="ps-pulse"></span>NET P&L</div>
-   <div class="v">{net:+.2f}</div><div class="s">{n} settled · all-time</div></div>
- <div class="ps-card" style="--a:{_c(expect)};--c:{_c(expect)};"><div class="l">EXPECTANCY</div>
-   <div class="v">{expect:+.2f}</div><div class="s">edge / trade</div></div>
- <div class="ps-card" style="--a:{'#34d399' if wr>=55 else '#fb7185' if wr<45 else '#3884ff'};"><div class="l">WIN RATE</div>
-   <div class="v">{wr:.1f}%</div><div class="s">{wins}W / {losses}L</div></div>
- <div class="ps-card" style="--a:#3884ff;--c:#eef3fb;"><div class="l">PROFIT FACTOR</div>
-   <div class="v">{pf:.2f}</div><div class="s">avgW {avg_w:.2f} · avgL {avg_l:.2f}</div></div>
- <div class="ps-card" style="--a:#a78bfa;--c:#eef3fb;"><div class="l">BEST / WORST DAY</div>
+ <div class="ps-card hero" style="--a:{net_c};--c:{net_c};"><div class="l"><span class="ps-pulse"></span>Net result</div>
+   <div class="v">{net:+.2f}</div><div class="s">{n} closed trades</div></div>
+ <div class="ps-card" style="--a:{_c(expect)};--c:{_c(expect)};"><div class="l">Edge / trade</div>
+   <div class="v">{expect:+.2f}</div><div class="s">expected value</div></div>
+ <div class="ps-card" style="--a:{'#34d399' if wr>=55 else '#fb7185' if wr<45 else '#3884ff'};"><div class="l">Win rate</div>
+   <div class="v">{wr:.1f}%</div><div class="s">{wins}W · {losses}L</div></div>
+ <div class="ps-card" style="--a:#3884ff;--c:#eef3fb;"><div class="l">Profit factor</div>
+   <div class="v">{pf:.2f}</div><div class="s">avg win {avg_w:.2f} · avg loss {avg_l:.2f}</div></div>
+ <div class="ps-card" style="--a:#a78bfa;--c:#eef3fb;"><div class="l">Best / worst day</div>
    <div class="v" style="font-size:1.1rem;">{('+' if day_pnl.get(best_d,0)>=0 else '')+f'{day_pnl.get(best_d,0):.2f}' if best_d else '-'}<br>
    <span style="color:#fb7185;">{f'{day_pnl.get(worst_d,0):.2f}' if worst_d else '-'}</span></div>
    <div class="s">{best_d} · {worst_d}</div></div>
@@ -308,7 +321,7 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Equity baseline: daily curve + monthly bars
+# Equity baseline
 # ---------------------------------------------------------------------------
 st.markdown('<div class="ps-h">Equity baseline</div>', unsafe_allow_html=True)
 eq = settled.sort_values("ts").copy(); eq["cum"] = eq["pnl"].cumsum(); eq["d"] = eq["ts"].dt.date
@@ -337,14 +350,14 @@ f2.update_layout(**{**PLOTLY_LAYOUT,
 
 c1, c2 = st.columns(2, gap="medium")
 with c1:
-    st.caption("Cumulative P&L by day")
+    st.caption("Cumulative result by day")
     st.plotly_chart(f1, width="stretch", config={"displayModeBar": False})
 with c2:
-    st.caption("P&L by month")
+    st.caption("Result by month")
     st.plotly_chart(f2, width="stretch", config={"displayModeBar": False})
 
 # ---------------------------------------------------------------------------
-# Rollup tables (display-only)
+# Rollups
 # ---------------------------------------------------------------------------
 st.markdown('<div class="ps-h">Rollups</div>', unsafe_allow_html=True)
 d_tbl = daily.groupby("d").agg(trades=("pnl", "size"), wins=("outcome", lambda s: (s == "WON").sum()),
@@ -364,12 +377,12 @@ def _pnl_style(v):
 
 t1, t2 = st.columns(2, gap="medium")
 with t1:
-    st.caption("Daily ledger")
+    st.caption("By day")
     st.dataframe(d_tbl.rename(columns={"d": "day", "stake": "volume"})[["day", "trades", "wins", "wr%", "pnl", "volume"]]
                  .style.map(_pnl_style, subset=["pnl"]).format({"pnl": "{:+.2f}", "volume": "{:.2f}"}),
                  width="stretch", height=260, hide_index=True)
 with t2:
-    st.caption("Monthly ledger")
+    st.caption("By month")
     st.dataframe(m_tbl[["month", "trades", "wins", "wr%", "pnl"]].reset_index(drop=True)
                  .style.map(_pnl_style, subset=["pnl"]).format({"pnl": "{:+.2f}"}),
                  width="stretch", height=260, hide_index=True)
