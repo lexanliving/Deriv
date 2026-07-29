@@ -1,5 +1,0 @@
-streamlit>=1.37.0
-plotly>=5.22.0
-pandas>=2.1.0
-websockets>=14.0,<16.0
-python-dotenv>=1.0.0
