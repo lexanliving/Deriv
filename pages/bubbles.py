@@ -1,8 +1,8 @@
 """
 Performance Scope — a read-only bubble map of your real recorded trades.
 It reads the append-only journal archive, so a cleared live log never erases a
-day from this view. Switch back to the Terminal with the button below or via
-the sidebar.
+past day from this view. Switch back to the Terminal with the button below or
+via the sidebar.
 """
 import math
 import os
