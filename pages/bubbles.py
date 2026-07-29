@@ -1,9 +1,4 @@
-import os as _os, sys as _sys
-_here = _os.path.dirname(_os.path.abspath(__file__))
-for _c in (_here, _os.path.dirname(_here)):
-    if _os.path.isdir(_os.path.join(_c, "src")) and _c not in _sys.path:
-        _sys.path.insert(0, _c)
-        break"""
+"""
 bubbles.py — MomentumMaster TF · Performance Scope (READ-ONLY, crash-proof)
 A crypto-bubble-map style view of your REAL recorded trades. It reads the
 append-only journal archive (logs/journal_archive.csv), so a day's data never
