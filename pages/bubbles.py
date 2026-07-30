@@ -172,7 +172,7 @@ COMP_NAMES = [c[0] for c in COMP]
 COMP_MAX = {c[0]: c[1] for c in COMP}
 PALETTE = ["#3884ff", "#f59e0b", "#22c55e", "#a855f7", "#06b6d4", "#ef4444", "#84cc16", "#ec4899"]
 PERIODS = ["All time", "This month", "Last 30 days", "Last 90 days", "This year"]
-ENTRY_TF_BY_DURATION = {5: "5m", 15: "5m", 30: "15m", 60: "15m"}
+ENTRY_TF_BY_DURATION = {1: "1m", 2: "1m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
 
 
 def _g(d, k):
