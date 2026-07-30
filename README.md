@@ -3,23 +3,36 @@
 A multi-market trend terminal for Deriv with a full read-only trading-journal
 cockpit (the Performance Scope). It trades Up / Down as Call / Put on a
 selectable market — Gold by default, plus major forex pairs and the synthetic
-1-second indices — using a higher-timeframe trend strategy: a candle-close
-trigger confirmed by 30m + 1h agreement, scored across several independent
-factors with adaptive, duration-aware quality gates. No barriers. Minute
-lengths (5 / 15 / 30 / 60). At most 10 trades per day, per tab.
+1-second indices — using a higher-timeframe trend strategy: a duration-aware
+candle-close trigger confirmed by 30m + 1h agreement, scored across several
+independent factors with adaptive quality gates and an express lane for
+overwhelming candles. No barriers. Minute lengths 1 / 2 / 5 / 15 / 30 / 60.
+At most 10 trades per day, per tab.
 
 ## Duration-aware trigger
 
 The trigger candle matches the contract length so timing stays sharp at every
 duration, while the higher-timeframe confirmation is unchanged:
 
-- 5m  contract → 5m  candle-close trigger
-- 15m contract → 5m  candle-close trigger
-- 30m contract → 15m candle-close trigger (original edge)
-- 60m contract → 15m candle-close trigger
+- 1m  contract -> 1m  candle-close trigger (scalp)
+- 2m  contract -> 1m  candle-close trigger (scalp)
+- 5m  contract -> 5m  candle-close trigger
+- 15m contract -> 5m  candle-close trigger
+- 30m contract -> 15m candle-close trigger (original edge)
+- 60m contract -> 15m candle-close trigger
 
 Trend confirmation is always 30m + 1h. Signals still fire only on a new
 trigger-candle close.
+
+## Hard gates vs. confidence stack
+
+The flat 25-point score answers "how good is this setup"; a separate hard-gate
+layer answers "is this setup even allowed". Hard gates (trend agreement,
+trigger break, close beyond the fast EMA, the express-aware exhaustion limit,
+RSI/price divergence, entry-timeframe structure, plus the regime gates) cannot
+be overridden by a high score. The express lane widens the exhaustion band only
+when the candle's own conviction is overwhelming, so a power breakout that is
+far from its EMA is taken instead of chased-and-rejected.
 
 ## Two views
 
