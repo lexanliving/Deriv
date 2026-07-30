@@ -43,19 +43,23 @@ DEFAULT_MARKET_DISPLAY = "Gold (XAU/USD)"
 SYMBOL = AVAILABLE_MARKETS[DEFAULT_MARKET_DISPLAY]
 SYMBOL_DISPLAY = DEFAULT_MARKET_DISPLAY
 
-# 1m added so 1m/2m scalps get a trigger candle shorter than the hold.
+# 1m and 2m contracts now use the same 5m trigger logic as 5m contracts.
 CANDLE_GRANULARITIES = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 CANDLE_LOOKBACK = 80
 CANDLE_REFRESH_SECONDS = 30
 
 ENTRY_TIMEFRAME = "15m"
 DEFAULT_ENTRY_TIMEFRAME = "15m"
-# Duration-aware trigger candle. 1m/2m scalps use a 1m trigger (a 5m trigger
-# would outlive the trade); 5m/15m use 5m; 30m/60m keep the original 15m.
-ENTRY_TIMEFRAME_BY_DURATION = {1: "1m", 2: "1m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
+
+# Duration-aware trigger candle:
+# 1m and 2m contracts now use the 5m trigger (same logic as 5m contracts).
+# 5m/15m use 5m.
+# 30m/60m use 15m.
+ENTRY_TIMEFRAME_BY_DURATION = {1: "5m", 2: "5m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
 
 TREND_TIMEFRAMES = ["30m", "1h"]
 MAX_TRADES_PER_DAY = 10
+
 ENTRY_SCORE_THRESHOLD = 20
 MTF_MIN_AGREEMENT = 2
 SCORE_MAX = 25
@@ -73,6 +77,7 @@ REGIME_VOL_BAND = {
     "MEDIUM": (0.00008, 0.06),
     "LONG": (0.00006, 0.08),
 }
+
 REGIME_EXHAUSTION_ATR = {"SHORT": 3.25, "MEDIUM": 2.75, "LONG": 2.25}
 REGIME_TRIGGER_BODY_MIN = 0.35
 REGIME_SHORT_5M_ADX_FLOOR = 15
@@ -89,6 +94,7 @@ STRATEGY_SENSITIVITY_PRESETS = {
     "Balanced": {"entry_score_threshold": 16, "entry_adx_floor": 15},
     "Aggressive": {"entry_score_threshold": 13, "entry_adx_floor": 12},
 }
+
 DEFAULT_STRATEGY_SENSITIVITY = "Conservative"
 
 MARTINGALE_MULTIPLIER = 2.5
