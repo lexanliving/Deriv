@@ -1,12 +1,22 @@
 """src/strategy.py — MomentumMaster TF confluence engine.
 
-Duration-aware trigger timeframes (the only behavioural change vs the original):
-    5m  contract -> 5m  candle-close trigger
-    15m contract -> 5m  candle-close trigger
-    30m contract -> 15m candle-close trigger   (original edge, untouched)
-    60m contract -> 15m candle-close trigger
-Higher-timeframe confirmation (30m + 1h) and every gate are unchanged.
-Signals still fire only on a new trigger-candle close. Journal behaviour unchanged.
+Duration-aware trigger candles (5m/15m -> 5m, 30m/60m -> 15m, 1m/2m -> 1m).
+Higher-timeframe confirmation (30m + 1h) and the 25-point score are unchanged.
+
+Intelligence layer added on top of the flat score:
+  * HARD GATES (must pass, score cannot override): trend agreement, trigger
+    break, close beyond fast EMA, the express-aware exhaustion limit, RSI/price
+    divergence, entry-timeframe structure >= 1, plus the regime gates.
+  * EXPRESS LANE: the candle's own power (body + close position + ADX + MACD
+    acceleration + pattern = a 13-pt core) is measured before the exhaustion
+    gate; an overwhelming candle widens the exhaustion band because a power
+    breakout being far from its EMA is expected, not exhaustion. A weak candle
+    far from the EMA is still rejected. So "how far is too far" now reads the
+    candle's conviction instead of a fixed number.
+  * 1m SCALPS: the noisy 1m ADX is not used as a hard floor (trend strength is
+    already proven by the mandatory 5m-alignment gate); it still scores.
+Candle-close confirmation is preserved (no live-tick entry). Journal columns
+and write behaviour are unchanged.
 """
 import time
 import uuid
@@ -33,6 +43,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _delay_for(granularity: int) -> float:
+    # Faster confirmation on fine granularities so scalps are not late. The
+    # candle value is already final by these delays; only the wait shrinks.
+    if granularity <= 60:
+        return 6.0
+    if granularity <= 300:
+        return 12.0
+    return 30.0
 
 
 def _closed_candles(candles, granularity, now, delay_seconds=30.0):
@@ -344,6 +364,7 @@ class StrategyEngine:
         self._last_consumed_signal_id: Optional[str] = None
         self._last_rejection: Optional[str] = None
         self._last_evaluation: Optional[Dict[str, Any]] = None
+        self._last_express_bonus: float = 0.0
         self._current_price = 0.0
         self._trades_in_trend = 0
         self._in_cooldown = False
@@ -360,6 +381,10 @@ class StrategyEngine:
     @property
     def state_version(self) -> int:
         return self._state_version
+
+    @property
+    def express_bonus(self) -> float:
+        return self._last_express_bonus
 
     def process_tick(self, price: float) -> Optional[str]:
         if price > 0:
@@ -441,6 +466,7 @@ class StrategyEngine:
         self._last_consumed_signal_id = None
         self._last_rejection = None
         self._last_evaluation = None
+        self._last_express_bonus = 0.0
         self._current_price = 0.0
         self._trades_in_trend = 0
         self._in_cooldown = False
@@ -454,7 +480,7 @@ class StrategyEngine:
         entry_had_new = False
         for tf, tracker in self._trackers.items():
             raw = candles_by_tf.get(tf) or []
-            closed = _closed_candles(raw, tracker.granularity, now)
+            closed = _closed_candles(raw, tracker.granularity, now, _delay_for(tracker.granularity))
             if tracker.absorb(closed):
                 any_new = True
                 if tf == self._entry_tf:
@@ -550,6 +576,8 @@ class StrategyEngine:
         self._last_signal_score = 0
         self._last_signal_score_breakdown = {}
         self._last_rejection = None
+        self._last_express_bonus = 0.0
+        # HARD GATE 1: higher-timeframe trend must agree for this contract length.
         if self._trend_direction not in ("UP", "DOWN"):
             self._pattern_stage = "IDLE"
             self._last_rejection = "no trend agreement for this contract length"
@@ -574,7 +602,10 @@ class StrategyEngine:
         if separation < 0.30 * atr:
             self._reject("EMAs too flat - no trend strength")
             return
-        if tracker.adx < self._entry_adx_floor:
+        # On a 1m scalp the 1m ADX is too noisy to gate on; trend strength there
+        # is proven by the mandatory 5m-alignment gate below. The 1m ADX still
+        # scores. Every other duration keeps its ADX hard floor.
+        if self._entry_tf != "1m" and tracker.adx < self._entry_adx_floor:
             self._reject(f"entry-tf ADX {tracker.adx:.1f} below {self._entry_adx_floor} - {self._entry_tf} is choppy")
             return
         atr_ratio = atr / close if close > 0 else 0.0
@@ -589,24 +620,59 @@ class StrategyEngine:
         if signal == "BUY":
             trigger = close > _safe_float(prev.get("high")) and close > metrics["open"]
             ema_ok = close > tracker.ema_fast
-            exhausted = close > tracker.ema_fast + exhaustion_mult * atr
             directional_close_position = metrics["close_position"]
         else:
             trigger = close < _safe_float(prev.get("low")) and close < metrics["open"]
             ema_ok = close < tracker.ema_fast
-            exhausted = close < tracker.ema_fast - exhaustion_mult * atr
             directional_close_position = 1.0 - metrics["close_position"]
+        # --- Core conviction: the candle's own power, measured BEFORE the
+        # exhaustion gate so an overwhelming candle can earn the express lane. ---
+        trigger_score = 3 if body_ratio >= 0.65 else 2 if body_ratio >= 0.50 else 1 if body_ratio >= 0.35 else 0
+        momentum_score = (3 if directional_close_position >= 0.72
+                          else 2 if directional_close_position >= 0.60
+                          else 1 if directional_close_position >= 0.50 else 0)
+        adx_score = 3 if tracker.adx >= 35 else 2 if tracker.adx >= 25 else 1
+        macd_aligned = tracker.macd_hist > 0 if signal == "BUY" else tracker.macd_hist < 0
+        macd_trail = list(tracker.macd_hist_trail)
+        macd_rising = len(macd_trail) >= 2 and (
+            macd_trail[-1] > macd_trail[-2] if signal == "BUY" else macd_trail[-1] < macd_trail[-2])
+        macd_score = 2 if (macd_aligned and macd_rising) else 1 if macd_aligned else 0
+        pattern_score = _candlestick_pattern_score(candle, prev, signal)
+        core_strength = trigger_score + momentum_score + adx_score + macd_score + pattern_score
+        if core_strength >= 9:
+            express_bonus = 1.0
+        elif core_strength >= 7:
+            express_bonus = 0.5
+        else:
+            express_bonus = 0.0
+        self._last_express_bonus = express_bonus
+        relaxed_mult = exhaustion_mult + express_bonus
+        if signal == "BUY":
+            exhausted = close > tracker.ema_fast + relaxed_mult * atr
+        else:
+            exhausted = close < tracker.ema_fast - relaxed_mult * atr
+        # HARD GATE 2: a real breakout of the prior candle.
         if not trigger:
             self._reject("no trigger break of prior candle")
             return
+        # HARD GATE 3: price must be beyond the fast EMA.
         if not ema_ok:
             self._reject("close not beyond fast EMA")
             return
+        # HARD GATE 4: exhaustion — widened only when the candle is powerful.
         if exhausted:
-            self._reject("move exhausted - too far from EMA")
+            tag = f" · express +{express_bonus:.1f}" if express_bonus else ""
+            self._reject(f"move exhausted - too far from EMA (>{relaxed_mult:.2f} ATR{tag})")
             return
+        # HARD GATE 5: no divergence against the trade.
         if tracker.divergence_against(signal):
             self._reject("RSI/price divergence against trade direction - momentum fading")
+            return
+        # HARD GATE 6: entry-timeframe structure must exist (the score can no
+        # longer launder a broken structure).
+        structure_score = tracker.structure_score(signal)
+        if structure_score < 1:
+            self._reject("entry-tf market structure broken - no swing respect (hard gate)")
             return
         if self._regime == "SHORT":
             if body_ratio < REGIME_TRIGGER_BODY_MIN:
@@ -633,26 +699,15 @@ class StrategyEngine:
             if not h_macd_aligned:
                 self._reject("1h MACD not aligned with the trade (required for contracts >=60m)")
                 return
+        # --- Confidence stack (the 25). Reuses the core components above. ---
         trend_score = 5
-        trigger_score = 3 if body_ratio >= 0.65 else (2 if body_ratio >= 0.50 else (1 if body_ratio >= 0.35 else 0))
-        momentum_score = (3 if directional_close_position >= 0.72
-                          else 2 if directional_close_position >= 0.60
-                          else 1 if directional_close_position >= 0.50 else 0)
         volatility_score = 2 if 0.00005 <= atr_ratio <= 0.020 else (1 if atr_ratio > 0 else 0)
         alignment_score = 1 if self._mtf_tf_biases.get("5m") == self._trend_direction else 0
-        adx_score = 3 if tracker.adx >= 35 else (2 if tracker.adx >= 25 else 1)
-        macd_aligned = tracker.macd_hist > 0 if signal == "BUY" else tracker.macd_hist < 0
-        macd_trail = list(tracker.macd_hist_trail)
-        macd_rising = len(macd_trail) >= 2 and (
-            macd_trail[-1] > macd_trail[-2] if signal == "BUY" else macd_trail[-1] < macd_trail[-2])
-        macd_score = 2 if (macd_aligned and macd_rising) else (1 if macd_aligned else 0)
         rsi = tracker.rsi
         if signal == "BUY":
             rsi_score = 2 if 45.0 <= rsi <= 70.0 else (1 if 70.0 < rsi <= 82.0 else 0)
         else:
             rsi_score = 2 if 30.0 <= rsi <= 55.0 else (1 if 18.0 <= rsi < 30.0 else 0)
-        pattern_score = _candlestick_pattern_score(candle, prev, signal)
-        structure_score = tracker.structure_score(signal)
         score = (trend_score + trigger_score + momentum_score + volatility_score + alignment_score
                  + adx_score + macd_score + rsi_score + pattern_score + structure_score)
         breakdown = {
@@ -668,10 +723,11 @@ class StrategyEngine:
             self._pending_signal_id = uuid.uuid4().hex[:10]
             self._pending_signal_time = time.time()
             self._pattern_stage = "SIGNAL"
-            self._last_entry_mode = "confluence"
+            self._last_entry_mode = "confluence-express" if express_bonus else "confluence"
             logger.info(
-                "CONFLUENCE %s | %d/%d | regime=%s | entry=%s | %s | close=%.5f atr=%.5f adx=%.1f rsi=%.1f",
-                signal, score, SCORE_MAX, self._regime, self._entry_tf, breakdown, close, atr, tracker.adx, rsi,
+                "CONFLUENCE %s | %d/%d | regime=%s | entry=%s | express=+%.1f | core=%d | %s | close=%.5f atr=%.5f adx=%.1f rsi=%.1f",
+                signal, score, SCORE_MAX, self._regime, self._entry_tf, express_bonus, core_strength,
+                breakdown, close, atr, tracker.adx, rsi,
             )
         else:
             self._reject(f"score {score}/{SCORE_MAX} below threshold {self._entry_score_threshold}")
