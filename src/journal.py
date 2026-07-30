@@ -1,17 +1,4 @@
-"""
-src/journal.py — decision + execution log with a crash-proof archive.
-
-  logs/trade_journal.csv   — live working file: one row per 15m review (symbol,
-                             signal id, the full confluence breakdown, entry
-                             readings, per-timeframe bias snapshot, regime,
-                             duration, MAE/MFE), outcome back-filled in place.
-  logs/journal_archive.csv — append-only mirror (kind=EVAL / kind=OUTCOME); the
-                             Performance Scope reads this, so a cleared live log
-                             never erases a past day.
-
-Old files auto-migrate in place by column name. Every operation is defensive —
-a journal failure can never interrupt trading.
-"""
+"""src/journal.py — decision + execution log with a crash-proof archive."""
 import csv
 import os
 import threading
@@ -26,9 +13,8 @@ JOURNAL_FILE = os.path.join(LOG_DIR, "trade_journal.csv")
 ARCHIVE_FILE = os.path.join(LOG_DIR, "journal_archive.csv")
 
 COLUMNS = [
-    "signal_id", "timestamp_utc", "symbol",
-    "direction", "trend", "taken", "executed", "rejection_reason", "note",
-    "score", "threshold",
+    "signal_id", "timestamp_utc", "symbol", "direction", "trend", "taken",
+    "executed", "rejection_reason", "note", "score", "threshold",
     "s_trend", "s_trigger", "s_momentum", "s_volatility", "s_alignment",
     "s_adx", "s_macd", "s_rsi_zone", "s_pattern", "s_structure",
     "entry_adx", "entry_rsi", "entry_macd_hist", "atr", "close",
@@ -38,8 +24,8 @@ COLUMNS = [
 ]
 ARCHIVE_COLUMNS = ["kind"] + COLUMNS
 OUTCOME_MERGE_FIELDS = (
-    "outcome", "pnl", "stake", "martingale_step",
-    "contract_id", "execution_mode", "executed", "note", "mae", "mfe",
+    "outcome", "pnl", "stake", "martingale_step", "contract_id",
+    "execution_mode", "executed", "note", "mae", "mfe",
 )
 
 
@@ -127,6 +113,7 @@ class TradeJournal:
                                     csv.writer(f).writerows(rows)
         except Exception as exc:
             logger.warning("Journal outcome write failed: %s", exc)
+
         odict = {
             "signal_id": signal_id, "outcome": outcome, "pnl": f"{pnl:.2f}",
             "stake": f"{stake:.2f}", "martingale_step": str(martingale_step),
