@@ -1,23 +1,21 @@
 """
-Performance Scope — a read-only trading-journal cockpit built entirely from the
-decision journal (logs/journal_archive.csv, falling back to the live log).
-
-Four views, all data pulled from the CSV, every row treated as gold:
-  Overview  — KPI strip, equity curve, monthly bars, calendar heatmap, month
-              detail, asset donut, recent trades, win/loss streaks.
+pages/bubbles.py — Performance Scope.
+A read-only trading-journal cockpit built entirely from the decision journal
+(logs/journal_archive.csv, falling back to the live log). Four views, every row
+treated as gold:
+  Overview  — KPI strip, live equity curve, monthly bars, calendar heatmap,
+              month detail, asset donut, recent trades, win/loss streaks.
   Calendar  — month navigator + heatmap; pick a day to see that day's reviews.
-  Trades    — every trade as a FULL report card: header line, then an always-open
-              BEFORE panel (10 confluence factors as bars, entry ADX/RSI/MACD/ATR/
-              close with a plain read, per-timeframe bias chips, and a narrative
-              of how the setup was detected) and an AFTER panel (outcome, P&L,
-              MAE/MFE stat cells + a narrative of why it won or lost).
+  Trades    — every trade as a full BEFORE / AFTER report (the 10 confluence
+              factors, the entry ADX/RSI/MACD/ATR/close with a plain read, the
+              per-timeframe bias chips, and a narrative of why it was placed and
+              why it won or lost, including MAE / MFE).
   Analytics — weekly tuning loop: rejection funnel, component edge, score-bucket
-              win rate, best/worst hours & weekdays, per-week report cards.
-
+              win rate, best/worst hours & weekdays, per-week tuning notes.
 Crash-proof: helpers defined before use; month axis built with a manual loop (no
-pandas frequency string); market/period selectors live OUTSIDE the heavy compute;
-each tab body is try/except-wrapped. Nothing here writes anything or touches the
-engine. Switch back to the Terminal via the sidebar or the button below.
+pandas frequency string); selectors live OUTSIDE the heavy compute; each tab body
+is try/except-wrapped so a rendering edge case shows an inline note instead of a
+white screen. Nothing here writes anything or touches the engine.
 """
 import calendar as cal_mod
 import math
@@ -39,7 +37,8 @@ for _c in (_here, os.path.dirname(_here)):
 
 from src.journal import get_journal
 
-st.set_page_config(page_title="Performance Scope", page_icon="◎", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Performance Scope", page_icon="◎",
+                   layout="wide", initial_sidebar_state="expanded")
 
 st.markdown(
     """
@@ -56,59 +55,101 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 [data-testid="stSidebar"]{background-color:#0a0f1c;border-right:1px solid #18233a;}
 [data-testid="stSidebarNav"]{padding-top:6px;}
 [data-testid="stSidebarNav"] li button,[data-testid="stSidebarNav"] a{font-family:'Space Grotesk',sans-serif;letter-spacing:.04em;}
-.ps-topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:6px 4px 16px 4px;position:relative;}
+
+.ps-topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;
+  padding:6px 4px 16px 4px;position:relative;overflow:hidden;}
 .ps-topbar::after{content:"";position:absolute;left:4px;right:4px;bottom:0;height:2px;
   background:linear-gradient(90deg,#10b981,#3884ff 42%,transparent 94%);background-size:220% 100%;
   animation:ps-scan 7s linear infinite;border-radius:2px;}
+.ps-topbar::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(110deg,transparent 32%,rgba(127,176,255,.07) 50%,transparent 68%);
+  background-size:240% 100%;animation:ps-sheen 8s linear infinite;}
 @keyframes ps-scan{0%{background-position:130% 0;}100%{background-position:-130% 0;}}
+@keyframes ps-sheen{0%{background-position:150% 0;}100%{background-position:-150% 0;}}
+.ps-brand,.ps-controls{position:relative;z-index:1;}
 .ps-brand{display:flex;align-items:center;gap:13px;}
 .ps-mark{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;
   background:linear-gradient(150deg,#0e2036,#0b1626);border:1px solid #1d3354;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 6px 18px rgba(0,0,0,.4);}
 .ps-mark svg{width:22px;height:22px;}
-.ps-brand h1{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.18rem;letter-spacing:.14em;text-transform:uppercase;color:#eef3fb;margin:0;line-height:1;}
-.ps-brand .sub{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.24em;text-transform:uppercase;color:#4f6080;margin-top:5px;}
-.ps-live{display:inline-flex;align-items:center;gap:7px;margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#8294b0;}
+.ps-brand h1{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.18rem;
+  letter-spacing:.14em;text-transform:uppercase;color:#eef3fb;margin:0;line-height:1;}
+.ps-brand .sub{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;
+  letter-spacing:.24em;text-transform:uppercase;color:#4f6080;margin-top:5px;}
+.ps-live{display:inline-flex;align-items:center;gap:7px;margin-top:7px;
+  font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#8294b0;}
 .ps-live .dot{width:7px;height:7px;border-radius:50%;background:#10b981;animation:ps-pulse 2.2s ease-in-out infinite;}
 @keyframes ps-pulse{0%,100%{box-shadow:0 0 3px rgba(16,185,129,.5);}50%{box-shadow:0 0 12px rgba(16,185,129,.95);}}
-.ps-panel{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:15px;padding:16px 18px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
-.ps-panel::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);}
+
+.ps-panel{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);
+  border:1px solid #18233a;border-radius:15px;padding:16px 18px;overflow:hidden;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+  animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;
+  transition:border-color .18s ease, box-shadow .18s ease, transform .18s ease;}
+.ps-panel:hover{border-color:#2c466e;box-shadow:0 12px 32px rgba(0,0,0,.38);}
+.ps-panel::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);}
 @keyframes ps-rise{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
-.ps-panel-h{display:flex;align-items:center;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:.62rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:#6b7c97;margin-bottom:12px;}
-.ps-panel-h .big{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;color:#eef3fb;letter-spacing:-.02em;text-transform:none;}
+.ps-panel-h{display:flex;align-items:center;justify-content:space-between;
+  font-family:'Space Grotesk',sans-serif;font-size:.62rem;font-weight:600;
+  letter-spacing:.18em;text-transform:uppercase;color:#6b7c97;margin-bottom:12px;}
+.ps-panel-h .big{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;
+  color:#eef3fb;letter-spacing:-.02em;text-transform:none;}
 .ps-panel-h .delta{font-family:'JetBrains Mono',monospace;font-size:.78rem;font-weight:600;}
+.ps-now{display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;
+  font-size:.58rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#34d399;
+  background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);padding:2px 9px;border-radius:20px;}
+.ps-now-dot{width:7px;height:7px;border-radius:50%;background:#10b981;animation:ps-pulse 2s ease-in-out infinite;}
+
 .ps-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:4px 0 16px 0;}
 @media(max-width:1100px){.ps-kpis{grid-template-columns:repeat(2,1fr);}}
-.ps-kpi{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:14px;padding:14px 16px;overflow:hidden;transition:transform .16s,border-color .16s,box-shadow .16s;animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
+.ps-kpi{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;
+  border-radius:14px;padding:14px 16px;overflow:hidden;
+  transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;
+  animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
 .ps-kpi:hover{transform:translateY(-3px);border-color:#2c466e;box-shadow:0 12px 28px rgba(0,0,0,.42);}
 .ps-kpi::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ac,#33507e);}
 .ps-kpi .row{display:flex;align-items:flex-start;justify-content:space-between;}
-.ps-kpi .l{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:#6b7c97;}
-.ps-kpi .ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--ib,rgba(51,80,126,.18));color:var(--ac,#7fa6e0);font-size:.95rem;}
-.ps-kpi .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:1.42rem;color:var(--vc,#eef3fb);margin-top:9px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
+.ps-kpi .l{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;
+  letter-spacing:.15em;text-transform:uppercase;color:#6b7c97;}
+.ps-kpi .ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
+  background:var(--ib,rgba(51,80,126,.18));color:var(--ac,#7fa6e0);font-size:.95rem;}
+.ps-kpi .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:1.42rem;
+  color:var(--vc,#eef3fb);margin-top:9px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
 .ps-kpi .s{font-family:'JetBrains Mono',monospace;font-size:.66rem;color:#6b7c97;margin-top:4px;}
+
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;}
-.cal .dow{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#56657f;text-align:center;padding-bottom:2px;}
-.cal .cell{position:relative;border-radius:9px;min-height:54px;padding:6px 7px;border:1px solid transparent;background:#0b1220;display:flex;flex-direction:column;justify-content:space-between;transition:transform .12s,box-shadow .12s;}
+.cal .dow{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:600;
+  letter-spacing:.1em;text-transform:uppercase;color:#56657f;text-align:center;padding-bottom:2px;}
+.cal .cell{position:relative;border-radius:9px;min-height:54px;padding:6px 7px;
+  border:1px solid transparent;background:#0b1220;display:flex;flex-direction:column;
+  justify-content:space-between;transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease;}
 .cal .cell.sel{outline:2px solid #3884ff;outline-offset:-1px;box-shadow:0 0 0 3px rgba(56,132,255,.18);}
 .cal .cell.empty{background:transparent;border-color:transparent;}
+.cal .cell.act{cursor:pointer;}
+.cal .cell.act:hover{transform:translateY(-2px);box-shadow:0 8px 18px rgba(0,0,0,.45);border-color:#2c466e;}
 .cal .cell .d{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#9fb0c9;}
 .cal .cell .v{font-family:'JetBrains Mono',monospace;font-size:.72rem;font-weight:700;}
 .cal .cell .ar{position:absolute;top:6px;right:7px;font-size:.6rem;}
+
 .ps-legend{display:flex;flex-direction:column;gap:9px;}
 .ps-legend .li{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:.74rem;}
 .ps-legend .li .dot{width:9px;height:9px;border-radius:3px;flex:0 0 auto;}
 .ps-legend .li .nm{color:#c7d2e0;flex:1;}
 .ps-legend .li .vl{color:#eef3fb;font-weight:700;}
 .ps-legend .li .pc{color:#6b7c97;width:46px;text-align:right;}
-.chip{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.62rem;font-weight:700;padding:2px 8px;border-radius:6px;letter-spacing:.03em;}
+
+.chip{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.62rem;font-weight:700;
+  padding:2px 8px;border-radius:6px;letter-spacing:.03em;}
 .chip.win{background:rgba(34,197,94,.14);color:#4ade80;border:1px solid rgba(34,197,94,.3);}
 .chip.loss{background:rgba(239,68,68,.14);color:#fb7185;border:1px solid rgba(239,68,68,.3);}
 .chip.buy{background:rgba(56,132,255,.14);color:#7fb0ff;border:1px solid rgba(56,132,255,.3);}
 .chip.sell{background:rgba(168,85,247,.14);color:#c8a4ff;border:1px solid rgba(168,85,247,.3);}
 .chip.flat{background:rgba(120,140,170,.12);color:#9fb0c9;border:1px solid rgba(120,140,170,.25);}
-.trade{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;padding:13px 15px;margin:11px 0;transition:border-color .15s,transform .15s;}
-.trade:hover{border-color:#2c466e;transform:translateX(2px);}
+
+.trade{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;
+  padding:13px 15px;margin:11px 0;transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease;}
+.trade:hover{border-color:#2c466e;transform:translateX(2px);box-shadow:0 8px 22px rgba(0,0,0,.4);}
 .trade .h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:.8rem;}
 .trade .h .t{color:#8294b0;}
 .trade .h .sym{color:#eef3fb;font-weight:600;}
@@ -121,13 +162,14 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .tfrow-l{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97;margin-right:2px;}
 .tf-chip{font-family:'JetBrains Mono',monospace;font-size:.64rem;font-weight:700;padding:2px 8px;border-radius:6px;border:1px solid #233452;background:#0e1830;}
 .tf-ag{font-family:'JetBrains Mono',monospace;font-size:.64rem;color:#6b7c97;margin-left:auto;}
+
 .panel{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:12px;padding:13px 15px;margin-top:11px;}
 .sec-h{font-family:'Space Grotesk',sans-serif;font-size:.6rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#8294b0;margin-bottom:10px;}
 .comps{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:12px;}
 @media(max-width:760px){.comps{grid-template-columns:1fr;}}
 .cb{display:flex;align-items:center;gap:8px;}
 .cb-n{width:78px;font-family:'JetBrains Mono',monospace;font-size:.64rem;color:#9fb0c9;text-transform:capitalize;}
-.cb-t{flex:1;height:7px;border-radius:4px;background:#101a2c;overflow:hidden;}
+.cb-t{flex:1;height:7px;border-radius:4px;background:#101a2c;overflow:hidden;transition:background .2s ease;}
 .cb-f{display:block;height:100%;border-radius:4px;}
 .cb-v{width:32px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:.64rem;font-weight:700;color:#eef3fb;}
 .reads{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;}
@@ -145,9 +187,11 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .aside-t{display:block;font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#9fb0c9;margin-bottom:5px;}
 .aside-r{font-size:.78rem;color:#c7d2e0;line-height:1.5;}
 .exitgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;}
-.stat{background:#0b1220;border:1px solid #18233a;border-radius:9px;padding:8px 10px;}
+.stat{background:#0b1220;border:1px solid #18233a;border-radius:9px;padding:8px 10px;transition:border-color .15s ease,transform .15s ease;}
+.stat:hover{border-color:#2c466e;transform:translateY(-2px);}
 .stat .sl{font-family:'Space Grotesk',sans-serif;font-size:.54rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#6b7c97;}
 .stat .sv{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700;margin-top:3px;}
+
 .bar-row{display:flex;align-items:center;gap:9px;margin:5px 0;font-family:'JetBrains Mono',monospace;font-size:.72rem;}
 .bar-row .nm{width:78px;color:#9fb0c9;text-transform:capitalize;}
 .bar-row .track{flex:1;height:8px;border-radius:5px;background:#101a2c;overflow:hidden;position:relative;}
@@ -157,19 +201,26 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .edge-tbl th{text-align:left;color:#6b7c97;font-weight:600;font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #18233a;}
 .edge-tbl td{padding:7px 8px;border-bottom:1px solid #111a2b;color:#c7d2e0;}
 .edge-tbl td.num{text-align:right;font-weight:700;}
+.edge-tbl tr:hover td{background:rgba(56,132,255,.05);}
 .edge-pos{color:#4ade80;} .edge-neg{color:#fb7185;} .edge-flat{color:#6b7c97;}
+
 .streaks{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
-.streak{background:#0b1220;border:1px solid #18233a;border-radius:12px;padding:13px 15px;text-align:center;}
+.streak{background:#0b1220;border:1px solid #18233a;border-radius:12px;padding:13px 15px;text-align:center;transition:border-color .15s ease,transform .15s ease;}
+.streak:hover{border-color:#2c466e;transform:translateY(-2px);}
 .streak .n{font-family:'JetBrains Mono',monospace;font-size:1.9rem;font-weight:700;line-height:1;}
 .streak .lab{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97;margin-top:7px;}
 .streak .sub{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#56657f;margin-top:4px;}
-.week{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;padding:14px 16px;margin-bottom:12px;}
+
+.week{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;
+  padding:14px 16px;margin-bottom:12px;transition:border-color .15s ease,transform .15s ease;}
+.week:hover{border-color:#2c466e;transform:translateX(2px);}
 .week .wh{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
 .week .wk{font-family:'Space Grotesk',sans-serif;font-weight:700;color:#eef3fb;font-size:.95rem;}
 .week .wm{display:flex;gap:16px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:.72rem;color:#9fb0c9;}
 .week .wm b{color:#eef3fb;}
 .week .hint{margin-top:11px;padding:10px 12px;border-radius:10px;background:rgba(56,132,255,.07);border:1px solid rgba(56,132,255,.22);font-size:.78rem;color:#bcd2f5;line-height:1.5;}
 .week .hint .tag{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#7fb0ff;display:block;margin-bottom:5px;}
+
 .ps-empty{padding:60px 20px;text-align:center;color:#6b7c97;}
 .ps-empty .e{font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#9fb0c9;font-weight:600;}
 .ps-empty .s{font-size:.82rem;margin-top:8px;line-height:1.6;}
@@ -309,7 +360,7 @@ def _cal_html(year, month, day_map, selected, scale):
             vc = "#bbf7d0" if pnl >= 0 else "#fecaca"
             ar = "▲" if pnl >= 0 else "▼"
             cells.append(
-                f'<div class="cell{sel}" style="background:{bg};border-color:{bd}">'
+                f'<div class="cell act{sel}" style="background:{bg};border-color:{bd}">'
                 f'<div class="ar" style="color:{vc}">{ar}</div>'
                 f'<div class="d">{day}</div>'
                 f'<div class="v" style="color:{vc}">{pnl:+,.0f}</div></div>')
@@ -792,12 +843,14 @@ with tab_ov:
         g1, g2 = st.columns([1.45, 1], gap="small")
         with g1:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Equity curve</span>'
-                        f'<span><span class="big">{money(equity_now, False)}</span> '
+                        f'<span style="display:flex;align-items:center;gap:10px">'
+                        f'<span class="ps-now"><span class="ps-now-dot"></span>live</span>'
+                        f'<span class="big">{money(equity_now, False)}</span> '
                         f'<span class="delta {("pos" if net >= 0 else "neg")}">{money(net)}</span></span></div>'
                         '<div id="eq"></div></div>', unsafe_allow_html=True)
             if eq_trades:
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=eq_x, y=eq_y, mode="lines", fill="tozeroline",
+                fig.add_trace(go.Scatter(x=eq_x, y=eq_y, mode="lines", fill="tozeroy",
                                          fillcolor="rgba(56,132,255,0.12)",
                                          line=dict(color="#3884ff", width=2.2),
                                          hovertemplate="%{x|%b %d}<br>equity <b>%{y:,.2f}</b><extra></extra>"))
