@@ -339,7 +339,7 @@ with st.sidebar:
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Contract</div>", unsafe_allow_html=True)
     default_duration = CONTRACT_DURATION if CONTRACT_DURATION_UNIT == "m" else 30
-    duration_minutes = st.select_slider("Length (minutes)", options=[5, 15, 30, 60], value=default_duration, disabled=state.is_running)
+    duration_minutes = st.select_slider("Length (minutes)", options=[1, 2, 5, 15, 30, 60], value=default_duration, disabled=state.is_running)
     entry_tf = ENTRY_TIMEFRAME_BY_DURATION.get(int(duration_minutes), DEFAULT_ENTRY_TIMEFRAME)
     st.caption("Up to 10 trades a day.")
     st.divider()
@@ -373,12 +373,14 @@ with st.sidebar:
     _sens_val = DEFAULT_STRATEGY_SENSITIVITY if DEFAULT_STRATEGY_SENSITIVITY in _sens_opts else _sens_opts[0]
     strategy_sensitivity = st.select_slider("How strict", options=_sens_opts, value=_sens_val, disabled=state.is_running)
     preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, {}) or {}
-    if duration_minutes <= 15:
-        regime_note = "short contract → 30m + 5m trending & decisive trigger"
+    if duration_minutes <= 2:
+        regime_note = "scalp → 1m trigger; 5m must trend; power candles get the express lane"
+    elif duration_minutes <= 15:
+        regime_note = "short → 5m trigger; 5m must trend & decisive body"
     elif duration_minutes <= 30:
-        regime_note = "medium contract → 30m + 1h must agree"
+        regime_note = "medium → 15m trigger; 30m + 1h must agree"
     else:
-        regime_note = "long contract → 30m + 1h agree, 1h ADX & MACD confirm"
+        regime_note = "long → 15m trigger; 30m + 1h agree, 1h ADX & MACD confirm"
     st.caption(f"Needs {preset.get('entry_score_threshold', SCORE_MAX)}/{SCORE_MAX} · {entry_tf} ADX ≥ {preset.get('entry_adx_floor', 15)} · {regime_note}")
     st.divider()
     col_start, col_stop = st.columns(2)
