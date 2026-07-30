@@ -1,8 +1,4 @@
-"""
-src/logger.py — non-blocking logging.
-Hot-path log calls only enqueue a record; one background thread owns the real
-file/console handlers, so disk I/O never blocks the trading loop.
-"""
+"""src/logger.py — non-blocking logging via a background listener thread."""
 import atexit
 import logging
 import os
@@ -21,26 +17,21 @@ def _ensure_listener() -> Queue:
         return _log_queue
 
     os.makedirs(LOG_DIR, exist_ok=True)
-
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-
     file_handler = RotatingFileHandler(
         LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     file_handler.setFormatter(formatter)
     file_handler.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
-
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.WARNING)
 
     _log_queue = Queue(-1)
-    _listener = QueueListener(
-        _log_queue, file_handler, console_handler, respect_handler_level=True
-    )
+    _listener = QueueListener(_log_queue, file_handler, console_handler, respect_handler_level=True)
     _listener.start()
     atexit.register(_listener.stop)
     return _log_queue
