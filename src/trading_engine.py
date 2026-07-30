@@ -189,14 +189,17 @@ class TradingEngine:
                     if allowed:
                         self._signal_monotonic = now_mono
                         entry_price = self.state.current_price or self._strategy.get_current_price()
-                        self.state.set_status(f"{signal} setup on {self.symbol_display} — placing order…")
+                        express = self._strategy.express_bonus
+                        tag = " · EXPRESS" if express > 0 else ""
+                        self.state.set_status(f"{signal} setup{tag} on {self.symbol_display} — placing order…")
                         await self._execute_trade(signal, entry_price, signal_id)
                     else:
                         logger.info("Signal %s seen but not executed: %s", signal, gate_reason)
                         self.state.set_status(f"{signal} setup seen — standing by ({gate_reason})")
                         self._strategy.on_signal_skipped()
                         self._journal.record_outcome(
-                            signal_id, "SKIPPED", 0.0, 0.0, None, self.execution_mode, 0, note=gate_reason)
+                            signal_id, "SKIPPED", 0.0, 0.0, None, self.execution_mode,
+                            0, note=gate_reason)
         except DerivAPIError as e:
             logger.error("API error in main loop: %s", e)
             self.state.set_error(str(e))
@@ -243,12 +246,12 @@ class TradingEngine:
                         self.state.set_status("Reconnected to Deriv. Bot is active.")
                         logger.info("Reconnected to Deriv.")
                         return True
-                except DerivAPIError as exc:
-                    logger.warning("Reconnect %d failed: %s", attempt, exc)
-                if attempt < max_attempts:
-                    await asyncio.sleep(min(2 ** attempt, 15))
-            self.state.set_error("Could not reconnect to Deriv after repeated attempts.")
-            return False
+            except DerivAPIError as exc:
+                logger.warning("Reconnect %d failed: %s", attempt, exc)
+            if attempt < max_attempts:
+                await asyncio.sleep(min(2 ** attempt, 15))
+        self.state.set_error("Could not reconnect to Deriv after repeated attempts.")
+        return False
 
     async def _shutdown(self):
         logger.info("Engine shutting down…")
@@ -409,7 +412,8 @@ class TradingEngine:
                     self.state.set_error(reason)
                     self.state.set_status("Order cancelled: connection unavailable.")
                     self._journal.record_outcome(
-                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                        martingale_step, note=reason)
                     return
             try:
                 self.state.set_status(
@@ -510,7 +514,8 @@ class TradingEngine:
                     self.state.set_error(reason)
                     self.state.set_status(f"Order cancelled during {execution_stage}: {e.message}")
                     self._journal.record_outcome(
-                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                        martingale_step, note=reason)
             except asyncio.CancelledError:
                 mae_s, mfe_s = self._mae_mfe(signal)
                 if self._active_contract_id is not None:
@@ -525,7 +530,8 @@ class TradingEngine:
                     reason = "Order attempt stopped before any contract was confirmed."
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self._journal.record_outcome(
-                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                        martingale_step, note=reason)
                 raise
             except Exception as e:
                 mae_s, mfe_s = self._mae_mfe(signal)
@@ -544,7 +550,8 @@ class TradingEngine:
                     self.state.set_error(reason)
                     self.state.set_status(f"Order cancelled during {execution_stage}; see error details.")
                     self._journal.record_outcome(
-                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                        signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                        martingale_step, note=reason)
         finally:
             self._active_contract_id = None
             self._active_entry_price = None
@@ -600,7 +607,8 @@ class TradingEngine:
 
     async def _monitor_contract(self, contract_id, buy_price, payout):
         duration_seconds = self._contract_duration_seconds()
-        poll_interval = 1.0 if duration_seconds <= 30 else (5.0 if duration_seconds <= 600 else 15.0)
+        # 1s polling for short contracts (<=2m) so a scalp is never blind for 5s.
+        poll_interval = 1.0 if duration_seconds <= 120 else (5.0 if duration_seconds <= 600 else 15.0)
         max_wait = duration_seconds + 180.0
         start_time = time.time()
         logger.info("Monitoring %s | expected %.0fs | poll %.0fs", contract_id, duration_seconds, poll_interval)
