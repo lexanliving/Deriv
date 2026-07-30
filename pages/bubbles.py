@@ -23,12 +23,14 @@ st.markdown(
     """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
 html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sans',sans-serif;}
 .stApp{background-image:radial-gradient(1000px 520px at 4% -10%, rgba(16,185,129,0.10), transparent 62%),radial-gradient(900px 480px at 102% 112%, rgba(56,132,255,0.10), transparent 60%),radial-gradient(rgba(120,150,190,0.045) 1px, transparent 1px);background-size:auto,auto,24px 24px;background-attachment:fixed;}
 [data-testid="stMainBlockContainer"]{max-width:1500px;padding-top:1.1rem;}
 [data-testid="stSidebar"]{background-color:#0a0f1c;border-right:1px solid #18233a;}
 [data-testid="stSidebarNav"]{padding-top:6px;}
 [data-testid="stSidebarNav"] li button,[data-testid="stSidebarNav"] a{font-family:'Space Grotesk',sans-serif;letter-spacing:.04em;}
+
 .ps-topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:6px 4px 16px 4px;position:relative;overflow:hidden;}
 .ps-topbar::after{content:"";position:absolute;left:4px;right:4px;bottom:0;height:2px;background:linear-gradient(90deg,#10b981,#3884ff 42%,transparent 94%);background-size:220% 100%;animation:ps-scan 7s linear infinite;border-radius:2px;}
 .ps-topbar::before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(110deg,transparent 32%,rgba(127,176,255,.07) 50%,transparent 68%);background-size:240% 100%;animation:ps-sheen 8s linear infinite;}
@@ -43,6 +45,7 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .ps-live{display:inline-flex;align-items:center;gap:7px;margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#8294b0;}
 .ps-live .dot{width:7px;height:7px;border-radius:50%;background:#10b981;animation:ps-pulse 2.2s ease-in-out infinite;}
 @keyframes ps-pulse{0%,100%{box-shadow:0 0 3px rgba(16,185,129,.5);}50%{box-shadow:0 0 12px rgba(16,185,129,.95);}}
+
 .ps-panel{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:15px;padding:16px 18px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;transition:border-color .18s ease, box-shadow .18s ease, transform .18s ease;}
 .ps-panel:hover{border-color:#2c466e;box-shadow:0 12px 32px rgba(0,0,0,.38);}
 .ps-panel::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);}
@@ -52,6 +55,7 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .ps-panel-h .delta{font-family:'JetBrains Mono',monospace;font-size:.78rem;font-weight:600;}
 .ps-now{display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;font-size:.58rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#34d399;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);padding:2px 9px;border-radius:20px;}
 .ps-now-dot{width:7px;height:7px;border-radius:50%;background:#10b981;animation:ps-pulse 2s ease-in-out infinite;}
+
 .ps-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:4px 0 16px 0;}
 @media(max-width:1100px){.ps-kpis{grid-template-columns:repeat(2,1fr);}}
 .ps-kpi{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:14px;padding:14px 16px;overflow:hidden;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
@@ -62,6 +66,7 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .ps-kpi .ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--ib,rgba(51,80,126,.18));color:var(--ac,#7fa6e0);font-size:.95rem;}
 .ps-kpi .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:1.42rem;color:var(--vc,#eef3fb);margin-top:9px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
 .ps-kpi .s{font-family:'JetBrains Mono',monospace;font-size:.66rem;color:#6b7c97;margin-top:4px;}
+
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;}
 .cal .dow{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#56657f;text-align:center;padding-bottom:2px;}
 .cal .cell{position:relative;border-radius:9px;min-height:54px;padding:6px 7px;border:1px solid transparent;background:#0b1220;display:flex;flex-direction:column;justify-content:space-between;transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease;}
@@ -72,18 +77,21 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .cal .cell .d{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#9fb0c9;}
 .cal .cell .v{font-family:'JetBrains Mono',monospace;font-size:.72rem;font-weight:700;}
 .cal .cell .ar{position:absolute;top:6px;right:7px;font-size:.6rem;}
+
 .ps-legend{display:flex;flex-direction:column;gap:9px;}
 .ps-legend .li{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:.74rem;}
 .ps-legend .li .dot{width:9px;height:9px;border-radius:3px;flex:0 0 auto;}
 .ps-legend .li .nm{color:#c7d2e0;flex:1;}
 .ps-legend .li .vl{color:#eef3fb;font-weight:700;}
 .ps-legend .li .pc{color:#6b7c97;width:46px;text-align:right;}
+
 .chip{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.62rem;font-weight:700;padding:2px 8px;border-radius:6px;letter-spacing:.03em;}
 .chip.win{background:rgba(34,197,94,.14);color:#4ade80;border:1px solid rgba(34,197,94,.3);}
 .chip.loss{background:rgba(239,68,68,.14);color:#fb7185;border:1px solid rgba(239,68,68,.3);}
 .chip.buy{background:rgba(56,132,255,.14);color:#7fb0ff;border:1px solid rgba(56,132,255,.3);}
 .chip.sell{background:rgba(168,85,247,.14);color:#c8a4ff;border:1px solid rgba(168,85,247,.3);}
 .chip.flat{background:rgba(120,140,170,.12);color:#9fb0c9;border:1px solid rgba(120,140,170,.25);}
+
 .trade{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;padding:13px 15px;margin:11px 0;transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease;}
 .trade:hover{border-color:#2c466e;transform:translateX(2px);box-shadow:0 8px 22px rgba(0,0,0,.4);}
 .trade .h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:.8rem;}
@@ -92,14 +100,18 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .trade .h .pnl{margin-left:auto;font-weight:700;font-size:.98rem;}
 .trade .subline{display:flex;flex-wrap:wrap;gap:14px;margin-top:9px;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#6b7c97;}
 .trade .subline b{color:#c7d2e0;}
+
 .sbar{display:inline-block;width:64px;height:6px;border-radius:4px;background:#16223c;vertical-align:middle;margin:0 4px;overflow:hidden;}
 .sbar-f{display:block;height:100%;background:linear-gradient(90deg,#3884ff,#10b981);}
+
 .tfrow{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:10px;}
 .tfrow-l{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97;margin-right:2px;}
 .tf-chip{font-family:'JetBrains Mono',monospace;font-size:.64rem;font-weight:700;padding:2px 8px;border-radius:6px;border:1px solid #233452;background:#0e1830;}
 .tf-ag{font-family:'JetBrains Mono',monospace;font-size:.64rem;color:#6b7c97;margin-left:auto;}
+
 .panel{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:12px;padding:13px 15px;margin-top:11px;}
 .sec-h{font-family:'Space Grotesk',sans-serif;font-size:.6rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#8294b0;margin-bottom:10px;}
+
 .comps{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:12px;}
 @media(max-width:760px){.comps{grid-template-columns:1fr;}}
 .cb{display:flex;align-items:center;gap:8px;}
@@ -107,42 +119,50 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .cb-t{flex:1;height:7px;border-radius:4px;background:#101a2c;overflow:hidden;transition:background .2s ease;}
 .cb-f{display:block;height:100%;border-radius:4px;}
 .cb-v{width:32px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:.64rem;font-weight:700;color:#eef3fb;}
+
 .reads{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;}
 .read{display:grid;grid-template-columns:58px 64px 1fr;gap:8px;align-items:baseline;font-family:'JetBrains Mono',monospace;font-size:.66rem;}
 .read-l{color:#6b7c97;text-transform:uppercase;font-size:.55rem;letter-spacing:.08em;}
 .read-v{color:#eef3fb;font-weight:700;}
 .read-i{color:#8294b0;}
+
 .narr{font-size:.78rem;line-height:1.55;color:#bcd2f5;background:rgba(56,132,255,.06);border:1px solid rgba(56,132,255,.18);border-radius:10px;padding:10px 12px;}
 .narr ul{margin:0;padding-left:16px;}
 .narr li{margin:3px 0;}
 .narr p{margin:0 0 7px 0;}
 .narr .gt{color:#4ade80;font-weight:700;}
 .narr .bd{color:#fbbf24;font-weight:700;}
+
 .aside{background:rgba(120,140,170,.07);border:1px solid rgba(120,140,170,.22);border-radius:10px;padding:11px 13px;}
 .aside-t{display:block;font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#9fb0c9;margin-bottom:5px;}
 .aside-r{font-size:.78rem;color:#c7d2e0;line-height:1.5;}
+
 .exitgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;}
 .stat{background:#0b1220;border:1px solid #18233a;border-radius:9px;padding:8px 10px;transition:border-color .15s ease,transform .15s ease;}
 .stat:hover{border-color:#2c466e;transform:translateY(-2px);}
 .stat .sl{font-family:'Space Grotesk',sans-serif;font-size:.54rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#6b7c97;}
 .stat .sv{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700;margin-top:3px;}
+
 .bar-row{display:flex;align-items:center;gap:9px;margin:5px 0;font-family:'JetBrains Mono',monospace;font-size:.72rem;}
 .bar-row .nm{width:78px;color:#9fb0c9;text-transform:capitalize;}
 .bar-row .track{flex:1;height:8px;border-radius:5px;background:#101a2c;overflow:hidden;position:relative;}
 .bar-row .fill{height:100%;border-radius:5px;}
 .bar-row .vv{width:34px;text-align:right;color:#eef3fb;font-weight:700;}
+
 .edge-tbl{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:.72rem;}
 .edge-tbl th{text-align:left;color:#6b7c97;font-weight:600;font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #18233a;}
 .edge-tbl td{padding:7px 8px;border-bottom:1px solid #111a2b;color:#c7d2e0;}
 .edge-tbl td.num{text-align:right;font-weight:700;}
 .edge-tbl tr:hover td{background:rgba(56,132,255,.05);}
 .edge-pos{color:#4ade80;} .edge-neg{color:#fb7185;} .edge-flat{color:#6b7c97;}
+
 .streaks{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
 .streak{background:#0b1220;border:1px solid #18233a;border-radius:12px;padding:13px 15px;text-align:center;transition:border-color .15s ease,transform .15s ease;}
 .streak:hover{border-color:#2c466e;transform:translateY(-2px);}
 .streak .n{font-family:'JetBrains Mono',monospace;font-size:1.9rem;font-weight:700;line-height:1;}
 .streak .lab{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97;margin-top:7px;}
 .streak .sub{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#56657f;margin-top:4px;}
+
 .week{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;padding:14px 16px;margin-bottom:12px;transition:border-color .15s ease,transform .15s ease;}
 .week:hover{border-color:#2c466e;transform:translateX(2px);}
 .week .wh{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
@@ -151,12 +171,15 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .week .wm b{color:#eef3fb;}
 .week .hint{margin-top:11px;padding:10px 12px;border-radius:10px;background:rgba(56,132,255,.07);border:1px solid rgba(56,132,255,.22);font-size:.78rem;color:#bcd2f5;line-height:1.5;}
 .week .hint .tag{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#7fb0ff;display:block;margin-bottom:5px;}
+
 .ps-empty{padding:60px 20px;text-align:center;color:#6b7c97;}
 .ps-empty .e{font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#9fb0c9;font-weight:600;}
 .ps-empty .s{font-size:.82rem;margin-top:8px;line-height:1.6;}
+
 .ps-glitch{margin:14px 0;padding:14px 16px;border-radius:13px;background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);}
 .ps-glitch .t{font-family:'Space Grotesk',sans-serif;font-weight:600;color:#fb7185;font-size:.84rem;letter-spacing:.04em;}
 .ps-glitch .s{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#9fb0c9;margin-top:6px;line-height:1.5;}
+
 .pos{color:#4ade80;} .neg{color:#fb7185;} .mut{color:#6b7c97;}
 [data-testid="stDataFrame"]{border:0;}
 #MainMenu,footer{visibility:hidden;}
@@ -168,11 +191,15 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 COMP = [("trend", 5), ("trigger", 3), ("momentum", 3), ("volatility", 2),
         ("alignment", 1), ("adx", 3), ("macd", 2), ("rsi_zone", 2),
         ("pattern", 2), ("structure", 2)]
+
 COMP_NAMES = [c[0] for c in COMP]
 COMP_MAX = {c[0]: c[1] for c in COMP}
+
 PALETTE = ["#3884ff", "#f59e0b", "#22c55e", "#a855f7", "#06b6d4", "#ef4444", "#84cc16", "#ec4899"]
+
 PERIODS = ["All time", "This month", "Last 30 days", "Last 90 days", "This year"]
-ENTRY_TF_BY_DURATION = {1: "1m", 2: "1m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
+
+ENTRY_TF_BY_DURATION = {1: "5m", 2: "5m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
 
 
 def _g(d, k):
@@ -288,7 +315,7 @@ def _cal_html(year, month, day_map, selected, scale):
                          f'<div class="ar" style="color:{vc}">{ar}</div>'
                          f'<div class="d">{day}</div>'
                          f'<div class="v" style="color:{vc}">{pnl:+,.0f}</div></div>')
-    return '<div class="cal">' + " ".join(cells) + "</div>"
+    return '<div class="cal">' + "".join(cells) + '</div>'
 
 
 def _tab_error(where, exc):
@@ -337,7 +364,7 @@ def _entry_readings_html(e, d):
     cl = e.get("close")
     if cl is not None:
         rows.append(_read_row("CLOSE", f"{cl:.5f}", "entry reference price"))
-    return '<div class="reads">' + " ".join(rows) + '</div>' if rows else ''
+    return '<div class="reads">' + "".join(rows) + '</div>' if rows else ''
 
 
 def _entry_tf_for_duration(value):
@@ -357,8 +384,10 @@ def _entry_narrative(t):
     top = "top" if d == "BUY" else "bottom"
     hl = "higher lows" if d == "BUY" else "lower highs"
     b = []
+
     b.append(f'<li><span class="gt">Higher-timeframe trend:</span> the 30m and 1h candles agreed on '
              f'<b>{t["trend"] or d}</b> with ADX+DI confirming it (trend 5/5) — the mandatory backdrop was in place.</li>')
+
     ts = c.get("trigger") or 0
     if ts >= 3:
         b.append(f'<li><span class="gt">Trigger:</span> the closed {entry_tf} candle broke the prior candle’s {hi} on a '
@@ -370,6 +399,7 @@ def _entry_narrative(t):
                  f'conviction was only marginal.</li>')
     else:
         b.append(f'<li><span class="bd">Trigger:</span> the {entry_tf} candle did not convincingly break the prior {hi}.</li>')
+
     ms = c.get("momentum") or 0
     if ms >= 3:
         b.append(f'<li><span class="gt">Momentum:</span> price closed in the {top} ~28% of the candle — the close led the move.</li>')
@@ -379,11 +409,13 @@ def _entry_narrative(t):
         b.append(f'<li><span class="bd">Momentum:</span> the close was only mildly directional.</li>')
     else:
         b.append(f'<li><span class="bd">Momentum:</span> the close was not directional — weak follow-through.</li>')
+
     adx = e.get("adx")
     if adx is not None:
         strength = "strong" if adx >= 35 else ("firm" if adx >= 25 else "present-but-modest")
         b.append(f'<li><span class="gt">Entry-timeframe trend:</span> {entry_tf} ADX <b>{adx:.1f}</b> ({strength}) — '
                  f'the {entry_tf} itself was trending, not chopping.</li>')
+
     mc = c.get("macd") or 0
     m = e.get("macd")
     if mc >= 2:
@@ -393,6 +425,7 @@ def _entry_narrative(t):
         b.append(f'<li><span class="gt">MACD:</span> histogram aligned with the trade but not yet accelerating.</li>')
     else:
         b.append(f'<li><span class="bd">MACD:</span> histogram was not confirming the direction.</li>')
+
     rsi = e.get("rsi")
     sr = c.get("rsi_zone") or 0
     if rsi is not None:
@@ -402,6 +435,7 @@ def _entry_narrative(t):
             zone = "healthy bearish zone (30–55)" if 30 <= rsi <= 55 else ("oversold-but-usable (18–30)" if 18 <= rsi < 30 else "outside the safe window")
         tag = "gt" if sr >= 2 else "bd"
         b.append(f'<li><span class="{tag}">RSI:</span> <b>{rsi:.1f}</b> — {zone}.</li>')
+
     stc = c.get("structure") or 0
     if stc >= 2:
         b.append(f'<li><span class="gt">Structure:</span> market structure intact — making {hl}.</li>')
@@ -409,16 +443,19 @@ def _entry_narrative(t):
         b.append(f'<li><span class="gt">Structure:</span> structure holding (last swing respected).</li>')
     else:
         b.append(f'<li><span class="bd">Structure:</span> no clear {hl} structure on the entry timeframe.</li>')
+
     pa = c.get("pattern") or 0
     if pa >= 2:
         b.append(f'<li><span class="gt">Pattern:</span> a confirming engulfing candle printed on top of the move.</li>')
     elif pa == 1:
         b.append(f'<li><span class="gt">Pattern:</span> a pin-bar rejection wick printed in your favour.</li>')
+
     al = c.get("alignment") or 0
     if al >= 1:
         b.append(f'<li><span class="gt">5m alignment:</span> the 5m chart agreed with the trade direction (bonus).</li>')
     else:
         b.append(f'<li><span class="bd">5m alignment:</span> the 5m chart was not aligned (no bonus, not a blocker).</li>')
+
     sc = t["score"] or 0
     thr = t["thr"] or 25
     delta = sc - thr
@@ -426,7 +463,8 @@ def _entry_narrative(t):
         b.append(f'<li><b>Verdict:</b> confluence score <b>{sc}/25</b> cleared the {thr} threshold by {delta} — the engine took it.</li>')
     else:
         b.append(f'<li><b>Verdict:</b> score <b>{sc}/25</b> fell {abs(delta)} short of the {thr} threshold.</li>')
-    return '<ul>' + " ".join(b) + '</ul>'
+
+    return '<ul>' + "".join(b) + '</ul>'
 
 
 def _exit_panel_html(t):
@@ -437,6 +475,7 @@ def _exit_panel_html(t):
 
     mae = f'{t["mae"]:.5f}' if t["mae"] is not None else "—"
     mfe = f'{t["mfe"]:.5f}' if t["mfe"] is not None else "—"
+
     return ('<div class="exitgrid">'
             + cell("outcome", oc, "#4ade80" if oc == "WON" else ("#fb7185" if oc == "LOST" else "#9fb0c9"))
             + cell("P&L", money(t["pnl"]), "#4ade80" if t["pnl"] > 0 else ("#fb7185" if t["pnl"] < 0 else "#eef3fb"))
@@ -451,6 +490,7 @@ def _exit_narrative(t):
     mfe = t["mfe"]
     lines = []
     has = mae is not None and mfe is not None
+
     if oc == "WON":
         if has and mae > 0 and mfe > 0:
             lines.append(f'It drew down <b>{mae:.5f}</b> against you, then ran <b>{mfe:.5f}</b> in your favour and '
@@ -477,13 +517,15 @@ def _exit_narrative(t):
                      'truth here, and the stake plan was deliberately NOT advanced.')
     else:
         lines.append('No settled outcome on this row.')
+
     if t.get("note"):
         lines.append(f'<span class="bd">Note:</span> {t["note"]}')
-    return " ".join(f'<p>{x}</p>' for x in lines)
+
+    return "".join(f'<p>{x}</p>' for x in lines)
 
 
 def _tf_chip(label, val):
-    v = (val or " ").upper()
+    v = (val or "").upper()
     if not v or v == "-":
         col, ic = "#56657f", "·"
     elif v == "UP":
@@ -508,7 +550,8 @@ def _render_trade_card(t):
     tf = t.get("tf") or {}
     tf_html = (_tf_chip("5m", tf.get("5m")) + _tf_chip("15m", tf.get("15m"))
                + _tf_chip("30m", tf.get("30m")) + _tf_chip("1h", tf.get("1h")))
-    mtf_ag = t.get("mtf_agreement") or " "
+    mtf_ag = t.get("mtf_agreement") or ""
+
     header = (
         f'<div class="trade"><div class="h"><span class="t">{ts}</span>'
         f'<span class="chip {dir_cls}">{t["dir"] or "—"}</span>'
@@ -526,8 +569,11 @@ def _render_trade_card(t):
         f'<span>MFE <b>{t["mfe"] if t["mfe"] is not None else "—"}</b></span></div>'
         f'<div class="tfrow"><span class="tfrow-l">MTF bias at entry</span>{tf_html}'
         f'<span class="tf-ag">agreement {mtf_ag}</span></div></div>')
+
     st.markdown(header, unsafe_allow_html=True)
+
     left, right = st.columns(2, gap="small")
+
     with left:
         st.markdown('<div class="panel"><div class="sec-h">BEFORE · why the engine took / passed it</div>', unsafe_allow_html=True)
         if taken:
@@ -548,8 +594,9 @@ def _render_trade_card(t):
                 bars = "".join(_comp_bar(n, comps.get(n), COMP_MAX[n]) for n in COMP_NAMES)
                 st.markdown(f'<div class="comps" style="margin-top:12px">{bars}</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
     with right:
-        st.markdown('<div class="panel"><div class="sec-h">AFTER · what happened &amp; why</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="sec-h">AFTER · what happened & why</div>', unsafe_allow_html=True)
         if oc in ("WON", "LOST", "UNKNOWN"):
             st.markdown(_exit_panel_html(t), unsafe_allow_html=True)
             st.markdown(f'<div class="narr">{_exit_narrative(t)}</div>', unsafe_allow_html=True)
@@ -619,6 +666,7 @@ now = datetime.now(timezone.utc)
 symbols = sorted({t["sym"] for t in rows if t["sym"] and t["sym"] != "—"}) if rows else []
 
 c1, c2, c3 = st.columns([3, 1.2, 1.2])
+
 with c1:
     n_reviews = len(rows)
     st.markdown(
@@ -631,9 +679,11 @@ with c1:
         f'<div class="ps-controls"></div></div>',
         unsafe_allow_html=True,
     )
+
 with c2:
     _sym_opts = ["All markets"] + symbols
     sym_filter = st.selectbox("Market", _sym_opts, key="scope_sym")
+
 with c3:
     period = st.selectbox("Period", PERIODS, key="scope_period")
 
@@ -654,11 +704,13 @@ equity_now = start_bal
 max_dd = 0.0
 cur_w = cur_l = long_w = long_l = 0
 _compute_err = None
+
 try:
     mrows = [t for t in rows if (sym_filter == "All markets" or t["sym"] == sym_filter) and _period_mask(t, period, now)]
     execd = [t for t in mrows if t["outcome"] in ("WON", "LOST")]
     wins = [t for t in execd if t["outcome"] == "WON"]
     losses = [t for t in execd if t["outcome"] == "LOST"]
+
     net = sum(t["pnl"] for t in execd)
     gw = sum(t["pnl"] for t in wins)
     gl = abs(sum(t["pnl"] for t in losses))
@@ -668,11 +720,13 @@ try:
     avg_l = (gl / len(losses)) if losses else 0.0
     rr = (avg_w / avg_l) if avg_l > 0 else 0.0
     expect = (wr / 100 * avg_w) - ((1 - wr / 100) * avg_l)
+
     eq_trades = sorted([t for t in execd if _valid(t)], key=lambda t: t["ts"])
     cum = 0.0
     peak = 0.0
     max_dd = 0.0
     eq_x, eq_y = [], []
+
     if eq_trades:
         eq_x.append(eq_trades[0]["ts"])
         eq_y.append(start_bal)
@@ -683,7 +737,8 @@ try:
             max_dd = min(max_dd, eq - peak)
             eq_x.append(t["ts"])
             eq_y.append(eq)
-    equity_now = (start_bal + cum) if eq_trades else start_bal
+        equity_now = start_bal + cum
+
     for t in eq_trades:
         if t["outcome"] == "WON":
             cur_w += 1
@@ -718,24 +773,31 @@ with tab_ov:
     try:
         if _compute_err is not None:
             _tab_error("Overview metrics", _compute_err)
+
+        net_ac = "#22c55e" if net >= 0 else "#ef4444"
+        net_vc = "#4ade80" if net >= 0 else "#fb7185"
+        net_ib = "rgba(34,197,94,.16)" if net >= 0 else "rgba(239,68,68,.16)"
+        wr_ac = "#22c55e" if wr >= 55 else ("#ef4444" if execd and wr < 45 else "#3884ff")
+
         kpis = (kpi("Net P&L", money(net), f"equity {money(equity_now, False)}", "₿",
-                    "#22c55e" if net >= 0 else "#ef4444", "#4ade80" if net >= 0 else "#fb7185",
-                    "rgba(34,197,94,.16)" if net >= 0 else "rgba(239,68,68,.16)", 0)
+                    net_ac, net_vc, net_ib, 0)
                 + kpi("Win rate", pct(wr), f"{len(wins)}W · {len(losses)}L", "◎",
-                      "#22c55e" if wr >= 55 else "#ef4444" if execd and wr < 45 else "#3884ff",
-                      "#eef3fb", "rgba(56,132,255,.16)", 40)
+                      wr_ac, "#eef3fb", "rgba(56,132,255,.16)", 40)
                 + kpi("Profit factor", f"{pf:.2f}" if pf != float('inf') else "∞",
                       f"edge {money(expect)} / trade", "⚡", "#a855f7", "#eef3fb", "rgba(168,85,247,.16)", 80)
                 + kpi("Max drawdown", money(max_dd), f"risk/reward {rr:.2f}", "↯",
                       "#ef4444", "#fb7185", "rgba(239,68,68,.16)", 120))
         st.markdown(f'<div class="ps-kpis">{kpis}</div>', unsafe_allow_html=True)
+
         g1, g2 = st.columns([1.45, 1], gap="small")
+
         with g1:
+            net_cls = "pos" if net >= 0 else "neg"
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Equity curve</span>'
                         f'<span style="display:flex;align-items:center;gap:10px">'
                         f'<span class="ps-now"><span class="ps-now-dot"></span>live</span>'
-                        f'<span class="big">{money(equity_now, False)}</span> '
-                        f'<span class="delta {("pos" if net >= 0 else "neg")}">{money(net)}</span></span></div>'
+                        f'<span class="big">{money(equity_now, False)}</span>'
+                        f'<span class="delta {net_cls}">{money(net)}</span></span></div>'
                         '<div id="eq"></div></div>', unsafe_allow_html=True)
             if eq_trades:
                 fig = go.Figure()
@@ -747,6 +809,7 @@ with tab_ov:
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
             else:
                 st.info("No closed trades in this window yet.")
+
         with g2:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Monthly performance</span></div><div id="mo"></div></div>', unsafe_allow_html=True)
             months_present = sorted({t["ts"].strftime("%Y-%m") for t in execd if _valid(t)})
@@ -767,7 +830,9 @@ with tab_ov:
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
             else:
                 st.info("No monthly data in this window.")
+
         c1, c2, c3 = st.columns([1.25, 1, 1], gap="small")
+
         with c1:
             y, m = map(int, st.session_state.scope_month.split("-"))
             colh = st.columns([1, 3, 1])
@@ -788,7 +853,9 @@ with tab_ov:
             month_days = {k: v for k, v in day_map_tuples.items() if k.startswith(st.session_state.scope_month)}
             scale = max((abs(v[0]) for v in month_days.values()), default=1.0)
             st.markdown('<div class="ps-panel" style="margin-top:8px">' + _cal_html(y, m, month_days, st.session_state.scope_day, scale) + '</div>', unsafe_allow_html=True)
+
         with c2:
+            month_days = {k: v for k, v in day_map_tuples.items() if k.startswith(st.session_state.scope_month)}
             mpnl = sum(v[0] for v in month_days.values())
             mtrades = sum(v[1] for v in month_days.values())
             mw = sum(1 for t in wins if _valid(t) and t["ts"].strftime("%Y-%m") == st.session_state.scope_month)
@@ -798,10 +865,12 @@ with tab_ov:
             mloss_vals = [t["pnl"] for t in losses if _valid(t) and t["ts"].strftime("%Y-%m") == st.session_state.scope_month]
             mavgw = (sum(mwin_vals) / len(mwin_vals)) if mwin_vals else 0.0
             mavgl = (sum(abs(x) for x in mloss_vals) / len(mloss_vals)) if mloss_vals else 0.0
+            mpnl_cls = "pos" if mpnl >= 0 else "neg"
+            mret_cls = "pos" if mret >= 0 else "neg"
             st.markdown(
                 f'<div class="ps-panel"><div class="ps-panel-h"><span>{cal_mod.month_name[m]} {y}</span><span class="chip win">closed</span></div>'
-                f'<div class="ps-panel-h" style="margin:0 0 12px 0"><span class="big {("pos" if mpnl >= 0 else "neg")}">{money(mpnl)}</span>'
-                f'<span class="delta {("pos" if mret >= 0 else "neg")}">{mret:+.2f}%</span></div>'
+                f'<div class="ps-panel-h" style="margin:0 0 12px 0"><span class="big {mpnl_cls}">{money(mpnl)}</span>'
+                f'<span class="delta {mret_cls}">{mret:+.2f}%</span></div>'
                 f'<div class="meta" style="display:flex;flex-direction:column;gap:7px;font-family:JetBrains Mono,monospace;font-size:.74rem">'
                 f'<div style="display:flex;justify-content:space-between"><span class="mut">Total trades</span><b>{mtrades}</b></div>'
                 f'<div style="display:flex;justify-content:space-between"><span class="mut">Winning</span><b class="pos">{mw} ({(mw / mtrades * 100 if mtrades else 0):.0f}%)</b></div>'
@@ -809,6 +878,7 @@ with tab_ov:
                 f'<div style="display:flex;justify-content:space-between"><span class="mut">Avg win</span><b class="pos">{money(mavgw)}</b></div>'
                 f'<div style="display:flex;justify-content:space-between"><span class="mut">Avg loss</span><b class="neg">{money(-mavgl)}</b></div></div></div>',
                 unsafe_allow_html=True)
+
         with c3:
             sym_pnl = defaultdict(float)
             for t in execd:
@@ -832,7 +902,9 @@ with tab_ov:
                 st.markdown(leg + '</div></div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="mut" style="padding:20px 0;text-align:center">No trades yet.</div></div>', unsafe_allow_html=True)
+
         r1, r2 = st.columns([2.2, 1], gap="small")
+
         with r1:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Recent trades</span></div>', unsafe_allow_html=True)
             recent = list(reversed(eq_trades))[:8]
@@ -842,12 +914,15 @@ with tab_ov:
                     recs.append({"Time": t["ts"].strftime("%m-%d %H:%M"), "Asset": t["sym"], "Side": t["dir"],
                                  "Score": t["score"], "Result": t["outcome"], "P&L": t["pnl"]})
                 df = pd.DataFrame(recs)
-                st.dataframe(df.style.map(lambda v: "color:#4ade80;font-weight:700" if v == "WON" else ("color:#fb7185;font-weight:700" if v == "LOST" else ""), subset=["Result"])
-                             .map(lambda v: "color:#4ade80;font-weight:700" if isinstance(v, float) and v > 0 else ("color:#fb7185;font-weight:700" if isinstance(v, float) and v < 0 else ""), subset=["P&L"])
-                             .format({"P&L": "{:+,.2f}"}), use_container_width=True, height=300, hide_index=True)
+                st.dataframe(
+                    df.style.map(lambda v: "color:#4ade80;font-weight:700" if v == "WON" else ("color:#fb7185;font-weight:700" if v == "LOST" else ""), subset=["Result"])
+                    .map(lambda v: "color:#4ade80;font-weight:700" if isinstance(v, float) and v > 0 else ("color:#fb7185;font-weight:700" if isinstance(v, float) and v < 0 else ""), subset=["P&L"])
+                    .format({"P&L": "{:+,.2f}"}),
+                    use_container_width=True, height=300, hide_index=True)
             else:
                 st.markdown('<div class="mut" style="padding:20px 0;text-align:center">No closed trades in this window.</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
+
         with r2:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Streaks</span></div><div class="streaks">'
                         f'<div class="streak"><div class="n pos">{cur_w}</div><div class="lab">Winning</div><div class="sub">best {long_w}</div></div>'
@@ -877,15 +952,18 @@ with tab_cal:
         active_days = sorted(month_days.keys())
         with h4:
             day_opts = ["— none —"] + [f"{d}  ({month_days[d][0]:+,.2f} · {month_days[d][1]} trade{'s' if month_days[d][1] != 1 else ''})" for d in active_days]
-            cur_label = next((o for o in day_opts if o.startswith((st.session_state.scope_day or "######"))), "— none —")
+            cur_label = next((o for o in day_opts if o.startswith(st.session_state.scope_day or "######")), "— none —")
             pick = st.selectbox("Jump to day", day_opts, index=day_opts.index(cur_label) if cur_label in day_opts else 0, key="cal_daypick")
             st.session_state.scope_day = None if pick == "— none —" else pick.split("  ")[0]
+
         st.markdown('<div class="ps-panel" style="margin-top:10px">' + _cal_html(y, m, month_days, st.session_state.scope_day, scale) + '</div>', unsafe_allow_html=True)
+
         if st.session_state.scope_day:
             d = st.session_state.scope_day
             day_trades = [t for t in mrows if _valid(t) and t["ts"].strftime("%Y-%m-%d") == d]
             dpnl = sum(t["pnl"] for t in day_trades if t["outcome"] in ("WON", "LOST"))
-            st.markdown(f'<div class="ps-panel-h" style="margin:18px 0 4px 0"><span>{d} · {len(day_trades)} reviews</span><span class="delta {("pos" if dpnl >= 0 else "neg")}">{money(dpnl)}</span></div>', unsafe_allow_html=True)
+            dpnl_cls = "pos" if dpnl >= 0 else "neg"
+            st.markdown(f'<div class="ps-panel-h" style="margin:18px 0 4px 0"><span>{d} · {len(day_trades)} reviews</span><span class="delta {dpnl_cls}">{money(dpnl)}</span></div>', unsafe_allow_html=True)
             if day_trades:
                 for t in sorted(day_trades, key=lambda x: x["ts"]):
                     _render_trade_card(t)
@@ -898,6 +976,7 @@ with tab_tr:
     try:
         pool = mrows if show_attempted else execd
         pool = sorted(pool, key=lambda t: (t["ts"] if _valid(t) else pd.Timestamp.min.tz_localize("UTC")), reverse=True)
+
         f1, f2, f3 = st.columns(3)
         with f1:
             dsel = st.selectbox("Direction", ["All", "BUY", "SELL"], key="tr_dir")
@@ -905,6 +984,7 @@ with tab_tr:
             rsel = st.selectbox("Result", ["All", "WON", "LOST", "CANCELLED", "SKIPPED"], key="tr_res")
         with f3:
             nshow = st.slider("Show last N", 5, 200, 40, 5, key="tr_n")
+
         shown = []
         for t in pool:
             if dsel != "All" and t["dir"] != dsel:
@@ -914,8 +994,10 @@ with tab_tr:
             shown.append(t)
             if len(shown) >= nshow:
                 break
+
         if not shown:
             st.info("No trades match these filters in the selected window.")
+
         for t in shown:
             _render_trade_card(t)
     except Exception as _e:
@@ -924,7 +1006,9 @@ with tab_tr:
 with tab_an:
     try:
         st.caption("Everything below is computed from your journal — the tuning loop. Read it weekly, change one thing on demo, then forward-test.")
+
         a1, a2 = st.columns(2, gap="small")
+
         with a1:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Rejection funnel — where setups die</span></div>', unsafe_allow_html=True)
             rej = Counter(t["reason"] for t in mrows if not t["taken"] and t["reason"])
@@ -940,6 +1024,7 @@ with tab_an:
                 st.markdown(bars + '</div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="mut" style="padding:18px 0;text-align:center">No rejections in this window.</div></div>', unsafe_allow_html=True)
+
         with a2:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Win rate by score bucket</span></div>', unsafe_allow_html=True)
             buckets = [("13–15", 13, 16), ("16–18", 16, 19), ("19–21", 19, 22), ("22–25", 22, 99)]
@@ -960,6 +1045,7 @@ with tab_an:
                 st.markdown('</div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="mut" style="padding:18px 0;text-align:center">No trades to bucket yet.</div></div>', unsafe_allow_html=True)
+
         st.markdown('<div class="ps-panel" style="margin-top:14px"><div class="ps-panel-h"><span>Component edge — which factor separates winners from losers</span></div>', unsafe_allow_html=True)
         edge_rows = []
         for name in COMP_NAMES:
@@ -986,7 +1072,9 @@ with tab_an:
         else:
             st.markdown('<div class="mut" style="padding:14px 0;text-align:center">Need wins and losses to compute edge.</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
         g3a, g3b = st.columns(2, gap="small")
+
         with g3a:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Win rate by hour of day (UTC)</span></div>', unsafe_allow_html=True)
             hr = defaultdict(lambda: [0, 0])
@@ -1008,6 +1096,7 @@ with tab_an:
             else:
                 st.markdown('<div class="mut" style="padding:14px 0;text-align:center">No data.</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
+
         with g3b:
             st.markdown('<div class="ps-panel"><div class="ps-panel-h"><span>Win rate by weekday</span></div>', unsafe_allow_html=True)
             wd = defaultdict(lambda: [0, 0])
@@ -1030,6 +1119,7 @@ with tab_an:
             else:
                 st.markdown('<div class="mut" style="padding:14px 0;text-align:center">No data.</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
+
         st.markdown('<div class="ps-panel-h" style="margin:20px 0 6px 0"><span>Weekly reports — your edit-the-bot brief</span></div>', unsafe_allow_html=True)
         weeks = defaultdict(list)
         for t in mrows:
@@ -1045,6 +1135,7 @@ with tab_an:
                 wwr = (len(ww) / len(wex) * 100) if wex else 0.0
                 wrej = Counter(t["reason"] for t in wt if not t["taken"] and t["reason"])
                 top_rej = wrej.most_common(1)[0][0] if wrej else None
+
                 worst_name = worst_edge = None
                 wl = [t for t in wex if t["outcome"] == "LOST"]
                 if ww and wl:
@@ -1056,6 +1147,7 @@ with tab_an:
                             if worst_edge is None or e < worst_edge:
                                 worst_edge = e
                                 worst_name = name
+
                 hints = []
                 if wwr < 50 and worst_name is not None and worst_edge < 0:
                     hints.append(f"On losing setups this week the <b>{worst_name}</b> factor scored higher than on winners (edge {worst_edge:+.2f}) — it isn't filtering; consider raising its bar or trimming its weight.")
@@ -1065,13 +1157,16 @@ with tab_an:
                     hints.append("Setups that fired held a real edge this week — keep the gates as-is and trust the selectivity.")
                 if not wex:
                     hints.append("No trades fired — the gates did their job waiting; check the funnel above to see what they waited on.")
+
                 d0 = min(t["ts"] for t in wt if _valid(t)).strftime("%b %d")
                 d1 = max(t["ts"] for t in wt if _valid(t)).strftime("%b %d")
+                wwr_cls = "pos" if wwr >= 50 else "neg"
+                wpnl_cls = "pos" if wpnl >= 0 else "neg"
                 st.markdown(
                     f'<div class="week"><div class="wh"><span class="wk">Week {wk} · {yr}</span>'
                     f'<span class="wm"><span>trades <b>{len(wex)}</b></span>'
-                    f'<span>win rate <b class="{("pos" if wwr >= 50 else "neg")}">{wwr:.0f}%</b></span>'
-                    f'<span>P&L <b class="{("pos" if wpnl >= 0 else "neg")}">{money(wpnl)}</b></span>'
+                    f'<span>win rate <b class="{wwr_cls}">{wwr:.0f}%</b></span>'
+                    f'<span>P&L <b class="{wpnl_cls}">{money(wpnl)}</b></span>'
                     f'<span class="mut">{d0}–{d1}</span></span></div>'
                     f'<div class="hint"><span class="tag">Tuning note</span>{" ".join(hints)}</div></div>',
                     unsafe_allow_html=True)
