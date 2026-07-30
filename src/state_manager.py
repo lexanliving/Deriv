@@ -1,9 +1,4 @@
-"""
-src/state_manager.py — thread-safe shared state (engine thread <-> UI).
-Capped trade history with an O(1) id index; a settled trade is never updated
-twice; expectancy math included. Also stores the latest 5m candles for the
-dashboard candlestick chart.
-"""
+"""src/state_manager.py — thread-safe shared state between engine and UI."""
 import threading
 import time
 from collections import deque
@@ -88,10 +83,8 @@ class StateManager:
         self._total_won = 0.0
         self._total_lost = 0.0
         self._execution_context: Dict[str, str] = {
-            "account_id": "",
-            "account_type": "UNKNOWN",
-            "currency": "USD",
-            "execution_mode": "UNCONFIGURED",
+            "account_id": "", "account_type": "UNKNOWN",
+            "currency": "USD", "execution_mode": "UNCONFIGURED",
         }
         self._status_message = "Stopped."
         self._error_message = ""
@@ -280,17 +273,11 @@ class StateManager:
             avg_loss = (self._total_lost / self._losses) if self._losses > 0 else 0.0
             expectancy = (win_rate / 100.0 * avg_win) - ((1 - win_rate / 100.0) * avg_loss)
             return {
-                "total_trades": total,
-                "wins": self._wins,
-                "losses": self._losses,
-                "win_rate": round(win_rate, 1),
-                "avg_win": round(avg_win, 2),
-                "avg_loss": round(avg_loss, 2),
-                "expectancy": round(expectancy, 2),
-                "total_pnl": round(self._total_pnl, 2),
-                "session_pnl": round(self._session_pnl, 2),
-                "current_stake": self._current_stake,
-                "initial_stake": self._initial_stake,
+                "total_trades": total, "wins": self._wins, "losses": self._losses,
+                "win_rate": round(win_rate, 1), "avg_win": round(avg_win, 2),
+                "avg_loss": round(avg_loss, 2), "expectancy": round(expectancy, 2),
+                "total_pnl": round(self._total_pnl, 2), "session_pnl": round(self._session_pnl, 2),
+                "current_stake": self._current_stake, "initial_stake": self._initial_stake,
                 "martingale_step": self._current_martingale_step,
                 "consecutive_losses": self._consecutive_losses,
                 "cooldown_remaining": self._cooldown_remaining_unsafe(),
@@ -368,10 +355,8 @@ class StateManager:
             self._last_trade_time = 0.0
             self._consecutive_losses = 0
             self._execution_context = {
-                "account_id": "",
-                "account_type": "UNKNOWN",
-                "currency": "USD",
-                "execution_mode": "UNCONFIGURED",
+                "account_id": "", "account_type": "UNKNOWN",
+                "currency": "USD", "execution_mode": "UNCONFIGURED",
             }
             self._status_message = "Stopped."
             self._error_message = ""
