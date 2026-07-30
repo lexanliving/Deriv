@@ -876,8 +876,12 @@ with tab_ov:
                 fig = go.Figure(go.Bar(x=mx, y=my, marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in my],
                                        hovertemplate="%{x}<br><b>%{y:+,.2f}</b><extra></extra>"))
                 fig.add_hline(y=0, line=dict(color="#1d2c49", width=1))
-                fig.update_layout(**PLOT(260), showlegend=False,
-                                  xaxis=dict(gridcolor="#13203a", tickcolor="#13203a", tickfont=dict(size=9)))
+                # Merge the smaller month-label font INTO the layout dict so the
+                # axis is named exactly once (the old code passed xaxis twice and
+                # Plotly raised "multiple values for keyword argument 'xaxis'").
+                lay = PLOT(260)
+                lay["xaxis"].update(tickfont=dict(size=9))
+                fig.update_layout(**lay, showlegend=False)
                 st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
             else:
                 st.info("No monthly data in this window.")
