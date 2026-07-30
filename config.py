@@ -43,13 +43,16 @@ DEFAULT_MARKET_DISPLAY = "Gold (XAU/USD)"
 SYMBOL = AVAILABLE_MARKETS[DEFAULT_MARKET_DISPLAY]
 SYMBOL_DISPLAY = DEFAULT_MARKET_DISPLAY
 
-CANDLE_GRANULARITIES = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
+# 1m added so 1m/2m scalps get a trigger candle shorter than the hold.
+CANDLE_GRANULARITIES = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 CANDLE_LOOKBACK = 80
 CANDLE_REFRESH_SECONDS = 30
 
 ENTRY_TIMEFRAME = "15m"
 DEFAULT_ENTRY_TIMEFRAME = "15m"
-ENTRY_TIMEFRAME_BY_DURATION = {5: "5m", 15: "5m", 30: "15m", 60: "15m"}
+# Duration-aware trigger candle. 1m/2m scalps use a 1m trigger (a 5m trigger
+# would outlive the trade); 5m/15m use 5m; 30m/60m keep the original 15m.
+ENTRY_TIMEFRAME_BY_DURATION = {1: "1m", 2: "1m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
 
 TREND_TIMEFRAMES = ["30m", "1h"]
 MAX_TRADES_PER_DAY = 10
