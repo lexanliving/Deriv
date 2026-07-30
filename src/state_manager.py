@@ -83,8 +83,10 @@ class StateManager:
         self._total_won = 0.0
         self._total_lost = 0.0
         self._execution_context: Dict[str, str] = {
-            "account_id": "", "account_type": "UNKNOWN",
-            "currency": "USD", "execution_mode": "UNCONFIGURED",
+            "account_id": "",
+            "account_type": "UNKNOWN",
+            "currency": "USD",
+            "execution_mode": "UNCONFIGURED",
         }
         self._status_message = "Stopped."
         self._error_message = ""
@@ -129,9 +131,15 @@ class StateManager:
         with self._lock:
             src = candles or []
             self._candles_5m = [
-                {"open": c.get("open"), "high": c.get("high"), "low": c.get("low"),
-                 "close": c.get("close"), "epoch": c.get("epoch")}
-                for c in src if c is not None
+                {
+                    "open": c.get("open"),
+                    "high": c.get("high"),
+                    "low": c.get("low"),
+                    "close": c.get("close"),
+                    "epoch": c.get("epoch"),
+                }
+                for c in src
+                if c is not None
             ][-120:]
 
     def get_candles_5m(self) -> List[Dict[str, Any]]:
@@ -213,13 +221,16 @@ class StateManager:
     def _cooldown_remaining_unsafe(self) -> float:
         if self._last_trade_time == 0.0:
             return 0.0
+
         elapsed = time.time() - self._last_trade_time
+
         if self._consecutive_losses >= 2:
             required = 180.0
         elif self._consecutive_losses >= 1:
             required = 90.0
         else:
             required = 30.0
+
         return max(0.0, required - elapsed)
 
     def get_cooldown_remaining(self) -> float:
@@ -235,6 +246,7 @@ class StateManager:
             if len(self._trade_history) == self._trade_history.maxlen:
                 evicted = self._trade_history.popleft()
                 self._trades_by_id.pop(evicted.trade_id, None)
+
             self._trade_history.append(trade)
             self._trades_by_id[trade.trade_id] = trade
 
@@ -243,14 +255,19 @@ class StateManager:
             trade = self._trades_by_id.get(trade_id)
             if trade is None:
                 return
+
             if trade.status in FINAL_TRADE_STATUSES:
                 return
+
             trade.status = status
             trade.pnl = pnl
+
             if error_message:
                 trade.error_message = error_message
+
             self._total_pnl += pnl
             self._session_pnl += pnl
+
             if status == "WON":
                 self._wins += 1
                 self._consecutive_losses = 0
@@ -272,12 +289,19 @@ class StateManager:
             avg_win = (self._total_won / self._wins) if self._wins > 0 else 0.0
             avg_loss = (self._total_lost / self._losses) if self._losses > 0 else 0.0
             expectancy = (win_rate / 100.0 * avg_win) - ((1 - win_rate / 100.0) * avg_loss)
+
             return {
-                "total_trades": total, "wins": self._wins, "losses": self._losses,
-                "win_rate": round(win_rate, 1), "avg_win": round(avg_win, 2),
-                "avg_loss": round(avg_loss, 2), "expectancy": round(expectancy, 2),
-                "total_pnl": round(self._total_pnl, 2), "session_pnl": round(self._session_pnl, 2),
-                "current_stake": self._current_stake, "initial_stake": self._initial_stake,
+                "total_trades": total,
+                "wins": self._wins,
+                "losses": self._losses,
+                "win_rate": round(win_rate, 1),
+                "avg_win": round(avg_win, 2),
+                "avg_loss": round(avg_loss, 2),
+                "expectancy": round(expectancy, 2),
+                "total_pnl": round(self._total_pnl, 2),
+                "session_pnl": round(self._session_pnl, 2),
+                "current_stake": self._current_stake,
+                "initial_stake": self._initial_stake,
                 "martingale_step": self._current_martingale_step,
                 "consecutive_losses": self._consecutive_losses,
                 "cooldown_remaining": self._cooldown_remaining_unsafe(),
@@ -355,8 +379,10 @@ class StateManager:
             self._last_trade_time = 0.0
             self._consecutive_losses = 0
             self._execution_context = {
-                "account_id": "", "account_type": "UNKNOWN",
-                "currency": "USD", "execution_mode": "UNCONFIGURED",
+                "account_id": "",
+                "account_type": "UNKNOWN",
+                "currency": "USD",
+                "execution_mode": "UNCONFIGURED",
             }
             self._status_message = "Stopped."
             self._error_message = ""
