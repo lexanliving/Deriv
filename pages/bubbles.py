@@ -6,22 +6,18 @@ Four views, all data pulled from the CSV, every row treated as gold:
   Overview  — KPI strip, equity curve, monthly bars, calendar heatmap, month
               detail, asset donut, recent trades, win/loss streaks.
   Calendar  — month navigator + heatmap; pick a day to see that day's reviews.
-  Trades    — every trade as a card with WHY it was placed (confluence
-              breakdown + entry readings) and WHY it won/lost (MAE / MFE).
-  Analytics — the weekly tuning loop: rejection funnel, component edge,
-              score-bucket win rate, best/worst hours & weekdays, and per-week
-              report cards with a plain-English "look at X" note.
+  Trades    — every trade as a FULL report card: header line, then an always-open
+              BEFORE panel (10 confluence factors as bars, entry ADX/RSI/MACD/ATR/
+              close with a plain read, per-timeframe bias chips, and a narrative
+              of how the setup was detected) and an AFTER panel (outcome, P&L,
+              MAE/MFE stat cells + a narrative of why it won or lost).
+  Analytics — weekly tuning loop: rejection funnel, component edge, score-bucket
+              win rate, best/worst hours & weekdays, per-week report cards.
 
-Crash-proof by construction:
-  * every helper (incl. the trade-card renderer) is defined BEFORE the tabs use
-    it, so a filter-driven rerun can no longer hit a NameError;
-  * the month axis is built with a small manual loop — no pandas frequency
-    string, so it is immune to the pandas >=2.2 "M" -> "ME" change that was
-    blanking the page;
-  * the market / period selectors live OUTSIDE the heavy compute, and every
-    tab body is wrapped in a try/except that renders a styled inline panel
-    (details in an expander) instead of a white screen. The controls stay on
-    screen and interactive, so a glitch never forces a new tab or hard refresh.
+Crash-proof: helpers defined before use; month axis built with a manual loop (no
+pandas frequency string); market/period selectors live OUTSIDE the heavy compute;
+each tab body is try/except-wrapped. Nothing here writes anything or touches the
+engine. Switch back to the Terminal via the sidebar or the button below.
 """
 import calendar as cal_mod
 import math
@@ -49,7 +45,7 @@ st.markdown(
     """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
-html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;}
+html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sans',sans-serif;}
 .stApp{
   background-image:
     radial-gradient(1000px 520px at 4% -10%, rgba(16,185,129,0.10), transparent 62%),
@@ -60,8 +56,7 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 [data-testid="stSidebar"]{background-color:#0a0f1c;border-right:1px solid #18233a;}
 [data-testid="stSidebarNav"]{padding-top:6px;}
 [data-testid="stSidebarNav"] li button,[data-testid="stSidebarNav"] a{font-family:'Space Grotesk',sans-serif;letter-spacing:.04em;}
-.ps-topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;
-  padding:6px 4px 16px 4px;position:relative;}
+.ps-topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:6px 4px 16px 4px;position:relative;}
 .ps-topbar::after{content:"";position:absolute;left:4px;right:4px;bottom:0;height:2px;
   background:linear-gradient(90deg,#10b981,#3884ff 42%,transparent 94%);background-size:220% 100%;
   animation:ps-scan 7s linear infinite;border-radius:2px;}
@@ -71,53 +66,30 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
   background:linear-gradient(150deg,#0e2036,#0b1626);border:1px solid #1d3354;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 6px 18px rgba(0,0,0,.4);}
 .ps-mark svg{width:22px;height:22px;}
-.ps-brand h1{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.18rem;
-  letter-spacing:.14em;text-transform:uppercase;color:#eef3fb;margin:0;line-height:1;}
-.ps-brand .sub{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;
-  letter-spacing:.24em;text-transform:uppercase;color:#4f6080;margin-top:5px;}
-.ps-live{display:inline-flex;align-items:center;gap:7px;margin-top:7px;
-  font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#8294b0;}
-.ps-live .dot{width:7px;height:7px;border-radius:50%;background:#10b981;
-  animation:ps-pulse 2.2s ease-in-out infinite;}
+.ps-brand h1{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.18rem;letter-spacing:.14em;text-transform:uppercase;color:#eef3fb;margin:0;line-height:1;}
+.ps-brand .sub{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.24em;text-transform:uppercase;color:#4f6080;margin-top:5px;}
+.ps-live{display:inline-flex;align-items:center;gap:7px;margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#8294b0;}
+.ps-live .dot{width:7px;height:7px;border-radius:50%;background:#10b981;animation:ps-pulse 2.2s ease-in-out infinite;}
 @keyframes ps-pulse{0%,100%{box-shadow:0 0 3px rgba(16,185,129,.5);}50%{box-shadow:0 0 12px rgba(16,185,129,.95);}}
-.ps-controls{display:flex;align-items:flex-end;gap:10px;}
-.ps-controls>div{min-width:150px;}
-.ps-panel{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);
-  border:1px solid #18233a;border-radius:15px;padding:16px 18px;overflow:hidden;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
-  animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
-.ps-panel::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;
-  background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);}
+.ps-panel{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:15px;padding:16px 18px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
+.ps-panel::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);}
 @keyframes ps-rise{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
-.ps-panel-h{display:flex;align-items:center;justify-content:space-between;
-  font-family:'Space Grotesk',sans-serif;font-size:.62rem;font-weight:600;
-  letter-spacing:.18em;text-transform:uppercase;color:#6b7c97;margin-bottom:12px;}
-.ps-panel-h .big{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;
-  color:#eef3fb;letter-spacing:-.02em;text-transform:none;}
+.ps-panel-h{display:flex;align-items:center;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:.62rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:#6b7c97;margin-bottom:12px;}
+.ps-panel-h .big{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;color:#eef3fb;letter-spacing:-.02em;text-transform:none;}
 .ps-panel-h .delta{font-family:'JetBrains Mono',monospace;font-size:.78rem;font-weight:600;}
 .ps-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin:4px 0 16px 0;}
 @media(max-width:1100px){.ps-kpis{grid-template-columns:repeat(2,1fr);}}
-.ps-kpi{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;
-  border-radius:14px;padding:14px 16px;overflow:hidden;transition:transform .16s,border-color .16s,box-shadow .16s;
-  animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
+.ps-kpi{position:relative;background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:14px;padding:14px 16px;overflow:hidden;transition:transform .16s,border-color .16s,box-shadow .16s;animation:ps-rise .5s cubic-bezier(.2,.7,.2,1) both;}
 .ps-kpi:hover{transform:translateY(-3px);border-color:#2c466e;box-shadow:0 12px 28px rgba(0,0,0,.42);}
 .ps-kpi::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ac,#33507e);}
 .ps-kpi .row{display:flex;align-items:flex-start;justify-content:space-between;}
-.ps-kpi .l{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;
-  letter-spacing:.15em;text-transform:uppercase;color:#6b7c97;}
-.ps-kpi .ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
-  background:var(--ib,rgba(51,80,126,.18));color:var(--ac,#7fa6e0);font-size:.95rem;}
-.ps-kpi .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:1.42rem;
-  color:var(--vc,#eef3fb);margin-top:9px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
+.ps-kpi .l{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:#6b7c97;}
+.ps-kpi .ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--ib,rgba(51,80,126,.18));color:var(--ac,#7fa6e0);font-size:.95rem;}
+.ps-kpi .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:1.42rem;color:var(--vc,#eef3fb);margin-top:9px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
 .ps-kpi .s{font-family:'JetBrains Mono',monospace;font-size:.66rem;color:#6b7c97;margin-top:4px;}
-.ps-grid2{display:grid;grid-template-columns:1.45fr 1fr;gap:14px;}
-@media(max-width:1000px){.ps-grid2{grid-template-columns:1fr;}}
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;}
-.cal .dow{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:600;
-  letter-spacing:.1em;text-transform:uppercase;color:#56657f;text-align:center;padding-bottom:2px;}
-.cal .cell{position:relative;border-radius:9px;min-height:54px;padding:6px 7px;
-  border:1px solid transparent;background:#0b1220;display:flex;flex-direction:column;
-  justify-content:space-between;transition:transform .12s,box-shadow .12s;}
+.cal .dow{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#56657f;text-align:center;padding-bottom:2px;}
+.cal .cell{position:relative;border-radius:9px;min-height:54px;padding:6px 7px;border:1px solid transparent;background:#0b1220;display:flex;flex-direction:column;justify-content:space-between;transition:transform .12s,box-shadow .12s;}
 .cal .cell.sel{outline:2px solid #3884ff;outline-offset:-1px;box-shadow:0 0 0 3px rgba(56,132,255,.18);}
 .cal .cell.empty{background:transparent;border-color:transparent;}
 .cal .cell .d{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#9fb0c9;}
@@ -129,54 +101,79 @@ html,body,.stApp{background-color:#070b14;color:#c7d2e0;font-family:'IBM Plex Sa
 .ps-legend .li .nm{color:#c7d2e0;flex:1;}
 .ps-legend .li .vl{color:#eef3fb;font-weight:700;}
 .ps-legend .li .pc{color:#6b7c97;width:46px;text-align:right;}
-.chip{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.62rem;font-weight:700;
-  padding:2px 8px;border-radius:6px;letter-spacing:.03em;}
+.chip{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.62rem;font-weight:700;padding:2px 8px;border-radius:6px;letter-spacing:.03em;}
 .chip.win{background:rgba(34,197,94,.14);color:#4ade80;border:1px solid rgba(34,197,94,.3);}
 .chip.loss{background:rgba(239,68,68,.14);color:#fb7185;border:1px solid rgba(239,68,68,.3);}
 .chip.buy{background:rgba(56,132,255,.14);color:#7fb0ff;border:1px solid rgba(56,132,255,.3);}
 .chip.sell{background:rgba(168,85,247,.14);color:#c8a4ff;border:1px solid rgba(168,85,247,.3);}
 .chip.flat{background:rgba(120,140,170,.12);color:#9fb0c9;border:1px solid rgba(120,140,170,.25);}
-.trade{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;
-  padding:13px 15px;margin-bottom:11px;transition:border-color .15s,transform .15s;}
+.trade{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;padding:13px 15px;margin:11px 0;transition:border-color .15s,transform .15s;}
 .trade:hover{border-color:#2c466e;transform:translateX(2px);}
 .trade .h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:.8rem;}
 .trade .h .t{color:#8294b0;}
-.trade .h .pnl{margin-left:auto;font-weight:700;font-size:.95rem;}
-.trade .meta{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-family:'JetBrains Mono',monospace;
-  font-size:.68rem;color:#6b7c97;}
-.trade .meta b{color:#c7d2e0;font-weight:600;}
+.trade .h .sym{color:#eef3fb;font-weight:600;}
+.trade .h .pnl{margin-left:auto;font-weight:700;font-size:.98rem;}
+.trade .subline{display:flex;flex-wrap:wrap;gap:14px;margin-top:9px;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#6b7c97;}
+.trade .subline b{color:#c7d2e0;}
+.sbar{display:inline-block;width:64px;height:6px;border-radius:4px;background:#16223c;vertical-align:middle;margin:0 4px;overflow:hidden;}
+.sbar-f{display:block;height:100%;background:linear-gradient(90deg,#3884ff,#10b981);}
+.tfrow{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:10px;}
+.tfrow-l{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97;margin-right:2px;}
+.tf-chip{font-family:'JetBrains Mono',monospace;font-size:.64rem;font-weight:700;padding:2px 8px;border-radius:6px;border:1px solid #233452;background:#0e1830;}
+.tf-ag{font-family:'JetBrains Mono',monospace;font-size:.64rem;color:#6b7c97;margin-left:auto;}
+.panel{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:12px;padding:13px 15px;margin-top:11px;}
+.sec-h{font-family:'Space Grotesk',sans-serif;font-size:.6rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#8294b0;margin-bottom:10px;}
+.comps{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;margin-bottom:12px;}
+@media(max-width:760px){.comps{grid-template-columns:1fr;}}
+.cb{display:flex;align-items:center;gap:8px;}
+.cb-n{width:78px;font-family:'JetBrains Mono',monospace;font-size:.64rem;color:#9fb0c9;text-transform:capitalize;}
+.cb-t{flex:1;height:7px;border-radius:4px;background:#101a2c;overflow:hidden;}
+.cb-f{display:block;height:100%;border-radius:4px;}
+.cb-v{width:32px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:.64rem;font-weight:700;color:#eef3fb;}
+.reads{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;}
+.read{display:grid;grid-template-columns:58px 64px 1fr;gap:8px;align-items:baseline;font-family:'JetBrains Mono',monospace;font-size:.66rem;}
+.read-l{color:#6b7c97;text-transform:uppercase;font-size:.55rem;letter-spacing:.08em;}
+.read-v{color:#eef3fb;font-weight:700;}
+.read-i{color:#8294b0;}
+.narr{font-size:.78rem;line-height:1.55;color:#bcd2f5;background:rgba(56,132,255,.06);border:1px solid rgba(56,132,255,.18);border-radius:10px;padding:10px 12px;}
+.narr ul{margin:0;padding-left:16px;}
+.narr li{margin:3px 0;}
+.narr p{margin:0 0 7px 0;}
+.narr .gt{color:#4ade80;font-weight:700;}
+.narr .bd{color:#fbbf24;font-weight:700;}
+.aside{background:rgba(120,140,170,.07);border:1px solid rgba(120,140,170,.22);border-radius:10px;padding:11px 13px;}
+.aside-t{display:block;font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#9fb0c9;margin-bottom:5px;}
+.aside-r{font-size:.78rem;color:#c7d2e0;line-height:1.5;}
+.exitgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;}
+.stat{background:#0b1220;border:1px solid #18233a;border-radius:9px;padding:8px 10px;}
+.stat .sl{font-family:'Space Grotesk',sans-serif;font-size:.54rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#6b7c97;}
+.stat .sv{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700;margin-top:3px;}
 .bar-row{display:flex;align-items:center;gap:9px;margin:5px 0;font-family:'JetBrains Mono',monospace;font-size:.72rem;}
 .bar-row .nm{width:78px;color:#9fb0c9;text-transform:capitalize;}
 .bar-row .track{flex:1;height:8px;border-radius:5px;background:#101a2c;overflow:hidden;position:relative;}
 .bar-row .fill{height:100%;border-radius:5px;}
 .bar-row .vv{width:34px;text-align:right;color:#eef3fb;font-weight:700;}
 .edge-tbl{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:.72rem;}
-.edge-tbl th{text-align:left;color:#6b7c97;font-weight:600;font-size:.58rem;letter-spacing:.1em;
-  text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #18233a;}
+.edge-tbl th{text-align:left;color:#6b7c97;font-weight:600;font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #18233a;}
 .edge-tbl td{padding:7px 8px;border-bottom:1px solid #111a2b;color:#c7d2e0;}
 .edge-tbl td.num{text-align:right;font-weight:700;}
 .edge-pos{color:#4ade80;} .edge-neg{color:#fb7185;} .edge-flat{color:#6b7c97;}
 .streaks{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
 .streak{background:#0b1220;border:1px solid #18233a;border-radius:12px;padding:13px 15px;text-align:center;}
 .streak .n{font-family:'JetBrains Mono',monospace;font-size:1.9rem;font-weight:700;line-height:1;}
-.streak .lab{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;
-  text-transform:uppercase;color:#6b7c97;margin-top:7px;}
+.streak .lab{font-family:'Space Grotesk',sans-serif;font-size:.56rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97;margin-top:7px;}
 .streak .sub{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#56657f;margin-top:4px;}
-.week{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;
-  padding:14px 16px;margin-bottom:12px;}
+.week{background:linear-gradient(160deg,#0c1322,#0a101d);border:1px solid #18233a;border-radius:13px;padding:14px 16px;margin-bottom:12px;}
 .week .wh{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
 .week .wk{font-family:'Space Grotesk',sans-serif;font-weight:700;color:#eef3fb;font-size:.95rem;}
 .week .wm{display:flex;gap:16px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:.72rem;color:#9fb0c9;}
 .week .wm b{color:#eef3fb;}
-.week .hint{margin-top:11px;padding:10px 12px;border-radius:10px;background:rgba(56,132,255,.07);
-  border:1px solid rgba(56,132,255,.22);font-size:.78rem;color:#bcd2f5;line-height:1.5;}
-.week .hint .tag{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:700;letter-spacing:.16em;
-  text-transform:uppercase;color:#7fb0ff;display:block;margin-bottom:5px;}
+.week .hint{margin-top:11px;padding:10px 12px;border-radius:10px;background:rgba(56,132,255,.07);border:1px solid rgba(56,132,255,.22);font-size:.78rem;color:#bcd2f5;line-height:1.5;}
+.week .hint .tag{font-family:'Space Grotesk',sans-serif;font-size:.55rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#7fb0ff;display:block;margin-bottom:5px;}
 .ps-empty{padding:60px 20px;text-align:center;color:#6b7c97;}
 .ps-empty .e{font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#9fb0c9;font-weight:600;}
 .ps-empty .s{font-size:.82rem;margin-top:8px;line-height:1.6;}
-.ps-glitch{margin:14px 0;padding:14px 16px;border-radius:13px;background:rgba(244,63,94,.07);
-  border:1px solid rgba(244,63,94,.28);}
+.ps-glitch{margin:14px 0;padding:14px 16px;border-radius:13px;background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);}
 .ps-glitch .t{font-family:'Space Grotesk',sans-serif;font-weight:600;color:#fb7185;font-size:.84rem;letter-spacing:.04em;}
 .ps-glitch .s{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#9fb0c9;margin-top:6px;line-height:1.5;}
 .pos{color:#4ade80;} .neg{color:#fb7185;} .mut{color:#6b7c97;}
@@ -275,8 +272,6 @@ def kpi(label, value, sub, icon, ac, vc, ib, delay):
 
 
 def _month_seq(first_y_m, last_y_m):
-    """Inclusive list of (year, month) tuples — no pandas frequency string,
-    so it works on every pandas version (the old freq='M' was removed in 2.2)."""
     seq = []
     y, m = first_y_m
     ey, em = last_y_m
@@ -325,79 +320,266 @@ def _tab_error(where, exc):
     st.markdown(
         f'<div class="ps-glitch"><div class="t">⚠ {where} hit a snag</div>'
         f'<div class="s">Your data is intact — this is a rendering edge case, not a '
-        f'trading fault. The filters above stay live, so change one to retry. '
-        f'Full details are in the expander.</div></div>',
+        f'trading fault. The filters above stay live. Details in the expander.</div></div>',
         unsafe_allow_html=True)
     with st.expander("Technical details"):
         st.exception(exc)
 
 
+def _comp_bar(name, val, mx):
+    v = val or 0
+    pctb = (v / mx * 100) if mx else 0
+    col = "#22c55e" if (mx and v >= mx * 0.66) else ("#f59e0b" if v > 0 else "#33415c")
+    return (f'<div class="cb"><div class="cb-n">{name}</div>'
+            f'<div class="cb-t"><div class="cb-f" style="width:{pctb:.0f}%;background:{col}"></div></div>'
+            f'<div class="cb-v">{int(v)}/{mx}</div></div>')
+
+
+def _read_row(l, v, i):
+    return (f'<div class="read"><span class="read-l">{l}</span>'
+            f'<span class="read-v">{v}</span><span class="read-i">{i}</span></div>')
+
+
+def _entry_readings_html(e, d):
+    rows = []
+    adx = e.get("adx")
+    if adx is not None:
+        s = "strong trend" if adx >= 35 else ("firm trend" if adx >= 25 else ("trending" if adx >= 15 else "weak / choppy"))
+        rows.append(_read_row("ADX", f"{adx:.1f}", s))
+    rsi = e.get("rsi")
+    if rsi is not None:
+        if d == "BUY":
+            z = "healthy bull zone" if 45 <= rsi <= 70 else ("warm — watch exhaustion" if 70 < rsi <= 82 else "outside the safe window")
+        else:
+            z = "healthy bear zone" if 30 <= rsi <= 55 else ("deep oversold, usable" if 18 <= rsi < 30 else "outside the safe window")
+        rows.append(_read_row("RSI", f"{rsi:.1f}", z))
+    m = e.get("macd")
+    if m is not None:
+        aligned = (d == "BUY" and m > 0) or (d == "SELL" and m < 0)
+        rows.append(_read_row("MACD", f"{m:+.5f}", "aligned with the trade" if aligned else "not aligned"))
+    atr = e.get("atr")
+    if atr is not None:
+        rows.append(_read_row("ATR", f"{atr:.5f}", "current candle range (volatility)"))
+    cl = e.get("close")
+    if cl is not None:
+        rows.append(_read_row("CLOSE", f"{cl:.5f}", "entry reference price"))
+    return '<div class="reads">' + "".join(rows) + '</div>' if rows else ''
+
+
+def _entry_narrative(t):
+    d = t["dir"]
+    c = t.get("comps") or {}
+    e = t.get("entry") or {}
+    hi = "high" if d == "BUY" else "low"
+    top = "top" if d == "BUY" else "bottom"
+    hl = "higher lows" if d == "BUY" else "lower highs"
+    b = []
+    b.append(f'<li><span class="gt">Higher-timeframe trend:</span> the 30m and 1h candles agreed on '
+             f'<b>{t["trend"] or d}</b> with ADX+DI confirming it (trend 5/5) — the mandatory backdrop was in place.</li>')
+    ts = c.get("trigger") or 0
+    if ts >= 3:
+        b.append(f'<li><span class="gt">Trigger:</span> the closed 15m candle broke the prior candle’s {hi} on a '
+                 f'<b>strong body</b> (≥0.65) — a decisive move, not a wick.</li>')
+    elif ts == 2:
+        b.append(f'<li><span class="gt">Trigger:</span> the 15m candle broke the prior {hi} on a solid body.</li>')
+    elif ts == 1:
+        b.append(f'<li><span class="bd">Trigger:</span> the 15m candle broke the prior {hi} but on a modest body — '
+                 f'conviction was only marginal.</li>')
+    else:
+        b.append(f'<li><span class="bd">Trigger:</span> the 15m candle did not convincingly break the prior {hi}.</li>')
+    ms = c.get("momentum") or 0
+    if ms >= 3:
+        b.append(f'<li><span class="gt">Momentum:</span> price closed in the {top} ~28% of the candle — the close led the move.</li>')
+    elif ms >= 2:
+        b.append(f'<li><span class="gt">Momentum:</span> the close sat in the favourable half of the candle.</li>')
+    elif ms == 1:
+        b.append(f'<li><span class="bd">Momentum:</span> the close was only mildly directional.</li>')
+    else:
+        b.append(f'<li><span class="bd">Momentum:</span> the close was not directional — weak follow-through.</li>')
+    adx = e.get("adx")
+    if adx is not None:
+        strength = "strong" if adx >= 35 else ("firm" if adx >= 25 else "present-but-modest")
+        b.append(f'<li><span class="gt">Entry-timeframe trend:</span> 15m ADX <b>{adx:.1f}</b> ({strength}) — '
+                 f'the 15m itself was trending, not chopping.</li>')
+    mc = c.get("macd") or 0
+    m = e.get("macd")
+    if mc >= 2:
+        b.append(f'<li><span class="gt">MACD:</span> histogram was aligned with the trade <b>and accelerating</b> '
+                 f'({"+" if (m or 0) > 0 else "−"}{abs(m or 0):.5f}).</li>')
+    elif mc == 1:
+        b.append(f'<li><span class="gt">MACD:</span> histogram aligned with the trade but not yet accelerating.</li>')
+    else:
+        b.append(f'<li><span class="bd">MACD:</span> histogram was not confirming the direction.</li>')
+    rsi = e.get("rsi")
+    sr = c.get("rsi_zone") or 0
+    if rsi is not None:
+        if d == "BUY":
+            zone = "healthy bullish zone (45–70)" if 45 <= rsi <= 70 else ("warm but not exhausted (70–82)" if 70 < rsi <= 82 else "outside the safe window")
+        else:
+            zone = "healthy bearish zone (30–55)" if 30 <= rsi <= 55 else ("oversold-but-usable (18–30)" if 18 <= rsi < 30 else "outside the safe window")
+        tag = "gt" if sr >= 2 else "bd"
+        b.append(f'<li><span class="{tag}">RSI:</span> <b>{rsi:.1f}</b> — {zone}.</li>')
+    stc = c.get("structure") or 0
+    if stc >= 2:
+        b.append(f'<li><span class="gt">Structure:</span> market structure intact — making {hl}.</li>')
+    elif stc == 1:
+        b.append(f'<li><span class="gt">Structure:</span> structure holding (last swing respected).</li>')
+    else:
+        b.append(f'<li><span class="bd">Structure:</span> no clear {hl} structure on the entry timeframe.</li>')
+    pa = c.get("pattern") or 0
+    if pa >= 2:
+        b.append(f'<li><span class="gt">Pattern:</span> a confirming engulfing candle printed on top of the move.</li>')
+    elif pa == 1:
+        b.append(f'<li><span class="gt">Pattern:</span> a pin-bar rejection wick printed in your favour.</li>')
+    al = c.get("alignment") or 0
+    if al >= 1:
+        b.append(f'<li><span class="gt">5m alignment:</span> the 5m chart agreed with the trade direction (bonus).</li>')
+    else:
+        b.append(f'<li><span class="bd">5m alignment:</span> the 5m chart was not aligned (no bonus, not a blocker).</li>')
+    sc = t["score"] or 0
+    thr = t["thr"] or 25
+    delta = sc - thr
+    if delta >= 0:
+        b.append(f'<li><b>Verdict:</b> confluence score <b>{sc}/25</b> cleared the {thr} threshold by {delta} — the engine took it.</li>')
+    else:
+        b.append(f'<li><b>Verdict:</b> score <b>{sc}/25</b> fell {abs(delta)} short of the {thr} threshold.</li>')
+    return '<ul>' + "".join(b) + '</ul>'
+
+
+def _exit_panel_html(t):
+    oc = t["outcome"]
+    def cell(l, v, c="#eef3fb"):
+        return f'<div class="stat"><div class="sl">{l}</div><div class="sv" style="color:{c}">{v}</div></div>'
+    mae = f'{t["mae"]:.5f}' if t["mae"] is not None else "—"
+    mfe = f'{t["mfe"]:.5f}' if t["mfe"] is not None else "—"
+    return ('<div class="exitgrid">'
+            + cell("outcome", oc, "#4ade80" if oc == "WON" else ("#fb7185" if oc == "LOST" else "#9fb0c9"))
+            + cell("P&L", money(t["pnl"]), "#4ade80" if t["pnl"] > 0 else ("#fb7185" if t["pnl"] < 0 else "#eef3fb"))
+            + cell("max drawdown (MAE)", mae, "#fb7185")
+            + cell("max favour (MFE)", mfe, "#4ade80")
+            + '</div>')
+
+
+def _exit_narrative(t):
+    oc = t["outcome"]
+    mae = t["mae"]
+    mfe = t["mfe"]
+    lines = []
+    has = mae is not None and mfe is not None
+    if oc == "WON":
+        if has and mae > 0 and mfe > 0:
+            lines.append(f'It drew down <b>{mae:.5f}</b> against you, then ran <b>{mfe:.5f}</b> in your favour and '
+                         f'closed in profit — the setup had to hold through a scare, and it did. Conviction paid.')
+        elif has:
+            lines.append(f'Clean run — price moved your way almost the whole time (MFE <b>{mfe:.5f}</b>, drawdown '
+                         f'negligible). The entry timing was good.')
+        else:
+            lines.append('Closed in profit (excursion not recorded for this row).')
+    elif oc == "LOST":
+        if has and mfe > 0 and mfe > mae * 0.5:
+            lines.append(f'<b>This is the instructive one.</b> Price WAS in profit (MFE <b>{mfe:.5f}</b>) but gave it '
+                         f'back before expiry — the move reversed. That points at <b>duration / exit</b>: a shorter '
+                         f'contract, or a trend that exhausted into the close, would have banked it. The entry logic '
+                         f'was right; the hold was too long.')
+        elif has:
+            lines.append(f'Wrong from the start — price moved against you immediately (MAE <b>{mae:.5f}</b>, MFE only '
+                         f'<b>{mfe:.5f}</b>). The entry timing or an already-exhausted trend is the suspect; the '
+                         f'exhaustion / 5m-headwind gates are where this gets caught.')
+        else:
+            lines.append('Closed at a loss (excursion not recorded for this row).')
+    elif oc == "UNKNOWN":
+        lines.append('Result was never confirmed by Deriv (MAE/MFE may be partial). The statement is the source of '
+                     'truth here, and the stake plan was deliberately NOT advanced.')
+    else:
+        lines.append('No settled outcome on this row.')
+    if t.get("note"):
+        lines.append(f'<span class="bd">Note:</span> {t["note"]}')
+    return "".join(f'<p>{x}</p>' for x in lines)
+
+
+def _tf_chip(label, val):
+    v = (val or "").upper()
+    if not v or v == "-":
+        col, ic = "#56657f", "·"
+    elif v == "UP":
+        col, ic = "#34d399", "▲"
+    elif v == "DOWN":
+        col, ic = "#fb7185", "▼"
+    else:
+        col, ic = "#8294b0", "·"
+    return f'<span class="tf-chip" style="color:{col};border-color:{col}55">{label} {ic}</span>'
+
+
 def _render_trade_card(t):
     oc = t["outcome"]
+    taken = t["taken"]
     oc_cls = "win" if oc == "WON" else ("loss" if oc == "LOST" else "flat")
     dir_cls = "buy" if t["dir"] == "BUY" else ("sell" if t["dir"] == "SELL" else "flat")
     ts = t["ts"].strftime("%Y-%m-%d %H:%M") if _valid(t) else "—"
     pnl_cls = "pos" if t["pnl"] > 0 else ("neg" if t["pnl"] < 0 else "mut")
-    mae = t["mae"]
-    mfe = t["mfe"]
-    meta = (f'<div class="meta"><span>score <b>{t["score"]}/25</b></span>'
-            f'<span>stake <b>{t["stake"]:.2f}</b></span>'
-            f'<span>step <b>{t["step"]}</b></span>'
-            f'<span>regime <b>{t["regime"] or "—"}</b></span>'
-            f'<span>dur <b>{t["dur"] or "—"}m</b></span>'
-            f'<span>MAE <b>{mae if mae is not None else "—"}</b></span>'
-            f'<span>MFE <b>{mfe if mfe is not None else "—"}</b></span></div>')
-    st.markdown(
-        f'<div class="trade"><div class="h"><span class="t">{ts}</span>'
+    thr = t["thr"] or 25
+    sc = t["score"] or 0
+    pctb = max(0, min(100, int(round(sc / 25 * 100)))) if sc else 0
+    tf = t.get("tf") or {}
+    tf_html = (_tf_chip("5m", tf.get("5m")) + _tf_chip("15m", tf.get("15m"))
+               + _tf_chip("30m", tf.get("30m")) + _tf_chip("1h", tf.get("1h")))
+    mtf_ag = t.get("mtf_agreement") or ""
+    header = (
+        f'<div class="trade">'
+        f'<div class="h"><span class="t">{ts}</span>'
         f'<span class="chip {dir_cls}">{t["dir"] or "—"}</span>'
-        f'<span style="color:#c7d2e0;font-weight:600">{t["sym"]}</span>'
-        f'<span class="chip {oc_cls}">{oc or "—"}</span>'
-        f'<span class="pnl {pnl_cls}">{money(t["pnl"])}</span></div>{meta}</div>',
-        unsafe_allow_html=True)
-    has_breakdown = any((t["comps"][n] or 0) > 0 for n in COMP_NAMES)
-    with st.expander("Why this was placed · entry confluence"):
-        if has_breakdown:
-            for n in COMP_NAMES:
-                v = t["comps"][n] or 0
-                mx = COMP_MAX[n]
-                w = (v / mx * 100) if mx else 0
-                col = "#22c55e" if v >= mx * 0.66 else ("#f59e0b" if v > 0 else "#33415c")
-                st.markdown(f'<div class="bar-row"><div class="nm">{n}</div>'
-                            f'<div class="track"><div class="fill" style="width:{w:.0f}%;background:{col}"></div></div>'
-                            f'<div class="vv">{int(v)}/{mx}</div></div>', unsafe_allow_html=True)
-            e = t["entry"]
-            st.markdown(f'<div class="meta" style="margin-top:10px">'
-                        f'<span>entry ADX <b>{e["adx"] if e["adx"] is not None else "—"}</b></span>'
-                        f'<span>RSI <b>{e["rsi"] if e["rsi"] is not None else "—"}</b></span>'
-                        f'<span>MACD hist <b>{e["macd"] if e["macd"] is not None else "—"}</b></span>'
-                        f'<span>ATR <b>{e["atr"] if e["atr"] is not None else "—"}</b></span>'
-                        f'<span>close <b>{e["close"] if e["close"] is not None else "—"}</b></span>'
-                        f'<span>trend <b>{t["trend"] or "—"}</b></span></div>', unsafe_allow_html=True)
-        elif t["taken"]:
-            st.caption("Taken on score, but no per-factor breakdown was stored for this row.")
+        f'<span class="sym">{t["sym"]}</span>'
+        f'<span class="chip {oc_cls}">{oc or ("HELD" if taken else "ASIDE")}</span>'
+        f'<span class="pnl {pnl_cls}">{money(t["pnl"]) if oc else "—"}</span></div>'
+        f'<div class="subline">'
+        f'<span>score <b>{sc}</b>/25 <span class="sbar"><span class="sbar-f" style="width:{pctb}%"></span></span></span>'
+        f'<span>threshold <b>{thr}</b></span>'
+        f'<span>regime <b>{t["regime"] or "—"}</b></span>'
+        f'<span>dur <b>{t["dur"] or "—"}m</b></span>'
+        f'<span>stake <b>{t["stake"]:.2f}</b></span>'
+        f'<span>step <b>{t["step"]}</b></span>'
+        f'<span>MAE <b>{t["mae"] if t["mae"] is not None else "—"}</b></span>'
+        f'<span>MFE <b>{t["mfe"] if t["mfe"] is not None else "—"}</b></span>'
+        f'</div>'
+        f'<div class="tfrow"><span class="tfrow-l">MTF bias at entry</span>{tf_html}'
+        f'<span class="tf-ag">agreement {mtf_ag}</span></div>'
+        f'</div>'
+    )
+    st.markdown(header, unsafe_allow_html=True)
+
+    left, right = st.columns(2, gap="small")
+    with left:
+        st.markdown('<div class="panel"><div class="sec-h">BEFORE · why the engine took / passed it</div>',
+                    unsafe_allow_html=True)
+        if taken:
+            comps = t.get("comps") or {}
+            if any((comps.get(n) or 0) > 0 for n in COMP_NAMES):
+                bars = "".join(_comp_bar(n, comps.get(n), COMP_MAX[n]) for n in COMP_NAMES)
+                st.markdown(f'<div class="comps">{bars}</div>', unsafe_allow_html=True)
+            readings = _entry_readings_html(t.get("entry") or {}, t["dir"])
+            if readings:
+                st.markdown(readings, unsafe_allow_html=True)
+            st.markdown(f'<div class="narr">{_entry_narrative(t)}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="mut">Not taken — the gate that stopped it: '
-                        f'<b style="color:#c7d2e0">{t["reason"] or "—"}</b></div>', unsafe_allow_html=True)
-    if t["outcome"] in ("WON", "LOST"):
-        with st.expander("Why it won / lost · excursion analysis"):
-            if mae is not None and mfe is not None:
-                if oc == "LOST" and mfe > 0:
-                    line = (f"It was in profit (MFE {mfe:.5f}) but gave it back before expiry — the move "
-                            "reversed. That points at <b>duration / exit</b>: a shorter contract, or a trend "
-                            "that exhausted, would have banked it.")
-                elif oc == "LOST":
-                    line = (f"It moved against you from the start (MAE {mae:.5f}, MFE {mfe:.5f}) — entry timing "
-                            "or a trend already exhausted. Check whether the exhaustion / 5m-headwind gates caught it.")
-                elif oc == "WON" and mae > 0:
-                    line = f"It held through a drawdown (MAE {mae:.5f}) and still won — conviction paid. MFE {mfe:.5f}."
-                else:
-                    line = f"Clean run in your favour (MFE {mfe:.5f}, MAE {mae:.5f})."
-                st.markdown(f'<div style="font-size:.82rem;line-height:1.6;color:#bcd2f5">{line}</div>',
-                            unsafe_allow_html=True)
-            else:
-                st.caption("No excursion data for this row (recorded before MAE/MFE tracking, or no fill).")
-            if t["note"]:
-                st.markdown(f'<div class="mut" style="margin-top:8px">note: {t["note"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="aside"><span class="aside-t">STOOD ASIDE</span>'
+                        f'<span class="aside-r">{t["reason"] or "no qualifying setup on this candle"}</span></div>',
+                        unsafe_allow_html=True)
+            comps = t.get("comps") or {}
+            if any((comps.get(n) or 0) > 0 for n in COMP_NAMES):
+                bars = "".join(_comp_bar(n, comps.get(n), COMP_MAX[n]) for n in COMP_NAMES)
+                st.markdown(f'<div class="comps" style="margin-top:12px">{bars}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="panel"><div class="sec-h">AFTER · what happened &amp; why</div>',
+                    unsafe_allow_html=True)
+        if oc in ("WON", "LOST", "UNKNOWN"):
+            st.markdown(_exit_panel_html(t), unsafe_allow_html=True)
+            st.markdown(f'<div class="narr">{_exit_narrative(t)}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="aside"><span class="aside-t">NO CONTRACT</span>'
+                        '<span class="aside-r">No order was placed for this review, so there is no outcome or '
+                        'excursion to report.</span></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +630,9 @@ def _load_rows(token):
             "entry": {"adx": _f(r, "entry_adx"), "rsi": _f(r, "entry_rsi"),
                       "macd": _f(r, "entry_macd_hist"), "atr": _f(r, "atr"),
                       "close": _f(r, "close")},
+            "tf": {"5m": _g(r, "tf_5m"), "15m": _g(r, "tf_15m"),
+                   "30m": _g(r, "tf_30m"), "1h": _g(r, "tf_1h")},
+            "mtf_agreement": _g(r, "mtf_agreement"),
         })
     return out
 
@@ -463,6 +648,11 @@ with st.sidebar:
                                 help="Your number, not a guess — equity = this + cumulative realised P&L.")
     show_attempted = st.toggle("Include non-executed in Trades tab", value=False)
     st.caption("Read-only. Nothing here changes the bot.")
+
+try:
+    st.page_link("dashboard.py", label="←  Back to Terminal", use_container_width=True)
+except Exception:
+    st.caption("← Open the Terminal from the sidebar.")
 
 # ---------------------------------------------------------------------------
 # Load rows (defensive — a bad file shows a warning, never a blank page)
@@ -500,11 +690,6 @@ with c2:
     sym_filter = st.selectbox("Market", _sym_opts, key="scope_sym")
 with c3:
     period = st.selectbox("Period", PERIODS, key="scope_period")
-
-try:
-    st.page_link("dashboard.py", label="←  Back to Terminal", use_container_width=True)
-except Exception:
-    st.caption("← Open the Terminal from the sidebar.")
 
 if _load_err is not None:
     _tab_error("Journal load", _load_err)
@@ -564,7 +749,6 @@ try:
 except Exception as _e:
     _compute_err = _e
 
-# shared calendar day map (used by Overview + Calendar)
 day_map_all = defaultdict(lambda: [0.0, 0])
 for t in execd:
     if _valid(t):
