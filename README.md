@@ -1,28 +1,43 @@
 # MomentumMaster TF
 
-A multi-market trend terminal for Deriv with a full read-only **trading-journal
-cockpit** (the Performance Scope). It trades **Up / Down** as **Call / Put** on a
-selectable market — **Gold by default**, plus major forex pairs and the synthetic
-1-second indices — using a higher-timeframe trend strategy: a **15m candle
-trigger** confirmed by **30m + 1h agreement**, scored across several independent
-factors with adaptive, **duration-aware** quality gates. **No barriers.** Minute
+A multi-market trend terminal for Deriv with a full read-only trading-journal
+cockpit (the Performance Scope). It trades Up / Down as Call / Put on a
+selectable market — Gold by default, plus major forex pairs and the synthetic
+1-second indices — using a higher-timeframe trend strategy: a candle-close
+trigger confirmed by 30m + 1h agreement, scored across several independent
+factors with adaptive, duration-aware quality gates. No barriers. Minute
 lengths (5 / 15 / 30 / 60). At most 10 trades per day, per tab.
+
+## Duration-aware trigger
+
+The trigger candle matches the contract length so timing stays sharp at every
+duration, while the higher-timeframe confirmation is unchanged:
+
+- 5m  contract → 5m  candle-close trigger
+- 15m contract → 5m  candle-close trigger
+- 30m contract → 15m candle-close trigger (original edge)
+- 60m contract → 15m candle-close trigger
+
+Trend confirmation is always 30m + 1h. Signals still fire only on a new
+trigger-candle close.
 
 ## Two views
 
-- **Terminal** (`dashboard.py`) — configure account, market, stake plan and
-  selectivity; start/stop the engine; watch a themed **5-minute candlestick
-  chart** (with a tick-sparkline fallback for the first ~30s), the live trend,
-  status, trades, and the **Decision Log** (every 15-minute review, with the
-  market, result and reason of every setup). The CSV export lives here.
-- **Performance Scope** (`pages/2_📊_Performance_Scope.py`) — a read-only cockpit
-  with four tabs (Overview / Calendar / Trades / Analytics). The Trades tab shows
-  every trade as a full BEFORE/AFTER report (the 10 confluence factors, the entry
-  ADX/RSI/MACD/ATR/close with a plain read, the per-timeframe bias snapshot, and a
-  narrative of *why it was placed* and *why it won or lost*, including MAE/MFE).
-  Switch between the two views with the sidebar or the **← Back to Terminal**
-  button. The Scope reads an append-only archive, so a cleared live log never
-  erases a past day.
+**Terminal (`dashboard.py`)** — configure account, market, stake plan and
+selectivity; start/stop the engine; watch a themed 5-minute candlestick chart
+(with a tick-sparkline fallback for the first ~30s), the live trend, status,
+trades, and the Decision Log (every trigger-candle review, with the market,
+result and reason of every setup). The CSV export lives here.
+
+**Performance Scope (`pages/bubbles.py`)** — a read-only cockpit with four tabs
+(Overview / Calendar / Trades / Analytics). The Trades tab shows every trade as
+a full BEFORE/AFTER report (the 10 confluence factors, the entry
+ADX/RSI/MACD/ATR/close with a plain read, the per-timeframe bias snapshot, and a
+narrative of why it was placed and why it won or lost, including MAE/MFE).
+
+Switch between the two views with the sidebar or the ← Back to Terminal button.
+The Scope reads an append-only archive, so a cleared live log never erases a
+past day.
 
 ## How it behaves
 
@@ -35,12 +50,8 @@ lengths (5 / 15 / 30 / 60). At most 10 trades per day, per tab.
 - Multiple tabs trade concurrently and independently (own strategy, stake plan
   and martingale each). Avoid mirror-image markets (a pair and its USD-inverse)
   on different tabs — they move as one doubled bet.
-- On a real account, orders stay blocked until you type **LIVE**.
+- On a real account, orders stay blocked until you type LIVE.
 
 ## Credentials
 
-Streamlit Cloud → **App settings → Secrets**:
-
-```toml
-DERIV_APP_ID = "YOUR_PAT_APP_ID"
-DERIV_API_TOKEN = "YOUR_DERIV_PAT"
+Streamlit Cloud → App settings → Secrets:
