@@ -246,10 +246,10 @@ class TradingEngine:
                         self.state.set_status("Reconnected to Deriv. Bot is active.")
                         logger.info("Reconnected to Deriv.")
                         return True
-            except DerivAPIError as exc:
-                logger.warning("Reconnect %d failed: %s", attempt, exc)
-            if attempt < max_attempts:
-                await asyncio.sleep(min(2 ** attempt, 15))
+                except DerivAPIError as exc:
+                    logger.warning("Reconnect %d failed: %s", attempt, exc)
+                if attempt < max_attempts:
+                    await asyncio.sleep(min(2 ** attempt, 15))
         self.state.set_error("Could not reconnect to Deriv after repeated attempts.")
         return False
 
@@ -607,7 +607,6 @@ class TradingEngine:
 
     async def _monitor_contract(self, contract_id, buy_price, payout):
         duration_seconds = self._contract_duration_seconds()
-        # 1s polling for short contracts (<=2m) so a scalp is never blind for 5s.
         poll_interval = 1.0 if duration_seconds <= 120 else (5.0 if duration_seconds <= 600 else 15.0)
         max_wait = duration_seconds + 180.0
         start_time = time.time()
