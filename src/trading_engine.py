@@ -1,4 +1,5 @@
 """src/trading_engine.py — candle-trend engine for CALL/PUT (UP/DOWN)."""
+
 import asyncio
 import json
 import os
@@ -36,6 +37,11 @@ from src.strategy import StrategyEngine
 logger = get_logger("trading_engine")
 
 INITIAL_WARMUP_COOLDOWN_SECONDS = 30.0
+
+# Offline flight recorder. Isolated, locked, and fully swallowed.
+_SNAPSHOT_LOCK = threading.Lock()
+TRADE_SNAPSHOT_FILE = os.path.join(LOG_DIR, "trade_snapshots.jsonl")
+
 _DEMO_ACCOUNT_TYPES = {"DEMO", "VIRTUAL", "PRACTICE", "VIRTUAL_ACCOUNT"}
 _REAL_ACCOUNT_TYPES = {"REAL", "LIVE", "REAL_MONEY"}
 
@@ -121,23 +127,146 @@ class TradingEngine:
         self._daily_trade_count: int = 0
         self._daily_date = datetime.now(timezone.utc).date()
 
-        # Offline learning recorder (additive, isolated, swallowed).
-        self._snapshot_lock = threading.Lock()
+        # Additive only: last candle batch for the offline flight recorder.
         self._last_candles_by_tf: Dict[str, list] = {}
 
+    @staticmethod
+    def _snap_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _record_trade_snapshot(
+        self,
+        signal: str,
+        signal_id: Optional[str],
+        entry_price: float,
+    ) -> None:
+        """Append surrounding candle windows for taken trades only.
+
+        HARD RULES:
+          - never raise
+          - never affect proposal / buy / monitor
+          - swallow every error
+          - locked file append
+        """
+        try:
+            candles_by_tf = getattr(self, "_last_candles_by_tf", None) or {}
+            if not candles_by_tf:
+                return
+
+            strategy = self._strategy
+
+            try:
+                strategy_state = strategy.get_state() or {}
+            except Exception:
+                strategy_state = {}
+
+            entry_tf = getattr(strategy, "_entry_tf", None)
+            trackers = getattr(strategy, "_trackers", None)
+            tracker = None
+            if entry_tf and isinstance(trackers, dict):
+                tracker = trackers.get(entry_tf)
+
+            atr = self._snap_float(getattr(tracker, "atr", None), 0.0) if tracker is not None else 0.0
+            close = self._snap_float(getattr(tracker, "close", None), 0.0) if tracker is not None else 0.0
+            price = self._snap_float(entry_price, 0.0)
+            if price <= 0 and close > 0:
+                price = close
+            if price <= 0:
+                return
+
+            direction = str(signal or "").upper()
+
+            stop_equivalent = None
+            target_equivalent = None
+            if atr and atr > 0:
+                if direction == "BUY":
+                    stop_equivalent = round(price - atr, 5)
+                    target_equivalent = round(price + (1.5 * atr), 5)
+                elif direction == "SELL":
+                    stop_equivalent = round(price + atr, 5)
+                    target_equivalent = round(price - (1.5 * atr), 5)
+
+            candles_out: Dict[str, list] = {}
+            for tf, candles in candles_by_tf.items():
+                rows = []
+                for candle in (candles or [])[-40:]:
+                    try:
+                        epoch = candle.get("epoch")
+                        if epoch in (None, ""):
+                            continue
+                        rows.append(
+                            [
+                                int(float(epoch)),
+                                float(candle.get("open", 0) or 0),
+                                float(candle.get("high", 0) or 0),
+                                float(candle.get("low", 0) or 0),
+                                float(candle.get("close", 0) or 0),
+                                float(candle.get("volume", 0) or 0),
+                            ]
+                        )
+                    except Exception:
+                        continue
+                if rows:
+                    candles_out[str(tf)] = rows
+
+            if not candles_out:
+                return
+
+            snapshot = {
+                "signal_id": signal_id or "",
+                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "symbol": self.symbol,
+                "symbol_display": self.symbol_display,
+                "direction": direction,
+                "score": strategy_state.get("last_signal_score", getattr(strategy, "_last_signal_score", None)),
+                "threshold": getattr(strategy, "_entry_score_threshold", None),
+                "regime": getattr(strategy, "_regime", None),
+                "entry_timeframe": entry_tf,
+                "entry_price": round(price, 5),
+                "atr": round(atr, 5) if atr else None,
+                "stop_equivalent": stop_equivalent,
+                "target_equivalent": target_equivalent,
+                "analytical_levels_only": True,
+                "execution_mode": self.execution_mode,
+                "account_type": self.account_type,
+                "contract_duration": self.contract_duration,
+                "contract_duration_unit": self.contract_duration_unit,
+                "mtf_tf_biases": strategy_state.get("mtf_tf_biases", {}),
+                "pattern_stage": strategy_state.get("pattern_stage"),
+                "last_entry_mode": strategy_state.get("last_entry_mode"),
+                "candles": candles_out,
+            }
+
+            line = json.dumps(snapshot, separators=(",", ":"), default=str)
+
+            with _SNAPSHOT_LOCK:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                with open(TRADE_SNAPSHOT_FILE, "a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+
+        except Exception as exc:
+            logger.debug("Trade snapshot skipped: %s", exc)
+
     def _mae_mfe(self, signal: str) -> Tuple[str, str]:
-        e = self._active_entry_price
-        w = self._active_worst
-        b = self._active_best
-        if e is None or w is None or b is None:
+        entry = self._active_entry_price
+        worst = self._active_worst
+        best = self._active_best
+
+        if entry is None or worst is None or best is None:
             return ("", "")
+
         try:
             if signal == "BUY":
-                mae = max(0.0, e - w)
-                mfe = max(0.0, b - e)
+                mae = max(0.0, entry - worst)
+                mfe = max(0.0, best - entry)
             else:
-                mae = max(0.0, b - e)
-                mfe = max(0.0, e - w)
+                mae = max(0.0, best - entry)
+                mfe = max(0.0, entry - worst)
             return (f"{mae:.5f}", f"{mfe:.5f}")
         except Exception:
             return ("", "")
@@ -224,6 +353,7 @@ class TradingEngine:
 
         self._engine_ready_monotonic = time.monotonic()
         self._last_strategy_state_version = self._strategy.state_version
+
         self.state.set_status(
             f"Live on {self.symbol_display}. First trade possible in {INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s."
         )
@@ -274,7 +404,7 @@ class TradingEngine:
                             f"{signal} setup{tag} on {self.symbol_display} — placing order…"
                         )
 
-                        # Additive offline recorder. Swallows all errors.
+                        # Additive offline flight recorder. Swallowed by design.
                         self._record_trade_snapshot(signal, signal_id, entry_price)
 
                         await self._execute_trade(signal, entry_price, signal_id)
@@ -361,6 +491,7 @@ class TradingEngine:
         if self._trade_in_progress:
             self.state.set_status("Stopping — letting the open contract finish…")
             deadline = time.monotonic() + max(90.0, self._contract_duration_seconds() + 180.0)
+
             while self._trade_in_progress and time.monotonic() < deadline:
                 await asyncio.sleep(0.2)
 
@@ -380,6 +511,7 @@ class TradingEngine:
         try:
             price = float(tick_data.get("quote", 0))
             epoch = float(tick_data.get("epoch", time.time()))
+
             if price == 0:
                 return
 
@@ -391,6 +523,7 @@ class TradingEngine:
                     self._active_worst = price
                 if self._active_best is None or price > self._active_best:
                     self._active_best = price
+
         except Exception as e:
             logger.exception("Error processing tick: %s", e)
 
@@ -431,7 +564,7 @@ class TradingEngine:
 
             now = time.time()
 
-            # Cache for the offline snapshot recorder only.
+            # Additive only: keep the latest candle batch for the flight recorder.
             self._last_candles_by_tf = candles_by_tf
 
             self._strategy.update_candles(candles_by_tf, now)
@@ -526,6 +659,7 @@ class TradingEngine:
                     "Order blocked: select a recognised DEMO account, or type LIVE exactly "
                     "to enable orders on a REAL account. No proposal or buy request was sent."
                 )
+
                 self.state.add_trade(
                     TradeRecord(
                         trade_id=trade_id,
@@ -541,9 +675,11 @@ class TradingEngine:
                         error_message=reason,
                     )
                 )
+
                 self._strategy.on_trade_executed()
                 self.state.set_error(reason)
                 self.state.set_status(f"Signal: {signal}. Order blocked by safety gate.")
+
                 self._journal.record_outcome(
                     signal_id,
                     "CANCELLED",
@@ -581,6 +717,7 @@ class TradingEngine:
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Order cancelled: connection unavailable.")
+
                     self._journal.record_outcome(
                         signal_id,
                         "CANCELLED",
@@ -658,6 +795,7 @@ class TradingEngine:
                 self._daily_trade_count += 1
 
                 fill_latency = time.monotonic() - self._signal_monotonic if self._signal_monotonic > 0 else -1.0
+
                 logger.info(
                     "Filled %s | %s | price=%s | payout=%s | id=%s | %.3fs",
                     contract_id,
@@ -678,10 +816,12 @@ class TradingEngine:
                         f"Contract {contract_id} was bought but settlement was not confirmed. "
                         "Check the Deriv statement; the stake plan was not changed."
                     )
+
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: unresolved contract outcome.")
                     self.state.request_stop()
+
                     self._journal.record_outcome(
                         signal_id,
                         "UNKNOWN",
@@ -730,6 +870,7 @@ class TradingEngine:
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: a buy outcome is ambiguous. Check the Deriv statement.")
                     self.state.request_stop()
+
                     self._journal.record_outcome(
                         signal_id,
                         "UNKNOWN",
@@ -742,15 +883,18 @@ class TradingEngine:
                         mae=mae_s,
                         mfe=mfe_s,
                     )
+
                 elif self._active_contract_id is not None:
                     reason = (
                         f"Contract {self._active_contract_id} was bought, but monitoring failed: "
                         f"{e.message} ({e.code}). Check the Deriv statement; the stake plan was not changed."
                     )
+
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: a purchased contract outcome is unresolved.")
                     self.state.request_stop()
+
                     self._journal.record_outcome(
                         signal_id,
                         "UNKNOWN",
@@ -763,11 +907,13 @@ class TradingEngine:
                         mae=mae_s,
                         mfe=mfe_s,
                     )
+
                 else:
                     reason = f"Deriv rejected the {execution_stage}: {e.message} ({e.code})."
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status(f"Order cancelled during {execution_stage}: {e.message}")
+
                     self._journal.record_outcome(
                         signal_id,
                         "CANCELLED",
@@ -787,6 +933,7 @@ class TradingEngine:
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.request_stop()
+
                     self._journal.record_outcome(
                         signal_id,
                         "UNKNOWN",
@@ -802,6 +949,7 @@ class TradingEngine:
                 else:
                     reason = "Order attempt stopped before any contract was confirmed."
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
+
                     self._journal.record_outcome(
                         signal_id,
                         "CANCELLED",
@@ -812,6 +960,7 @@ class TradingEngine:
                         martingale_step,
                         note=reason,
                     )
+
                 raise
 
             except Exception as e:
@@ -823,6 +972,7 @@ class TradingEngine:
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: a purchased contract outcome is unresolved.")
                     self.state.request_stop()
+
                     self._journal.record_outcome(
                         signal_id,
                         "UNKNOWN",
@@ -840,6 +990,7 @@ class TradingEngine:
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status(f"Order cancelled during {execution_stage}; see error details.")
+
                     self._journal.record_outcome(
                         signal_id,
                         "CANCELLED",
@@ -965,70 +1116,3 @@ class TradingEngine:
 
         logger.warning("Monitoring timed out for %s.", contract_id)
         return "UNKNOWN", 0.0
-
-    def _record_trade_snapshot(self, signal: str, signal_id: Optional[str], entry_price: float) -> None:
-        """Append-only flight recorder for taken signals. Never affects trading."""
-        try:
-            candles_by_tf = getattr(self, "_last_candles_by_tf", None)
-            if not candles_by_tf:
-                return
-
-            windows: Dict[str, list] = {}
-
-            for tf, candles in candles_by_tf.items():
-                try:
-                    if not candles:
-                        continue
-
-                    rows = []
-                    for c in candles[-40:]:
-                        if not isinstance(c, dict):
-                            continue
-
-                        epoch = int(float(c.get("epoch", 0) or 0))
-                        o = float(c.get("open", 0) or 0)
-                        h = float(c.get("high", 0) or 0)
-                        l = float(c.get("low", 0) or 0)
-                        cl = float(c.get("close", 0) or 0)
-                        v = float(c.get("volume", 0) or 0)
-
-                        if epoch <= 0:
-                            continue
-
-                        rows.append([epoch, o, h, l, cl, v])
-
-                    if rows:
-                        windows[str(tf)] = rows
-                except Exception:
-                    continue
-
-            if not windows:
-                return
-
-            payload = {
-                "signal_id": str(signal_id or ""),
-                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "symbol": self.symbol,
-                "symbol_display": self.symbol_display,
-                "direction": signal,
-                "score": int(getattr(self._strategy, "_last_signal_score", 0) or 0),
-                "threshold": int(getattr(self._strategy, "_entry_score_threshold", 0) or 0),
-                "regime": str(getattr(self._strategy, "_regime", "") or ""),
-                "entry_price": float(entry_price or 0.0),
-                "contract_duration": self.contract_duration,
-                "contract_duration_unit": self.contract_duration_unit,
-                "execution_mode": self.execution_mode,
-                "candles": windows,
-            }
-
-            line = json.dumps(payload, separators=(",", ":"), default=str)
-
-            os.makedirs(LOG_DIR, exist_ok=True)
-            path = os.path.join(LOG_DIR, "trade_snapshots.jsonl")
-
-            with self._snapshot_lock:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-
-        except Exception as exc:
-            logger.debug("Snapshot recorder skipped: %s", exc)
