@@ -1,22 +1,82 @@
-"""src/persistence.py — offline learning loop: backup, post-mortem, gate backtest, bundle.
+"""src/persistence.py — Offline learning loop for MomentumMaster TF.
 
-This module is additive and isolated. It reads the journal and optional snapshot
-file only. It never imports the engine and never changes live strategy rules.
+This module is additive and isolated. It reads the journal and optional
+snapshot file only. It never imports the trading engine and never mutates
+strategy behaviour.
+
+Provides:
+  (A) Backup / restore helpers
+  (B) Post-mortem analytics
+  (C) Offline gate backtest
+  (D) Learning bundle export
 """
+
 import csv
 import io
 import json
 import os
 import zipfile
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.logger import get_logger
+try:
+    from config import LOG_DIR, SCORE_MAX
+except Exception:
+    LOG_DIR = os.path.join(os.getcwd(), "logs")
+    SCORE_MAX = 25
 
-logger = get_logger("persistence")
+try:
+    from src.journal import COLUMNS as JOURNAL_COLUMNS, ARCHIVE_COLUMNS as JOURNAL_ARCHIVE_COLUMNS
+except Exception:
+    JOURNAL_COLUMNS = [
+        "signal_id",
+        "timestamp_utc",
+        "symbol",
+        "direction",
+        "trend",
+        "taken",
+        "executed",
+        "rejection_reason",
+        "note",
+        "score",
+        "threshold",
+        "s_trend",
+        "s_trigger",
+        "s_momentum",
+        "s_volatility",
+        "s_alignment",
+        "s_adx",
+        "s_macd",
+        "s_rsi_zone",
+        "s_pattern",
+        "s_structure",
+        "entry_adx",
+        "entry_rsi",
+        "entry_macd_hist",
+        "atr",
+        "close",
+        "outcome",
+        "pnl",
+        "stake",
+        "martingale_step",
+        "contract_id",
+        "execution_mode",
+        "regime",
+        "duration_min",
+        "mae",
+        "mfe",
+        "tf_5m",
+        "tf_15m",
+        "tf_30m",
+        "tf_1h",
+        "mtf_agreement",
+    ]
+    JOURNAL_ARCHIVE_COLUMNS = ["kind"] + JOURNAL_COLUMNS
 
-# Mirror the live confluence schema exactly.
+
+SNAPSHOT_FILE = os.path.join(LOG_DIR, "trade_snapshots.jsonl")
+
 FACTOR_KEYS = [
     "s_trend",
     "s_trigger",
@@ -30,483 +90,534 @@ FACTOR_KEYS = [
     "s_structure",
 ]
 
-# These are the max points per factor in the live 25-point confidence stack.
-FACTOR_MAX = {
-    "s_trend": 5,
-    "s_trigger": 3,
-    "s_momentum": 3,
-    "s_volatility": 2,
-    "s_alignment": 1,
-    "s_adx": 3,
-    "s_macd": 2,
-    "s_rsi_zone": 2,
-    "s_pattern": 2,
-    "s_structure": 2,
+BASE_FACTOR_WEIGHTS = {
+    "trend": 5,
+    "trigger": 3,
+    "momentum": 3,
+    "volatility": 2,
+    "alignment": 1,
+    "adx": 3,
+    "macd": 2,
+    "rsi_zone": 2,
+    "pattern": 2,
+    "structure": 2,
 }
 
-# Offline weight variants.
-# The current variant reproduces the live score when confidence is computed as:
-#   sum(round((recorded_factor_score / factor_max) * variant_weight))
-WEIGHT_VARIANTS = {
-    "current": {
-        "s_trend": 5,
-        "s_trigger": 3,
-        "s_momentum": 3,
-        "s_volatility": 2,
-        "s_alignment": 1,
-        "s_adx": 3,
-        "s_macd": 2,
-        "s_rsi_zone": 2,
-        "s_pattern": 2,
-        "s_structure": 2,
-    },
-    "trend_heavy": {
-        "s_trend": 7,
-        "s_trigger": 2,
-        "s_momentum": 2,
-        "s_volatility": 2,
-        "s_alignment": 2,
-        "s_adx": 4,
-        "s_macd": 2,
-        "s_rsi_zone": 1,
-        "s_pattern": 1,
-        "s_structure": 2,
-    },
-    "execution_heavy": {
-        "s_trend": 3,
-        "s_trigger": 5,
-        "s_momentum": 5,
-        "s_volatility": 1,
-        "s_alignment": 1,
-        "s_adx": 3,
-        "s_macd": 3,
-        "s_rsi_zone": 1,
-        "s_pattern": 2,
-        "s_structure": 1,
-    },
-    "pullback_patient": {
-        "s_trend": 5,
-        "s_trigger": 2,
-        "s_momentum": 2,
-        "s_volatility": 2,
-        "s_alignment": 2,
-        "s_adx": 3,
-        "s_macd": 2,
-        "s_rsi_zone": 3,
-        "s_pattern": 2,
-        "s_structure": 2,
-    },
+FACTOR_TO_BASE = {f"s_{name}": name for name in BASE_FACTOR_WEIGHTS}
+
+SWEEP_THRESHOLDS = [13, 16, 20, 23]
+
+
+def _make_variant(overrides: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+    variant = {name: 1.0 for name in BASE_FACTOR_WEIGHTS}
+    if overrides:
+        variant.update(overrides)
+    return variant
+
+
+WEIGHT_VARIANTS: Dict[str, Dict[str, float]] = {
+    "current": _make_variant(),
+    "trend_heavy": _make_variant(
+        {
+            "trend": 1.25,
+            "alignment": 1.20,
+            "adx": 1.15,
+            "structure": 1.10,
+            "trigger": 0.95,
+            "momentum": 0.95,
+            "macd": 0.95,
+            "rsi_zone": 0.90,
+            "volatility": 0.85,
+            "pattern": 0.85,
+        }
+    ),
+    "execution_heavy": _make_variant(
+        {
+            "trigger": 1.25,
+            "momentum": 1.20,
+            "macd": 1.15,
+            "pattern": 1.10,
+            "adx": 1.05,
+            "structure": 1.00,
+            "alignment": 1.00,
+            "trend": 0.90,
+            "rsi_zone": 0.95,
+            "volatility": 0.90,
+        }
+    ),
+    "pullback_patient": _make_variant(
+        {
+            "rsi_zone": 1.25,
+            "structure": 1.20,
+            "volatility": 1.15,
+            "alignment": 1.10,
+            "pattern": 1.05,
+            "trend": 1.00,
+            "adx": 1.00,
+            "macd": 0.95,
+            "trigger": 0.90,
+            "momentum": 0.90,
+        }
+    ),
 }
 
-GATE_THRESHOLDS = [13, 16, 20, 23]
-_TREND_VALUES = {"UP", "DOWN"}
-_CLOSED_OUTCOMES = {"WON", "LOST"}
 
+# ---------------------------------------------------------------------------
+# Basic helpers
+# ---------------------------------------------------------------------------
 
-def _clean_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    for k, v in (row or {}).items():
-        if k is None:
-            continue
-        key = str(k).strip()
-        if isinstance(v, str):
-            v = v.strip()
-        out[key] = v
-    return out
-
-
-def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value is None:
         return default
     if isinstance(value, bool):
         return float(value)
-    try:
-        if isinstance(value, str):
-            value = value.strip().replace(",", "")
-            if value == "":
-                return default
+    if isinstance(value, (int, float)):
         return float(value)
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return float(text)
     except (TypeError, ValueError):
         return default
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
-    f = _safe_float(value, None)
-    if f is None:
-        return default
-    return int(f)
+def _to_bool(value: Any) -> bool:
+    return str(value or "").strip().upper() in {"TRUE", "T", "1", "YES", "Y"}
 
 
-def _safe_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().upper() in {"TRUE", "1", "YES", "Y"}
-
-
-def _parse_ts(value: Any) -> Optional[datetime]:
-    s = str(value or "").strip()
-    if not s:
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
         return None
-    formats = (
-        "%Y-%m-%d %H:%M:%S UTC",
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S.%f",
-    )
+        "%Y-%m-%d %H:%M:%S UTC",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+    ]
     for fmt in formats:
         try:
-            return datetime.strptime(s, fmt)
+            parsed = datetime.strptime(text, fmt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
         except Exception:
             pass
+
     try:
-        return datetime.fromisoformat(s.replace("Z", ""))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
 
-def _journal_paths(journal) -> Tuple[str, str]:
-    live = str(getattr(journal, "_live", "") or "")
-    archive = str(getattr(journal, "_archive", "") or "")
-    return live, archive
+def _clean_record(row: Optional[Dict[Any, Any]]) -> Dict[str, str]:
+    """Normalise a journal row.
+
+    The uploaded files can contain harmless formatting damage, trailing spaces,
+    or mixed key forms. This keeps imports robust without touching live code.
+    """
+    out: Dict[str, str] = {}
+    row = row or {}
+
+    for key, value in row.items():
+        if key is None:
+            continue
+        raw_key = str(key)
+        clean_key = raw_key.strip()
+
+        if isinstance(value, str):
+            clean_value = value.strip()
+        elif value is None:
+            clean_value = ""
+        else:
+            clean_value = str(value).strip()
+
+        out[raw_key] = clean_value
+        out[clean_key] = clean_value
+
+    # Ensure both stripped and exact journal column forms exist.
+    for column in JOURNAL_COLUMNS:
+        column_s = str(column).strip()
+        value = out.get(column_s, out.get(str(column), ""))
+        out[str(column)] = value
+        out[column_s] = value
+
+    return out
 
 
-def snapshots_path(journal) -> str:
-    live, _ = _journal_paths(journal)
-    if not live:
-        return ""
-    return os.path.join(os.path.dirname(live), "trade_snapshots.jsonl")
+def _eval_fingerprint(row: Dict[str, Any]) -> Tuple[str, ...]:
+    keys = [
+        "timestamp_utc",
+        "symbol",
+        "direction",
+        "trend",
+        "score",
+        "threshold",
+        "regime",
+        "duration_min",
+        "entry_adx",
+        "entry_rsi",
+        "entry_macd_hist",
+        "atr",
+        "close",
+        "tf_5m",
+        "tf_15m",
+        "tf_30m",
+        "tf_1h",
+        "mtf_agreement",
+    ] + FACTOR_KEYS
+    return tuple(str(row.get(k, "") or "").strip().lower() for k in keys)
 
 
-def _read_snapshots_bytes(journal) -> bytes:
-    path = snapshots_path(journal)
+def _outcome_fingerprint(row: Dict[str, Any]) -> Tuple[str, ...]:
+    keys = [
+        "signal_id",
+        "outcome",
+        "pnl",
+        "stake",
+        "martingale_step",
+        "contract_id",
+        "execution_mode",
+        "note",
+        "mae",
+        "mfe",
+    ]
+    return tuple(str(row.get(k, "") or "").strip().lower() for k in keys)
+
+
+def _read_file_bytes(path: str) -> bytes:
     try:
         if path and os.path.exists(path):
-            with open(path, "rb") as f:
-                return f.read()
-    except Exception as exc:
-        logger.debug("Snapshot read failed: %s", exc)
+            with open(path, "rb") as handle:
+                return handle.read()
+    except Exception:
+        pass
     return b""
 
 
-def _count_snapshot_lines(journal) -> int:
-    path = snapshots_path(journal)
+def _snapshot_count() -> int:
     try:
-        if not path or not os.path.exists(path):
+        if not os.path.exists(SNAPSHOT_FILE):
             return 0
-        count = 0
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for _ in f:
-                count += 1
-        return count
-    except Exception as exc:
-        logger.debug("Snapshot count failed: %s", exc)
+        with open(SNAPSHOT_FILE, "r", encoding="utf-8") as handle:
+            return sum(1 for _ in handle)
+    except Exception:
         return 0
 
 
-def _existing_ids(journal) -> Tuple[set, set]:
-    eval_ids = set()
-    outcome_ids = set()
+def _existing_fingerprints(journal: Any) -> Tuple[set, set, set, set]:
+    eval_signal_ids: set = set()
+    outcome_signal_ids: set = set()
+    eval_hashes: set = set()
+    outcome_hashes: set = set()
 
-    _, archive_path = _journal_paths(journal)
-    live_path, _ = _journal_paths(journal)
+    archive_path = getattr(journal, "_archive", None)
+    if archive_path and os.path.exists(archive_path):
+        try:
+            with open(archive_path, "r", newline="", encoding="utf-8") as handle:
+                for raw in csv.DictReader(handle):
+                    row = _clean_record(raw)
+                    kind = str(row.get("kind", "EVAL") or "EVAL").strip().upper()
+                    signal_id = str(row.get("signal_id", "") or "").strip()
 
-    try:
-        if archive_path and os.path.exists(archive_path):
-            with open(archive_path, "r", newline="", encoding="utf-8") as f:
-                for raw in csv.DictReader(f):
-                    row = _clean_row(raw)
-                    sid = str(row.get("signal_id", "") or "").strip()
-                    if not sid:
-                        continue
-                    kind = str(row.get("kind", "") or "").strip().upper()
                     if kind == "EVAL":
-                        eval_ids.add(sid)
+                        if signal_id:
+                            eval_signal_ids.add(signal_id)
+                        eval_hashes.add(_eval_fingerprint(row))
                     elif kind == "OUTCOME":
-                        outcome_ids.add(sid)
-    except Exception as exc:
-        logger.debug("Existing archive id scan failed: %s", exc)
-
-    try:
-        if live_path and os.path.exists(live_path):
-            with open(live_path, "r", newline="", encoding="utf-8") as f:
-                for raw in csv.DictReader(f):
-                    row = _clean_row(raw)
-                    sid = str(row.get("signal_id", "") or "").strip()
-                    if not sid:
-                        continue
-                    eval_ids.add(sid)
-                    outcome = str(row.get("outcome", "") or "").strip().upper()
-                    if outcome:
-                        outcome_ids.add(sid)
-    except Exception as exc:
-        logger.debug("Existing live id scan failed: %s", exc)
-
-    return eval_ids, outcome_ids
-
-
-def export_archive_csv_bytes(journal) -> bytes:
-    _, archive_path = _journal_paths(journal)
-    try:
-        if archive_path and os.path.exists(archive_path):
-            with open(archive_path, "rb") as f:
-                return f.read()
-    except Exception as exc:
-        logger.warning("Archive export failed: %s", exc)
-    return b""
-
-
-def export_merged_json_bytes(journal) -> bytes:
-    try:
-        rows = journal.read_archive_merged() or journal.read_rows() or []
-        rows = [_clean_row(r) for r in rows]
-        return json.dumps(rows, indent=2, default=str).encode("utf-8")
-    except Exception as exc:
-        logger.warning("Merged JSON export failed: %s", exc)
-        return b"[]"
-
-
-def _record_outcome_from_row(journal, row: Dict[str, Any]) -> None:
-    sid = str(row.get("signal_id", "") or "").strip()
-    outcome = str(row.get("outcome", "") or "").strip()
-    pnl = _safe_float(row.get("pnl"), 0.0) or 0.0
-    stake = _safe_float(row.get("stake"), 0.0) or 0.0
-
-    cid_raw = str(row.get("contract_id", "") or "").strip()
-    contract_id: Optional[Any]
-    if not cid_raw or cid_raw.lower() in {"none", "null"}:
-        contract_id = None
-    else:
-        try:
-            contract_id = int(float(cid_raw))
+                        if signal_id:
+                            outcome_signal_ids.add(signal_id)
+                        outcome_hashes.add(_outcome_fingerprint(row))
+                    else:
+                        # Be permissive: treat unknown kinds as merged rows.
+                        if signal_id:
+                            eval_signal_ids.add(signal_id)
+                            if row.get("outcome"):
+                                outcome_signal_ids.add(signal_id)
+                        eval_hashes.add(_eval_fingerprint(row))
+                        if row.get("outcome"):
+                            outcome_hashes.add(_outcome_fingerprint(row))
         except Exception:
-            contract_id = cid_raw
+            pass
 
-    execution_mode = str(row.get("execution_mode", "") or "")
-    martingale_step = str(row.get("martingale_step", "") or "")
-    note = str(row.get("note", "") or "")
-    mae = row.get("mae", "") if row.get("mae", "") is not None else ""
-    mfe = row.get("mfe", "") if row.get("mfe", "") is not None else ""
-
-    journal.record_outcome(
-        sid,
-        outcome,
-        pnl,
-        stake,
-        contract_id,
-        execution_mode,
-        martingale_step,
-        note,
-        mae,
-        mfe,
-    )
-
-
-def _import_csv(
-    journal,
-    text: str,
-    eval_ids: set,
-    outcome_ids: set,
-    local_eval: set,
-    local_outcome: set,
-    counts: Dict[str, int],
-) -> None:
-    text = (text or "").strip()
-    if not text:
-        counts["errors"] += 1
-        return
-
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
-        counts["errors"] += 1
-        return
-
-    fields = {str(f).strip() for f in reader.fieldnames if f is not None}
-    is_archive = "kind" in fields
-
-    for raw in reader:
-        row = _clean_row(raw)
-        if not row:
-            continue
-
-        sid = str(row.get("signal_id", "") or "").strip()
-        if not sid:
-            counts["skipped"] += 1
-            continue
-
-        kind = str(row.get("kind", "") or "").strip().upper() if is_archive else ""
-
-        try:
-            if is_archive:
-                if kind == "EVAL":
-                    if sid in eval_ids or sid in local_eval:
-                        counts["skipped"] += 1
-                    else:
-                        journal.record_evaluation(row)
-                        local_eval.add(sid)
-                        counts["eval_added"] += 1
-                elif kind == "OUTCOME":
-                    if sid in outcome_ids or sid in local_outcome:
-                        counts["skipped"] += 1
-                    else:
-                        _record_outcome_from_row(journal, row)
-                        local_outcome.add(sid)
-                        counts["outcome_added"] += 1
-                else:
-                    counts["skipped"] += 1
-            else:
-                # Treat as merged/live-style rows.
-                if sid in eval_ids or sid in local_eval:
-                    counts["skipped"] += 1
-                else:
-                    journal.record_evaluation(row)
-                    local_eval.add(sid)
-                    counts["eval_added"] += 1
-
-                outcome = str(row.get("outcome", "") or "").strip().upper()
-                if outcome and outcome not in {"NONE", "PENDING"}:
-                    if sid in outcome_ids or sid in local_outcome:
-                        counts["skipped"] += 1
-                    else:
-                        _record_outcome_from_row(journal, row)
-                        local_outcome.add(sid)
-                        counts["outcome_added"] += 1
-        except Exception as exc:
-            logger.debug("CSV import row failed: %s", exc)
-            counts["errors"] += 1
-
-
-def _import_json(
-    journal,
-    text: str,
-    eval_ids: set,
-    outcome_ids: set,
-    local_eval: set,
-    local_outcome: set,
-    counts: Dict[str, int],
-) -> None:
+    # Fallback / reinforcement from the merged view.
     try:
-        obj = json.loads(text)
-    except Exception as exc:
-        logger.debug("JSON import parse failed: %s", exc)
-        counts["errors"] += 1
-        return
+        for raw in journal.read_archive_merged():
+            row = _clean_record(raw)
+            signal_id = str(row.get("signal_id", "") or "").strip()
+            if signal_id:
+                eval_signal_ids.add(signal_id)
+                if row.get("outcome"):
+                    outcome_signal_ids.add(signal_id)
+            eval_hashes.add(_eval_fingerprint(row))
+            if row.get("outcome"):
+                outcome_hashes.add(_outcome_fingerprint(row))
+    except Exception:
+        pass
 
-    if isinstance(obj, list):
-        rows = obj
-    elif isinstance(obj, dict):
-        rows = obj.get("rows", [])
-        if not isinstance(rows, list):
-            rows = []
-    else:
+    return eval_signal_ids, outcome_signal_ids, eval_hashes, outcome_hashes
+
+
+# ---------------------------------------------------------------------------
+# (A) Backup / restore
+# ---------------------------------------------------------------------------
+
+def export_archive_csv_bytes(journal: Any) -> bytes:
+    """Return the raw append-only archive CSV if present.
+
+    This archive is the lossless master copy: every EVAL and OUTCOME event.
+    """
+    archive_path = getattr(journal, "_archive", None)
+    data = _read_file_bytes(archive_path) if archive_path else b""
+    if data:
+        return data
+
+    # Fallback: the live journal is better than nothing.
+    try:
+        return journal.to_csv_bytes() or b""
+    except Exception:
+        return b""
+
+
+def export_merged_json_bytes(journal: Any) -> bytes:
+    """Return a human-readable merged JSON view of the journal."""
+    try:
+        rows = journal.read_archive_merged() or []
+    except Exception:
         rows = []
 
-    if not rows:
-        counts["skipped"] += 1
-        return
-
-    for raw in rows:
-        row = _clean_row(raw if isinstance(raw, dict) else {})
-        if not row:
-            continue
-
-        sid = str(row.get("signal_id", "") or "").strip()
-        if not sid:
-            counts["skipped"] += 1
-            continue
-
-        try:
-            if sid in eval_ids or sid in local_eval:
-                counts["skipped"] += 1
-            else:
-                journal.record_evaluation(row)
-                local_eval.add(sid)
-                counts["eval_added"] += 1
-
-            outcome = str(row.get("outcome", "") or "").strip().upper()
-            if outcome and outcome not in {"NONE", "PENDING"}:
-                if sid in outcome_ids or sid in local_outcome:
-                    counts["skipped"] += 1
-                else:
-                    _record_outcome_from_row(journal, row)
-                    local_outcome.add(sid)
-                    counts["outcome_added"] += 1
-        except Exception as exc:
-            logger.debug("JSON import row failed: %s", exc)
-            counts["errors"] += 1
+    clean_rows = [_clean_record(row) for row in rows]
+    payload = {
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "rows": clean_rows,
+    }
+    return json.dumps(payload, indent=2, default=str).encode("utf-8")
 
 
-def import_journal(journal, data: Any, filename: str) -> Dict[str, int]:
-    counts = {"eval_added": 0, "outcome_added": 0, "skipped": 0, "errors": 0}
+def import_journal(journal: Any, data: Any, filename: str = "import.csv") -> Dict[str, int]:
+    """Import an archive CSV or merged JSON into the journal idempotently.
+
+    Merge rule:
+      - EVAL rows are de-duplicated by signal_id where possible, otherwise by
+        a content fingerprint.
+      - OUTCOME rows are de-duplicated by signal_id.
+
+    Re-importing the same file should add nothing the second time.
+    """
+    counts = {
+        "eval_added": 0,
+        "outcome_added": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
 
     try:
-        if isinstance(data, bytes):
+        if isinstance(data, (bytes, bytearray)):
             text = data.decode("utf-8-sig")
         else:
             text = str(data)
-    except Exception as exc:
-        logger.warning("Import decode failed: %s", exc)
+    except Exception:
         counts["errors"] += 1
         return counts
 
-    eval_ids, outcome_ids = _existing_ids(journal)
-    local_eval = set()
-    local_outcome = set()
+    eval_signal_ids, outcome_signal_ids, eval_hashes, outcome_hashes = _existing_fingerprints(journal)
 
     fname = str(filename or "").lower()
     stripped = text.lstrip()
+    is_json = fname.endswith(".json") or stripped.startswith("[") or stripped.startswith("{")
 
-    try:
-        if fname.endswith(".json") or stripped.startswith("[") or stripped.startswith("{"):
-            _import_json(journal, text, eval_ids, outcome_ids, local_eval, local_outcome, counts)
-        else:
-            _import_csv(journal, text, eval_ids, outcome_ids, local_eval, local_outcome, counts)
-    except Exception as exc:
-        logger.warning("Import failed: %s", exc)
-        counts["errors"] += 1
+    records: List[Tuple[str, Dict[str, Any]]] = []
+
+    if is_json:
+        try:
+            loaded = json.loads(text)
+
+            if isinstance(loaded, dict):
+                if any(k in loaded for k in ("signal_id", "timestamp_utc", "score")):
+                    loaded = [loaded]
+                else:
+                    loaded = (
+                        loaded.get("rows")
+                        or loaded.get("journal")
+                        or loaded.get("data")
+                        or loaded.get("records")
+                        or []
+                    )
+
+            if isinstance(loaded, list):
+                for row in loaded:
+                    if isinstance(row, dict):
+                        records.append(("MERGED", row))
+            else:
+                counts["errors"] += 1
+                return counts
+        except Exception:
+            counts["errors"] += 1
+            return counts
+    else:
+        try:
+            reader = csv.DictReader(io.StringIO(text))
+            fieldnames = [str(x).strip() for x in (reader.fieldnames or [])]
+            has_kind = "kind" in fieldnames
+
+            for raw in reader:
+                if has_kind:
+                    kind = str(raw.get("kind", "EVAL") or "EVAL").strip().upper()
+                else:
+                    kind = "MERGED"
+                records.append((kind, raw))
+        except Exception:
+            counts["errors"] += 1
+            return counts
+
+    for kind, raw in records:
+        try:
+            row = _clean_record(raw)
+            signal_id = str(row.get("signal_id", "") or "").strip()
+            outcome = str(row.get("outcome", "") or "").strip().upper()
+
+            if kind == "OUTCOME":
+                if not signal_id:
+                    counts["skipped"] += 1
+                    continue
+
+                fingerprint = _outcome_fingerprint(row)
+                if signal_id in outcome_signal_ids or fingerprint in outcome_hashes:
+                    counts["skipped"] += 1
+                    continue
+
+                journal.record_outcome(
+                    signal_id,
+                    outcome,
+                    _to_float(row.get("pnl"), 0.0) or 0.0,
+                    _to_float(row.get("stake"), 0.0) or 0.0,
+                    row.get("contract_id") or None,
+                    row.get("execution_mode", "") or "",
+                    row.get("martingale_step", "") or "",
+                    row.get("note", "") or "",
+                    row.get("mae", "") or "",
+                    row.get("mfe", "") or "",
+                )
+
+                outcome_signal_ids.add(signal_id)
+                outcome_hashes.add(fingerprint)
+                counts["outcome_added"] += 1
+                continue
+
+            # EVAL or MERGED
+            fingerprint = _eval_fingerprint(row)
+            if (signal_id and signal_id in eval_signal_ids) or fingerprint in eval_hashes:
+                counts["skipped"] += 1
+            else:
+                journal.record_evaluation(row)
+                if signal_id:
+                    eval_signal_ids.add(signal_id)
+                eval_hashes.add(fingerprint)
+                counts["eval_added"] += 1
+
+            if outcome and signal_id:
+                outcome_fp = _outcome_fingerprint(row)
+                if signal_id in outcome_signal_ids or outcome_fp in outcome_hashes:
+                    counts["skipped"] += 1
+                else:
+                    journal.record_outcome(
+                        signal_id,
+                        outcome,
+                        _to_float(row.get("pnl"), 0.0) or 0.0,
+                        _to_float(row.get("stake"), 0.0) or 0.0,
+                        row.get("contract_id") or None,
+                        row.get("execution_mode", "") or "",
+                        row.get("martingale_step", "") or "",
+                        row.get("note", "") or "",
+                        row.get("mae", "") or "",
+                        row.get("mfe", "") or "",
+                    )
+                    outcome_signal_ids.add(signal_id)
+                    outcome_hashes.add(outcome_fp)
+                    counts["outcome_added"] += 1
+            elif outcome and not signal_id:
+                counts["skipped"] += 1
+
+        except Exception:
+            counts["errors"] += 1
 
     return counts
 
 
+# ---------------------------------------------------------------------------
+# (B) Post-mortem
+# ---------------------------------------------------------------------------
+
 def _is_trending_review(row: Dict[str, Any]) -> bool:
-    trend = str(row.get("trend", "") or "").strip().upper()
-    tf30 = str(row.get("tf_30m", "") or "").strip().upper()
-    tf1h = str(row.get("tf_1h", "") or "").strip().upper()
-    return trend in _TREND_VALUES or tf30 in _TREND_VALUES or tf1h in _TREND_VALUES
+    for key in ("trend", "tf_30m", "tf_1h"):
+        if str(row.get(key, "") or "").strip().upper() in {"UP", "DOWN"}:
+            return True
+    return False
 
 
 def _weakest_factor(row: Dict[str, Any]) -> Optional[str]:
-    vals: List[Tuple[float, str]] = []
+    values: List[Tuple[float, str]] = []
     for key in FACTOR_KEYS:
-        v = _safe_float(row.get(key), None)
-        if v is not None:
-            vals.append((v, key))
-    if not vals:
+        value = _to_float(row.get(key), None)
+        if value is not None:
+            values.append((value, FACTOR_TO_BASE.get(key, key)))
+
+    if not values:
         return None
-    min_val = min(v for v, _ in vals)
-    for key in FACTOR_KEYS:
-        v = _safe_float(row.get(key), None)
-        if v is not None and v == min_val:
-            return key
-    return vals[0][1]
+
+    values.sort(key=lambda item: item[0])
+    return values[0][1]
 
 
-def _edge_add(edges: Dict[str, Dict[str, float]], key: str, outcome: str, pnl: float) -> None:
-    key = str(key or "UNKNOWN").strip() or "UNKNOWN"
-    if key not in edges:
-        edges[key] = {"trades": 0, "wins": 0, "pnl": 0.0}
-    edges[key]["trades"] += 1
-    edges[key]["pnl"] += pnl
-    if outcome == "WON":
-        edges[key]["wins"] += 1
+def _trade_brief(row: Dict[str, Any], pnl: float, mae: Optional[float], mfe: Optional[float], lens: str) -> Dict[str, Any]:
+    mae_f = _to_float(mae, None)
+    mfe_f = _to_float(mfe, None)
+    spread = None
+    if mae_f is not None and mfe_f is not None:
+        spread = round(mfe_f - mae_f, 5)
+
+    return {
+        "timestamp_utc": row.get("timestamp_utc", ""),
+        "signal_id": row.get("signal_id", ""),
+        "symbol": row.get("symbol", ""),
+        "direction": row.get("direction", ""),
+        "trend": row.get("trend", ""),
+        "score": _to_float(row.get("score"), None),
+        "threshold": _to_float(row.get("threshold"), None),
+        "regime": row.get("regime", ""),
+        "duration_min": row.get("duration_min", ""),
+        "outcome": row.get("outcome", ""),
+        "pnl": round(pnl, 2),
+        "mae": mae_f,
+        "mfe": mfe_f,
+        "mfe_minus_mae": spread,
+        "execution_mode": row.get("execution_mode", ""),
+        "note": row.get("note", ""),
+        "lens": lens,
+    }
 
 
-def _finalize_edges(edges: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, Any]]:
+def _edge_add(bucket: Dict[str, Any], won: bool, pnl: float) -> None:
+    bucket["trades"] += 1
+    bucket["pnl"] += pnl
+    if won:
+        bucket["wins"] += 1
+
+
+def _finalize_edges(edges: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
-    for key, v in edges.items():
-        trades = int(v.get("trades", 0))
-        wins = int(v.get("wins", 0))
-        pnl = float(v.get("pnl", 0.0))
-        out[key] = {
+    for key, data in edges.items():
+        trades = int(data.get("trades", 0))
+        wins = int(data.get("wins", 0))
+        pnl = float(data.get("pnl", 0.0))
+        out[str(key)] = {
             "trades": trades,
             "wins": wins,
             "win_rate": round((wins / trades * 100.0) if trades else 0.0, 1),
@@ -515,33 +626,14 @@ def _finalize_edges(edges: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, A
     return out
 
 
-def _post_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "signal_id": str(row.get("signal_id", "") or ""),
-        "timestamp_utc": str(row.get("timestamp_utc", "") or ""),
-        "symbol": str(row.get("symbol", "") or ""),
-        "direction": str(row.get("direction", "") or ""),
-        "trend": str(row.get("trend", "") or ""),
-        "score": _safe_int(row.get("score"), 0),
-        "threshold": _safe_int(row.get("threshold"), 0),
-        "regime": str(row.get("regime", "") or ""),
-        "duration_min": str(row.get("duration_min", "") or ""),
-        "stake": _safe_float(row.get("stake"), 0.0),
-        "pnl": _safe_float(row.get("pnl"), 0.0),
-        "mae": _safe_float(row.get("mae"), None),
-        "mfe": _safe_float(row.get("mfe"), None),
-        "note": str(row.get("note", "") or ""),
-    }
-
-
-def compute_postmortem(journal) -> Dict[str, Any]:
-    rows: List[Dict[str, Any]] = []
+def compute_postmortem(journal: Any) -> Dict[str, Any]:
+    """Compute the offline post-mortem from recorded data only."""
     try:
-        rows = [_clean_row(r) for r in (journal.read_archive_merged() or journal.read_rows() or [])]
-    except Exception as exc:
-        logger.warning("Post-mortem read failed: %s", exc)
+        rows = journal.read_archive_merged() or []
+    except Exception:
+        rows = []
 
-    reviews = len(rows)
+    reviews = 0
     taken = 0
     closed = 0
     wins = 0
@@ -552,66 +644,69 @@ def compute_postmortem(journal) -> Dict[str, Any]:
     fragile_wins: List[Dict[str, Any]] = []
     gatekeeper_counter: Counter = Counter()
 
-    edges_symbol: Dict[str, Dict[str, float]] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
-    edges_hour: Dict[str, Dict[str, float]] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
-    edges_regime: Dict[str, Dict[str, float]] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    edges_symbol: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    edges_hour: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    edges_regime: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
 
-    for row in rows:
-        was_taken = _safe_bool(row.get("taken"))
+    for raw in rows:
+        row = _clean_record(raw)
+        reviews += 1
+
+        was_taken = _to_bool(row.get("taken")) or _to_bool(row.get("executed"))
         if was_taken:
             taken += 1
 
         outcome = str(row.get("outcome", "") or "").strip().upper()
+        pnl = _to_float(row.get("pnl"), 0.0) or 0.0
+        ts = _parse_timestamp(row.get("timestamp_utc"))
+        mae = _to_float(row.get("mae"), None)
+        mfe = _to_float(row.get("mfe"), None)
 
-        if outcome in _CLOSED_OUTCOMES:
+        if outcome in {"WON", "LOST"}:
             closed += 1
-            pnl = _safe_float(row.get("pnl"), 0.0) or 0.0
             net_pnl += pnl
+            won = outcome == "WON"
 
-            if outcome == "WON":
+            if won:
                 wins += 1
             else:
                 losses += 1
 
-            mae = _safe_float(row.get("mae"), None)
-            mfe = _safe_float(row.get("mfe"), None)
+            symbol = str(row.get("symbol", "") or "unknown").strip() or "unknown"
+            hour = f"{ts.hour:02d}" if ts else "unknown"
+            regime = str(row.get("regime", "") or "unknown").strip() or "unknown"
+
+            _edge_add(edges_symbol[symbol], won, pnl)
+            _edge_add(edges_hour[hour], won, pnl)
+            _edge_add(edges_regime[regime], won, pnl)
 
             if outcome == "LOST" and mae is not None and mfe is not None and mfe > mae * 1.0:
-                avoidable_losses.append(_post_row(row))
+                avoidable_losses.append(
+                    _trade_brief(row, pnl, mae, mfe, "duration_exit")
+                )
 
             if outcome == "WON" and mae is not None and mfe is not None and mae > mfe * 1.0:
-                fragile_wins.append(_post_row(row))
+                fragile_wins.append(
+                    _trade_brief(row, pnl, mae, mfe, "entry_timing")
+                )
 
-            _edge_add(edges_symbol, row.get("symbol", "UNKNOWN"), outcome, pnl)
+        if not was_taken:
+            score = _to_float(row.get("score"), None)
+            threshold = _to_float(row.get("threshold"), float(SCORE_MAX))
+            if score is not None and threshold is not None:
+                gap = threshold - score
+                if 0 <= gap <= 8 and _is_trending_review(row):
+                    weakest = _weakest_factor(row)
+                    if weakest:
+                        gatekeeper_counter[weakest] += 1
 
-            ts = _parse_ts(row.get("timestamp_utc"))
-            hour_key = f"{ts.hour:02d}" if ts is not None else "unknown"
-            _edge_add(edges_hour, hour_key, outcome, pnl)
-
-            regime = str(row.get("regime", "") or "").strip().upper() or "UNKNOWN"
-            _edge_add(edges_regime, regime, outcome, pnl)
-
-        elif not was_taken:
-            score = _safe_float(row.get("score"), None)
-            threshold = _safe_float(row.get("threshold"), None)
-            if (
-                score is not None
-                and threshold is not None
-                and 0 <= (threshold - score) <= 8
-                and _is_trending_review(row)
-            ):
-                weakest = _weakest_factor(row)
-                if weakest:
-                    gatekeeper_counter[weakest] += 1
-
-    avoidable_losses.sort(key=lambda r: str(r.get("timestamp_utc", "") or ""), reverse=True)
-    fragile_wins.sort(key=lambda r: str(r.get("timestamp_utc", "") or ""), reverse=True)
+    avoidable_losses.sort(key=lambda item: _to_float(item.get("mfe_minus_mae"), 0.0) or 0.0, reverse=True)
+    fragile_wins.sort(key=lambda item: abs(_to_float(item.get("mfe_minus_mae"), 0.0) or 0.0), reverse=True)
 
     win_rate = round((wins / closed * 100.0) if closed else 0.0, 1)
-    gatekeeper_factors = dict(gatekeeper_counter.most_common())
-    top_gatekeeper = gatekeeper_counter.most_common(1)[0][0] if gatekeeper_counter else None
 
     return {
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "summary": {
             "reviews": reviews,
             "taken": taken,
@@ -620,82 +715,106 @@ def compute_postmortem(journal) -> Dict[str, Any]:
             "losses": losses,
             "win_rate": win_rate,
             "net_pnl": round(net_pnl, 2),
-            "snapshots_recorded": _count_snapshot_lines(journal),
+            "snapshots_recorded": _snapshot_count(),
         },
         "avoidable_losses": avoidable_losses,
         "fragile_wins": fragile_wins,
-        "gatekeeper_factors": gatekeeper_factors,
-        "top_gatekeeper": top_gatekeeper,
+        "gatekeeper_factors": gatekeeper_counter.most_common(),
         "edges": {
             "by_symbol": _finalize_edges(edges_symbol),
-            "by_hour": _finalize_edges(edges_hour),
+            "by_hour_utc": _finalize_edges(edges_hour),
             "by_regime": _finalize_edges(edges_regime),
         },
     }
 
 
-def _confidence_from_row(row: Dict[str, Any], weights: Dict[str, int]) -> int:
+# ---------------------------------------------------------------------------
+# (C) Gate backtest
+# ---------------------------------------------------------------------------
+
+def _recompute_score(row: Dict[str, Any], multipliers: Dict[str, float]) -> Optional[int]:
     total = 0.0
+    seen = 0
+
     for key in FACTOR_KEYS:
-        raw = _safe_float(row.get(key), None)
-        if raw is None:
+        raw_value = _to_float(row.get(key), None)
+        if raw_value is None:
             continue
-        maxv = float(FACTOR_MAX.get(key, 1))
-        if maxv <= 0:
-            continue
-        if raw < 0:
-            raw = 0.0
-        if raw > maxv:
-            raw = maxv
-        frac = raw / maxv
-        total += frac * float(weights.get(key, 0))
+
+        base_name = FACTOR_TO_BASE.get(key, key.replace("s_", ""))
+        max_points = float(BASE_FACTOR_WEIGHTS.get(base_name, 1) or 1)
+        multiplier = float(multipliers.get(base_name, 1.0) or 1.0)
+
+        # This mirrors the live score when multiplier == 1.0:
+        # normalised factor * base weight * multiplier.
+        total += (raw_value / max_points) * max_points * multiplier
+        seen += 1
+
+    if seen == 0:
+        return _to_float(row.get("score"), None)
+
     return int(round(total))
 
 
-def sweep_gates(journal) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+def _baseline_sweep(clean_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    taken = 0
+    closed = 0
+    wins = 0
+    net_pnl = 0.0
+
+    for row in clean_rows:
+        was_taken = _to_bool(row.get("taken")) or _to_bool(row.get("executed"))
+        if not was_taken:
+            continue
+
+        taken += 1
+        outcome = str(row.get("outcome", "") or "").strip().upper()
+        pnl = _to_float(row.get("pnl"), 0.0) or 0.0
+
+        if outcome in {"WON", "LOST"}:
+            closed += 1
+            net_pnl += pnl
+            if outcome == "WON":
+                wins += 1
+
+    return {
+        "variant": "AS-RECORDED (ground truth)",
+        "threshold": "as-recorded",
+        "would_take": taken,
+        "kept": taken,
+        "kept_pnl": round(net_pnl, 2),
+        "kept_win_rate": round((wins / closed * 100.0) if closed else 0.0, 1) if closed else None,
+        "dropped": 0,
+        "dropped_pnl": 0.0,
+        "dropped_losses_avoided": 0,
+        "dropped_wins_lost": 0,
+        "added_unknown": 0,
+    }
+
+
+def sweep_gates(journal: Any) -> List[Dict[str, Any]]:
+    """Offline, non-destructive gate backtest.
+
+    This never changes the bot. It only asks: if we had used this variant and
+    threshold, what would have been kept / dropped / added-unknown?
+    """
     try:
-        rows = [_clean_row(r) for r in (journal.read_archive_merged() or journal.read_rows() or [])]
-    except Exception as exc:
-        logger.warning("Gate sweep read failed: %s", exc)
+        rows = journal.read_archive_merged() or []
+    except Exception:
+        rows = []
 
-    results: List[Dict[str, Any]] = []
+    clean_rows = [_clean_record(row) for row in rows]
+    results: List[Dict[str, Any]] = [_baseline_sweep(clean_rows)]
 
-    taken_rows = [r for r in rows if _safe_bool(r.get("taken"))]
-    closed_taken = [
-        r for r in taken_rows
-        if str(r.get("outcome", "") or "").strip().upper() in _CLOSED_OUTCOMES
-    ]
-    baseline_pnl = sum((_safe_float(r.get("pnl"), 0.0) or 0.0) for r in closed_taken)
-    baseline_wins = sum(
-        1 for r in closed_taken
-        if str(r.get("outcome", "") or "").strip().upper() == "WON"
-    )
-
-    results.append(
-        {
-            "variant": "AS-RECORDED (ground truth)",
-            "threshold": "as-recorded",
-            "would_take": len(taken_rows),
-            "kept": len(closed_taken),
-            "kept_pnl": round(baseline_pnl, 2),
-            "kept_win_rate": round((baseline_wins / len(closed_taken) * 100.0) if closed_taken else 0.0, 1),
-            "dropped": 0,
-            "dropped_pnl": 0.0,
-            "dropped_losses_avoided": 0,
-            "dropped_wins_lost": 0,
-            "added_unknown": 0,
-        }
-    )
-
-    for variant_name, weights in WEIGHT_VARIANTS.items():
-        for threshold in GATE_THRESHOLDS:
+    for variant_name, multipliers in WEIGHT_VARIANTS.items():
+        for threshold in SWEEP_THRESHOLDS:
             would_take = 0
-
+            kept = 0
             kept_closed = 0
             kept_wins = 0
             kept_pnl = 0.0
 
+            dropped = 0
             dropped_closed = 0
             dropped_pnl = 0.0
             dropped_losses_avoided = 0
@@ -703,32 +822,39 @@ def sweep_gates(journal) -> List[Dict[str, Any]]:
 
             added_unknown = 0
 
-            for row in rows:
-                conf = _confidence_from_row(row, weights)
-                would = conf >= threshold
-                was = _safe_bool(row.get("taken"))
+            for row in clean_rows:
+                recomputed = _recompute_score(row, multipliers)
+                if recomputed is None:
+                    continue
+
+                would = recomputed >= threshold
+                was_taken = _to_bool(row.get("taken")) or _to_bool(row.get("executed"))
                 outcome = str(row.get("outcome", "") or "").strip().upper()
-                is_closed = outcome in _CLOSED_OUTCOMES
-                pnl = (_safe_float(row.get("pnl"), 0.0) or 0.0) if is_closed else 0.0
+                pnl = _to_float(row.get("pnl"), 0.0) or 0.0
+                closed = outcome in {"WON", "LOST"}
 
                 if would:
                     would_take += 1
 
-                if would and was:
-                    if is_closed:
+                if would and was_taken:
+                    kept += 1
+                    if closed:
                         kept_closed += 1
                         kept_pnl += pnl
                         if outcome == "WON":
                             kept_wins += 1
-                elif (not would) and was:
-                    if is_closed:
+
+                elif (not would) and was_taken:
+                    dropped += 1
+                    if closed:
                         dropped_closed += 1
                         dropped_pnl += pnl
                         if outcome == "LOST":
                             dropped_losses_avoided += 1
                         elif outcome == "WON":
                             dropped_wins_lost += 1
-                elif would and (not was):
+
+                elif would and (not was_taken):
                     added_unknown += 1
 
             results.append(
@@ -736,10 +862,12 @@ def sweep_gates(journal) -> List[Dict[str, Any]]:
                     "variant": variant_name,
                     "threshold": threshold,
                     "would_take": would_take,
-                    "kept": kept_closed,
+                    "kept": kept,
                     "kept_pnl": round(kept_pnl, 2),
-                    "kept_win_rate": round((kept_wins / kept_closed * 100.0) if kept_closed else 0.0, 1),
-                    "dropped": dropped_closed,
+                    "kept_win_rate": round((kept_wins / kept_closed * 100.0) if kept_closed else 0.0, 1)
+                    if kept_closed
+                    else None,
+                    "dropped": dropped,
                     "dropped_pnl": round(dropped_pnl, 2),
                     "dropped_losses_avoided": dropped_losses_avoided,
                     "dropped_wins_lost": dropped_wins_lost,
@@ -750,99 +878,152 @@ def sweep_gates(journal) -> List[Dict[str, Any]]:
     return results
 
 
-def export_preset_text(variant: str, threshold: Any, metrics: Optional[Dict[str, Any]] = None) -> str:
-    weights = WEIGHT_VARIANTS.get(variant, WEIGHT_VARIANTS["current"])
-    now = datetime.utcnow().isoformat() + "Z"
+def export_preset_text(variant_name: str, threshold: Any) -> str:
+    """Export a plain-text preset proposal.
+
+    This is deliberately proposal-only. It must be forward-tested on demo and
+    manually opted into later. Nothing here auto-applies.
+    """
+    multipliers = WEIGHT_VARIANTS.get(variant_name, WEIGHT_VARIANTS["current"])
 
     lines: List[str] = []
-    lines.append("# MomentumMaster TF offline preset proposal")
-    lines.append(f"# Generated UTC: {now}")
-    lines.append("# THIS IS NOT AUTO-APPLIED.")
-    lines.append("# Forward-test on demo before opting in manually.")
+    lines.append("MomentumMaster TF — Offline Preset Proposal")
+    lines.append("==========================================")
+    lines.append(f"generated_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"variant: {variant_name}")
+    lines.append(f"proposed_entry_score_threshold: {threshold}")
+    lines.append("status: PROPOSAL_ONLY")
+    lines.append("auto_apply: false")
+    lines.append("forward_test_required: true")
     lines.append("")
-    lines.append(f"variant = {variant!r}")
-    lines.append(f"threshold = {threshold!r}")
+    lines.append("This file is a human decision artifact. It does not modify the bot.")
+    lines.append("If you want to use it, forward-test on demo first, then opt in manually.")
     lines.append("")
-
-    if metrics:
-        lines.append(
-            "# Backtest: "
-            f"kept_pnl={metrics.get('kept_pnl')}, "
-            f"kept_win_rate={metrics.get('kept_win_rate')}%, "
-            f"dropped_losses_avoided={metrics.get('dropped_losses_avoided')}, "
-            f"dropped_wins_lost={metrics.get('dropped_wins_lost')}, "
-            f"added_unknown={metrics.get('added_unknown')}"
-        )
-        lines.append("")
-
-    lines.append("weights = {")
-    for key in FACTOR_KEYS:
-        lines.append(f"    {key!r}: {weights.get(key, 0)},")
-    lines.append("}")
+    lines.append("weight_multipliers:")
+    for name in sorted(BASE_FACTOR_WEIGHTS):
+        lines.append(f"  {name}: {float(multipliers.get(name, 1.0)):.2f}")
     lines.append("")
-    lines.append("# Manual opt-in example after review:")
-    lines.append(
-        f"# STRATEGY_SENSITIVITY_PRESETS[\"Offline {variant} @{threshold}\"] = "
-        f"{{\"entry_score_threshold\": {threshold}, \"entry_adx_floor\": 15}}"
-    )
+    lines.append("base_factor_max_points:")
+    for name in sorted(BASE_FACTOR_WEIGHTS):
+        lines.append(f"  {name}: {BASE_FACTOR_WEIGHTS[name]}")
+    lines.append("")
+    lines.append("Interpretation:")
+    lines.append("- kept_pnl = real P&L from trades this variant would still have taken.")
+    lines.append("- dropped_pnl = real P&L from trades this variant would have skipped.")
+    lines.append("  Negative dropped_pnl means the variant would have avoided losers.")
+    lines.append("  Positive dropped_pnl means it would have cut winners.")
+    lines.append("- added_unknown = setups the variant would have taken but the bot did not.")
+    lines.append("  These have no settled P&L and must be forward-tested.")
+    lines.append("")
+    lines.append("Suggested manual next step:")
+    lines.append("1. Read the post-mortem.")
+    lines.append("2. Compare this variant against AS-RECORDED.")
+    lines.append("3. If it is better and still believable, test it on demo.")
+    lines.append("4. Only then consider adding it as a named sensitivity preset.")
 
     return "\n".join(lines)
 
 
-def _learning_readme_text(post: Dict[str, Any]) -> str:
-    s = post.get("summary", {}) if isinstance(post, dict) else {}
-    return (
-        "MomentumMaster TF learning bundle\n"
-        "=================================\n\n"
-        "Cadence:\n"
-        "- Review this bundle once per week, not after every trade.\n"
-        "- Prefer one proposed change at a time.\n"
-        "- Forward-test on demo before opting in manually.\n\n"
-        "Honest ceiling:\n"
-        "- Nothing in this bundle auto-mutates the bot.\n"
-        "- The bot learns BETWEEN sessions, offline, through a human review loop.\n"
-        "- A blank day is legitimate; stand-asides still produce gatekeeper data.\n\n"
-        "What each part means:\n"
-        "- trade_journal.csv: live journal view.\n"
-        "- journal_archive.csv: lossless append-only master archive (EVAL + OUTCOME rows).\n"
-        "- trade_snapshots.jsonl: candle windows captured around taken signals.\n"
-        "- postmortem.json: computed lenses:\n"
-        "  * avoidable_losses: LOST where MFE > MAE => duration/exit problem.\n"
-        "  * fragile_wins: WON where MAE > MFE => entry-timing/noise problem.\n"
-        "  * gatekeeper_factors: weakest soft factor on trending near-miss stand-asides.\n"
-        "  * edges: by symbol, hour, and regime.\n\n"
-        "Current summary:\n"
-        f"- reviews: {s.get('reviews', 0)}\n"
-        f"- taken: {s.get('taken', 0)}\n"
-        f"- closed: {s.get('closed', 0)}\n"
-        f"- wins: {s.get('wins', 0)}\n"
-        f"- losses: {s.get('losses', 0)}\n"
-        f"- win_rate: {s.get('win_rate', 0)}\n"
-        f"- net_pnl: {s.get('net_pnl', 0)}\n"
-        f"- snapshots_recorded: {s.get('snapshots_recorded', 0)}\n"
-    )
+# ---------------------------------------------------------------------------
+# (D) Learning bundle
+# ---------------------------------------------------------------------------
+
+def _read_me_first_text() -> str:
+    return """MomentumMaster TF — Learning Bundle
+===================================
+
+This bundle is the offline learning loop.
+
+CADENCE
+- Review this weekly, not after every trade.
+- Small samples overfit fast. Binary options are noisy. Be boring.
+
+CONTENTS
+- trade_journal.csv
+    Live journal view.
+- journal_archive.csv
+    Append-only master copy. This is the lossless record.
+- trade_snapshots.jsonl
+    Candle windows around taken trades only.
+    Each line is one taken setup with compact candle rows per timeframe.
+- postmortem.json
+    Structured post-mortem.
+- gate_backtest.json
+    Offline gate sweep. Non-destructive. Proposal only.
+- READ_ME_FIRST.txt
+    This file.
+
+LENSES
+- avoidable_losses
+    LOST trades where MFE > MAE.
+    Price was in favour, then reversed before expiry.
+    Lever: duration / exit choice.
+
+- fragile_wins
+    WON trades where MAE > MFE.
+    The trade survived, but it spent too much time against you.
+    Lever: entry timing / trigger strictness.
+
+- gatekeeper_factors
+    For near-miss stand-asides in trending conditions, the weakest soft factor.
+    Lever: the one gate to re-test, not everything at once.
+
+- edges
+    By symbol, hour, and regime.
+    Lever: selection. Trade the best pools, not everything.
+
+THE CEILING
+- The bot does NOT rewrite itself.
+- This bundle helps a human propose one change.
+- That change must be forward-tested on demo.
+- Only then should it be manually opted into.
+
+A blank day is legitimate.
+Even stand-asides produce data.
+"""
 
 
-def build_learning_bundle(journal) -> bytes:
-    post = compute_postmortem(journal)
-    buf = io.BytesIO()
+def build_learning_bundle(journal: Any) -> bytes:
+    """Build a zip bundle for offline review."""
+    buffer = io.BytesIO()
 
-    live_bytes = b""
-    try:
-        live_bytes = journal.to_csv_bytes() or b""
-    except Exception as exc:
-        logger.debug("Live journal export for bundle failed: %s", exc)
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        try:
+            bundle.writestr("trade_journal.csv", journal.to_csv_bytes() or b"")
+        except Exception:
+            bundle.writestr("trade_journal.csv", b"")
 
-    archive_bytes = export_archive_csv_bytes(journal)
-    snapshot_bytes = _read_snapshots_bytes(journal)
-    post_bytes = json.dumps(post, indent=2, default=str).encode("utf-8")
-    readme_bytes = _learning_readme_text(post).encode("utf-8")
+        try:
+            bundle.writestr("journal_archive.csv", export_archive_csv_bytes(journal) or b"")
+        except Exception:
+            bundle.writestr("journal_archive.csv", b"")
 
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("trade_journal.csv", live_bytes)
-        zf.writestr("journal_archive.csv", archive_bytes)
-        zf.writestr("trade_snapshots.jsonl", snapshot_bytes)
-        zf.writestr("postmortem.json", post_bytes)
-        zf.writestr("READ_ME_FIRST.txt", readme_bytes)
+        try:
+            if os.path.exists(SNAPSHOT_FILE):
+                bundle.write(SNAPSHOT_FILE, arcname="trade_snapshots.jsonl")
+            else:
+                bundle.writestr("trade_snapshots.jsonl", b"")
+        except Exception:
+            bundle.writestr("trade_snapshots.jsonl", b"")
 
-    return buf.getvalue()
+        try:
+            postmortem = compute_postmortem(journal)
+            bundle.writestr(
+                "postmortem.json",
+                json.dumps(postmortem, indent=2, default=str).encode("utf-8"),
+            )
+        except Exception:
+            bundle.writestr("postmortem.json", b"{}")
+
+        try:
+            sweep = sweep_gates(journal)
+            bundle.writestr(
+                "gate_backtest.json",
+                json.dumps(sweep, indent=2, default=str).encode("utf-8"),
+            )
+        except Exception:
+            bundle.writestr("gate_backtest.json", b"[]")
+
+        bundle.writestr("READ_ME_FIRST.txt", _read_me_first_text())
+
+    return buffer.getvalue()
