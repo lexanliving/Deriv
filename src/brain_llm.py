@@ -5,17 +5,20 @@ OpenAI. All four speak the OpenAI-compatible /v1/chat/completions protocol, so
 there is ONE code path; providers differ only by base URL, key env var, and
 default model.
 
-Robustness (the reason the old "write synthesis" silently died):
+Robustness:
   * chat / stream try every CONFIGURED provider in priority order and only fail
-    when all of them fail (429 / stale-model 404 / 5xx / network all roll over).
+    when all of them fail (429 / stale-model 404 / 403 host-block / 5xx / network
+    all roll over).
   * MODEL AUTO-RESOLUTION: if a provider rejects the configured/default model,
-    we query its /v1/models once, pick a live chat model, cache it, and retry -
-    so a stale hardcoded default no longer breaks anything.
+    we query its /v1/models once, pick a live chat model, cache it, and retry.
+  * HUMANIZED ERRORS: known HTTP/provider codes are translated to plain English
+    (e.g. Groq 403/1010 = host/IP block on the free tier -> add a backstop),
+    so the UI shows the real reason + the real remedy, never a cryptic code.
   * Every attempt is recorded in a chain trace the UI can show verbatim.
 
-Stdlib-only HTTP (urllib), like src/api_client.py -> no new pip dependency,
-nothing that can break installation. This module is an ADVISOR only: it never
-places a trade and never mutates the live strategy.
+Stdlib-only HTTP (urllib), like src/api_client.py -> no new pip dependency.
+This module is an ADVISOR only: it never places a trade and never mutates the
+live strategy.
 """
 from __future__ import annotations
 
@@ -42,7 +45,6 @@ class BrainLLMError(Exception):
 
 # --------------------------------------------------------------------------- #
 #  Provider specs — priority order is the failover order.                     #
-#  base = everything BEFORE "/v1". chat = {base}/v1/chat/completions.         #
 # --------------------------------------------------------------------------- #
 PROVIDERS: List[Dict[str, Any]] = [
     {
@@ -50,14 +52,14 @@ PROVIDERS: List[Dict[str, Any]] = [
         "key_env": "GROQ_API_KEY", "model_env": "GROQ_MODEL",
         "default_model": "llama-3.3-70b-versatile",
         "signup": "https://console.groq.com/keys",
-        "free_note": "Free tier, very fast. If the default model 404s, auto-resolve picks a live one; or set GROQ_MODEL (e.g. openai/gpt-oss-120b, meta-llama/llama-4-scout-17b-16e-instant, qwen/qwen3-32b).",
+        "free_note": "Free tier, very fast. If you see 403/1010 it is Groq blocking the host IP/key (not fixable from code) — add OpenRouter as a backstop.",
     },
     {
         "id": "openrouter", "label": "OpenRouter", "base": "https://openrouter.ai/api",
         "key_env": "OPENROUTER_API_KEY", "model_env": "OPENROUTER_MODEL",
         "default_model": "google/gemini-2.5-flash:free",
         "signup": "https://openrouter.ai/keys",
-        "free_note": "Free ':free' models. Defaults to a free Gemini; alternatives: deepseek/deepseek-chat-v3-0324:free, meta-llama/llama-4-maverick:free. Rate-limits roll over to the next provider.",
+        "free_note": "Free ':free' models on different infra than Groq — the ideal backstop. Alternatives: deepseek/deepseek-chat-v3-0324:free, meta-llama/llama-4-maverick:free.",
     },
     {
         "id": "cerebras", "label": "Cerebras", "base": "https://api.cerebras.ai",
@@ -71,12 +73,11 @@ PROVIDERS: List[Dict[str, Any]] = [
         "key_env": "OPENAI_API_KEY", "model_env": "OPENAI_MODEL",
         "default_model": "gpt-4o-mini",
         "signup": "https://platform.openai.com/api-keys",
-        "free_note": "Paid — last-resort fallback so the chain almost always has a live backstop. Alternatives: gpt-4.1-mini, gpt-5-mini.",
+        "free_note": "Paid — last-resort fallback so the chain almost always has a live backstop.",
     },
 ]
 _BY_ID: Dict[str, Dict[str, Any]] = {p["id"]: p for p in PROVIDERS}
 
-# module-global diagnostics (single-user Streamlit app; simple is correct)
 _trace_lock = threading.Lock()
 _last_trace: List[Dict[str, str]] = []
 _resolved: Dict[str, str] = {}
@@ -119,7 +120,6 @@ def _model_for(provider_id: str) -> str:
 
 
 def configured_providers() -> List[str]:
-    """Configured provider ids, in priority (failover) order."""
     return [p["id"] for p in PROVIDERS if _secret(p["key_env"])]
 
 
@@ -127,7 +127,10 @@ def detect_provider() -> Optional[str]:
     want = (_secret("BRAIN_PROVIDER") or "auto").strip().lower()
     cfg = configured_providers()
     if want != "auto":
-        return want if want in cfg else (want if _secret(_BY_ID.get(want, {}).get("key_env", "__none__")) else None)
+        if want in cfg:
+            return want
+        spec = _BY_ID.get(want)
+        return want if (spec and _secret(spec["key_env"])) else None
     return cfg[0] if cfg else None
 
 
@@ -136,7 +139,6 @@ def active_provider_id() -> Optional[str]:
 
 
 def provider_nodes() -> List[Dict[str, Any]]:
-    """Status for the chain visualization, in priority order."""
     active = active_provider_id()
     cfg = set(configured_providers())
     out = []
@@ -159,6 +161,30 @@ def _set_trace(t: List[Dict[str, str]]) -> None:
     global _last_trace
     with _trace_lock:
         _last_trace = t
+
+
+# --------------------------------------------------------------------------- #
+#  human-readable error translation                                           #
+# --------------------------------------------------------------------------- #
+def _humanize(status: int, body: str) -> str:
+    low = (body or "").lower()
+    if status == 401:
+        return "invalid or missing API key — re-check the secret in Streamlit Secrets / env"
+    if status == 403:
+        if "1010" in (body or "") or any(t in low for t in ("cloudflare", "challenge", "blocked", "attention", "ray id", "sorry, you have been blocked")):
+            return ("provider blocked this host's request (free tiers often sit behind a "
+                    "Cloudflare / IP block, code 1010). This cannot be fixed from code — add a "
+                    "second provider on different infra (OpenRouter / Cerebras) as a backstop.")
+        return "access forbidden — the key may be suspended, out of credits, or region-blocked"
+    if status == 404:
+        return ("model not found and auto-resolve found no live alternative — set the *_MODEL "
+                "env var to a current model name for that provider")
+    if status == 429:
+        return "rate limit / quota exhausted on this key — the chain tries the next provider"
+    if 500 <= status < 600:
+        return "provider server error (transient) — the chain tries the next provider"
+    txt = (body or "").strip()
+    return txt[:160] if txt else f"HTTP {status}"
 
 
 # --------------------------------------------------------------------------- #
@@ -238,17 +264,7 @@ def _is_model_error(status: int, body: str) -> bool:
     return ("model" in low) and any(k in low for k in ("not found", "does not exist", "invalid", "unsupported", "no model", "not exist"))
 
 
-def _is_retryable(status: int, body: str) -> bool:
-    if status in (429, 500, 502, 503, 504):
-        return True
-    if _is_model_error(status, body):
-        return True
-    low = body.lower()
-    return any(k in low for k in ("rate limit", "too many requests", "overloaded", "capacity", "timeout", "temporarily"))
-
-
 def _resolve_model(provider_id: str) -> Optional[str]:
-    """Query /v1/models and pick a live chat model. Cached. Returns None on failure."""
     spec = _BY_ID[provider_id]
     url = f"{spec['base']}/v1/models"
     try:
@@ -263,7 +279,6 @@ def _resolve_model(provider_id: str) -> Optional[str]:
         return None
     hints = ("instruct", "chat", "mini", "flash", "instant", "versatile", "maverick", "scout", "oss")
     ranked = sorted(ids, key=lambda s: (0 if any(h in s.lower() for h in hints) else 1, len(s)))
-    # exclude obvious embedding / moderation / image models
     ranked = [s for s in ranked if not any(b in s.lower() for b in ("embed", "moderation", "image", "tts", "whisper", "dall"))] or ranked
     pick = ranked[0]
     with _resolved_lock:
@@ -309,7 +324,7 @@ def _chat_one(provider_id: str, messages: List[Dict[str, str]], temperature: flo
                 txt = _extract_text(json.loads(raw)).strip()
                 if txt:
                     return txt
-    raise BrainLLMError(f"{spec['label']} ({status}): {raw[:240]}")
+    raise BrainLLMError(f"{spec['label']} ({status}): {_humanize(status, raw)}")
 
 
 def _stream_one(provider_id: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> Iterator[str]:
@@ -317,7 +332,7 @@ def _stream_one(provider_id: str, messages: List[Dict[str, str]], temperature: f
     url = f"{spec['base']}/v1/chat/completions"
     model = _model_for(provider_id)
     body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": int(max_tokens), "stream": True}
-    resp = _open_stream(url, _headers_for(provider_id), body, timeout=120.0)  # raises on connect failure
+    resp = _open_stream(url, _headers_for(provider_id), body, timeout=120.0)
     yielded = False
     try:
         for obj in _iter_sse(resp):
@@ -343,7 +358,6 @@ def _trace_add(trace: List[Dict[str, str]], provider_id: str, status: str, detai
 
 def chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
          temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
-    """Chain-aware blocking chat. Tries configured providers in priority order."""
     temp = _temp() if temperature is None else float(temperature)
     mtok = _maxtok() if max_tokens is None else int(max_tokens)
     order = [provider] if (provider and _secret(_BY_ID.get(provider, {}).get("key_env", "__none__"))) else configured_providers()
@@ -359,20 +373,18 @@ def chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
             return result
         except BrainLLMError as exc:
             last = exc
-            _trace_add(trace, pid, "failed", str(exc)[:120])
+            _trace_add(trace, pid, "failed", str(exc)[:160])
             logger.warning("chain: %s failed -> %s", pid, exc)
             continue
     _set_trace(trace)
     raise BrainLLMError("All providers failed: " + " | ".join(f"{t['provider']}: {t['detail']}" for t in trace)) from last
 
 
-chat_with_chain = chat  # explicit alias used by the synthesis button
+chat_with_chain = chat
 
 
 def stream_chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
                 temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> Iterator[str]:
-    """Stream from the active provider; if it fails before any token, fall back
-    to the blocking chain so the user still gets an answer."""
     temp = _temp() if temperature is None else float(temperature)
     mtok = _maxtok() if max_tokens is None else int(max_tokens)
     pid = provider or active_provider_id()
@@ -383,8 +395,7 @@ def stream_chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
             return
         except Exception as exc:
             logger.warning("stream on %s failed, falling back to chain: %s", pid, exc)
-            _set_trace([{"provider": _BY_ID[pid]["label"], "status": "stream-failed", "detail": str(exc)[:120]}])
-    # blocking chain fallback, delivered as one chunk
+            _set_trace([{"provider": _BY_ID[pid]["label"], "status": "stream-failed", "detail": str(exc)[:160]}])
     text = chat(messages, temperature=temp, max_tokens=mtok)
     if text:
         yield text
@@ -406,7 +417,6 @@ def test_provider(provider_id: str) -> Tuple[bool, float, str]:
 
 
 def test_chain() -> List[Dict[str, Any]]:
-    """Probe every configured provider in priority order; returns a report."""
     out = []
     for pid in configured_providers():
         ok, dt, msg = test_provider(pid)
