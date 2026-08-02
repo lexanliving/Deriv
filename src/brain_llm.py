@@ -1,25 +1,28 @@
-"""src/brain_llm.py — free, provider-agnostic LLM client with streaming.
+"""src/brain_llm.py — free-first LLM failover chain with model auto-resolution.
 
-Reproduces the "generation" half of the RAG blueprint the user shared
-(chat-ui/main.py + the DO RAG README), but with NO paid dependency:
+Priority order (exactly as requested): Groq -> OpenRouter (free) -> Cerebras ->
+OpenAI. All four speak the OpenAI-compatible /v1/chat/completions protocol, so
+there is ONE code path; providers differ only by base URL, key env var, and
+default model.
 
-  * Groq          (default; free, fast, OpenAI-compatible)
-  * Gemini        (free alternative)
-  * openai_compat (OpenRouter :free models / self-hosted vLLM / Ollama server)
+Robustness (the reason the old "write synthesis" silently died):
+  * chat / stream try every CONFIGURED provider in priority order and only fail
+    when all of them fail (429 / stale-model 404 / 5xx / network all roll over).
+  * MODEL AUTO-RESOLUTION: if a provider rejects the configured/default model,
+    we query its /v1/models once, pick a live chat model, cache it, and retry -
+    so a stale hardcoded default no longer breaks anything.
+  * Every attempt is recorded in a chain trace the UI can show verbatim.
 
-Everything is plain HTTP via the standard library (urllib), exactly like the
-existing src/api_client.py, so this adds NO pip dependency and cannot break
-installation on Streamlit Cloud. Streaming uses SSE where available and falls
-back transparently to a blocking call.
-
-The client is an ADVISOR only. It never places trades and never mutates the
-live strategy; that boundary is enforced by the page + the gate-backtest.
+Stdlib-only HTTP (urllib), like src/api_client.py -> no new pip dependency,
+nothing that can break installation. This module is an ADVISOR only: it never
+places a trade and never mutates the live strategy.
 """
 from __future__ import annotations
 
 import json
 import os
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -38,35 +41,46 @@ class BrainLLMError(Exception):
 
 
 # --------------------------------------------------------------------------- #
-#  provider metadata (drives the UI wizard + docs)                            #
+#  Provider specs — priority order is the failover order.                     #
+#  base = everything BEFORE "/v1". chat = {base}/v1/chat/completions.         #
 # --------------------------------------------------------------------------- #
-PROVIDER_INFO: Dict[str, Dict[str, Any]] = {
-    "groq": {
-        "label": "Groq",
-        "signup": "https://console.groq.com/keys",
-        "env_key": "GROQ_API_KEY",
-        "env_model": "GROQ_MODEL",
+PROVIDERS: List[Dict[str, Any]] = [
+    {
+        "id": "groq", "label": "Groq", "base": "https://api.groq.com/openai",
+        "key_env": "GROQ_API_KEY", "model_env": "GROQ_MODEL",
         "default_model": "llama-3.3-70b-versatile",
-        "free_note": "Free tier: ~30 req/min, large daily token budget. Fastest free option.",
+        "signup": "https://console.groq.com/keys",
+        "free_note": "Free tier, very fast. If the default model 404s, auto-resolve picks a live one; or set GROQ_MODEL (e.g. openai/gpt-oss-120b, meta-llama/llama-4-scout-17b-16e-instant, qwen/qwen3-32b).",
     },
-    "gemini": {
-        "label": "Gemini",
-        "signup": "https://aistudio.google.com/apikey",
-        "env_key": "GEMINI_API_KEY",
-        "env_model": "GEMINI_MODEL",
-        "default_model": "gemini-2.0-flash",
-        "free_note": "Free tier: ~15 req/min. Different model family — good to cross-check advice.",
+    {
+        "id": "openrouter", "label": "OpenRouter", "base": "https://openrouter.ai/api",
+        "key_env": "OPENROUTER_API_KEY", "model_env": "OPENROUTER_MODEL",
+        "default_model": "google/gemini-2.5-flash:free",
+        "signup": "https://openrouter.ai/keys",
+        "free_note": "Free ':free' models. Defaults to a free Gemini; alternatives: deepseek/deepseek-chat-v3-0324:free, meta-llama/llama-4-maverick:free. Rate-limits roll over to the next provider.",
     },
-    "openai_compat": {
-        "label": "OpenAI-compatible",
-        "signup": "https://openrouter.ai/keys  (or your own Ollama / vLLM host)",
-        "env_key": "OPENAI_COMPAT_KEY",
-        "env_base": "OPENAI_COMPAT_BASE",
-        "env_model": "OPENAI_COMPAT_MODEL",
-        "default_model": "",
-        "free_note": "OpenRouter ':free' models, or Ollama on your VPS (set BASE=http://localhost:11434/v1, no key).",
+    {
+        "id": "cerebras", "label": "Cerebras", "base": "https://api.cerebras.ai",
+        "key_env": "CEREBRAS_API_KEY", "model_env": "CEREBRAS_MODEL",
+        "default_model": "llama-3.3-70b",
+        "signup": "https://cloud.cerebras.ai/ (API keys)",
+        "free_note": "Fast inference, free credits/tier. Alternatives: qwen-3-32b, llama-4-scout-17b-16e.",
     },
-}
+    {
+        "id": "openai", "label": "OpenAI", "base": "https://api.openai.com",
+        "key_env": "OPENAI_API_KEY", "model_env": "OPENAI_MODEL",
+        "default_model": "gpt-4o-mini",
+        "signup": "https://platform.openai.com/api-keys",
+        "free_note": "Paid — last-resort fallback so the chain almost always has a live backstop. Alternatives: gpt-4.1-mini, gpt-5-mini.",
+    },
+]
+_BY_ID: Dict[str, Dict[str, Any]] = {p["id"]: p for p in PROVIDERS}
+
+# module-global diagnostics (single-user Streamlit app; simple is correct)
+_trace_lock = threading.Lock()
+_last_trace: List[Dict[str, str]] = []
+_resolved: Dict[str, str] = {}
+_resolved_lock = threading.Lock()
 
 
 def _secret(name: str) -> str:
@@ -81,43 +95,99 @@ def _secret(name: str) -> str:
         return ""
 
 
-def _model_for(provider: str) -> str:
-    info = PROVIDER_INFO[provider]
-    return _secret(info["env_model"]) or info["default_model"]
+def _temp() -> float:
+    try:
+        return float(_secret("BRAIN_TEMPERATURE") or 0.2)
+    except Exception:
+        return 0.2
 
 
-def detect_provider(force: Optional[str] = None) -> Optional[str]:
-    """Return the first configured provider, or an explicit override, else None."""
-    want = (force or _secret("BRAIN_PROVIDER") or "auto").strip().lower()
-    have = {
-        "groq": bool(_secret("GROQ_API_KEY")),
-        "gemini": bool(_secret("GEMINI_API_KEY")),
-        "openai_compat": bool(_secret("OPENAI_COMPAT_BASE")),
-    }
-    if want != "auto":
-        return want if have.get(want) else None
-    for p in ("groq", "gemini", "openai_compat"):
-        if have[p]:
-            return p
-    return None
+def _maxtok(default: int = 1100) -> int:
+    try:
+        return int(_secret("BRAIN_MAX_TOKENS") or default)
+    except Exception:
+        return default
+
+
+def _model_for(provider_id: str) -> str:
+    spec = _BY_ID[provider_id]
+    with _resolved_lock:
+        cached = _resolved.get(provider_id)
+    if cached:
+        return cached
+    return _secret(spec["model_env"]) or spec["default_model"]
 
 
 def configured_providers() -> List[str]:
-    return [p for p in ("groq", "gemini", "openai_compat")
-            if (p == "groq" and _secret("GROQ_API_KEY"))
-            or (p == "gemini" and _secret("GEMINI_API_KEY"))
-            or (p == "openai_compat" and _secret("OPENAI_COMPAT_BASE"))]
+    """Configured provider ids, in priority (failover) order."""
+    return [p["id"] for p in PROVIDERS if _secret(p["key_env"])]
+
+
+def detect_provider() -> Optional[str]:
+    want = (_secret("BRAIN_PROVIDER") or "auto").strip().lower()
+    cfg = configured_providers()
+    if want != "auto":
+        return want if want in cfg else (want if _secret(_BY_ID.get(want, {}).get("key_env", "__none__")) else None)
+    return cfg[0] if cfg else None
+
+
+def active_provider_id() -> Optional[str]:
+    return detect_provider()
+
+
+def provider_nodes() -> List[Dict[str, Any]]:
+    """Status for the chain visualization, in priority order."""
+    active = active_provider_id()
+    cfg = set(configured_providers())
+    out = []
+    for p in PROVIDERS:
+        out.append({
+            "id": p["id"], "label": p["label"], "signup": p["signup"],
+            "free_note": p["free_note"], "default_model": p["default_model"],
+            "model": _model_for(p["id"]),
+            "configured": p["id"] in cfg, "active": p["id"] == active,
+        })
+    return out
+
+
+def chain_trace() -> List[Dict[str, str]]:
+    with _trace_lock:
+        return list(_last_trace)
+
+
+def _set_trace(t: List[Dict[str, str]]) -> None:
+    global _last_trace
+    with _trace_lock:
+        _last_trace = t
 
 
 # --------------------------------------------------------------------------- #
 #  low-level HTTP                                                             #
 # --------------------------------------------------------------------------- #
+def _ctx():
+    return ssl.create_default_context()
+
+
+def _headers_for(provider_id: str) -> Dict[str, str]:
+    spec = _BY_ID[provider_id]
+    h = {"Content-Type": "application/json"}
+    key = _secret(spec["key_env"])
+    if key:
+        h["Authorization"] = f"Bearer {key}"
+    if provider_id == "openrouter":
+        site = _secret("OPENROUTER_SITE")
+        name = _secret("OPENROUTER_NAME") or "MomentumMaster Brain"
+        if site:
+            h["HTTP-Referer"] = site
+        h["X-Title"] = name
+    return h
+
+
 def _post_json(url: str, headers: Dict[str, str], body: Any, timeout: float) -> Tuple[int, str]:
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={**headers, "Content-Type": "application/json"}, method="POST")
-    ctx = ssl.create_default_context()
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
@@ -127,11 +197,21 @@ def _post_json(url: str, headers: Dict[str, str], body: Any, timeout: float) -> 
         raise BrainLLMError(f"request failed: {exc}") from exc
 
 
+def _get_json(url: str, headers: Dict[str, str], timeout: float) -> Tuple[int, str]:
+    req = urllib.request.Request(url, headers={k: v for k, v in headers.items() if k != "Content-Type"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except Exception as exc:
+        raise BrainLLMError(f"models lookup failed: {exc}") from exc
+
+
 def _open_stream(url: str, headers: Dict[str, str], body: Any, timeout: float):
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={**headers, "Content-Type": "application/json"}, method="POST")
-    ctx = ssl.create_default_context()
-    return urllib.request.urlopen(req, timeout=timeout, context=ctx)  # caller MUST close
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    return urllib.request.urlopen(req, timeout=timeout, context=_ctx())  # caller closes
 
 
 def _iter_sse(resp) -> Iterator[dict]:
@@ -149,165 +229,186 @@ def _iter_sse(resp) -> Iterator[dict]:
 
 
 # --------------------------------------------------------------------------- #
-#  message translation                                                        #
+#  error classification + model auto-resolution                               #
 # --------------------------------------------------------------------------- #
-def _gemini_payload(messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, stream: bool) -> Tuple[str, Dict[str, Any]]:
-    base = _secret("GEMINI_API_BASE") or "https://generativelanguage.googleapis.com"
-    verb = "streamGenerateContent?alt=sse" if stream else "generateContent"
-    url = f"{base}/v1beta/models/{model}:{verb}&key={_secret('GEMINI_API_KEY')}"
-    system_parts, contents, last = [], [], None
-    for m in messages:
-        role = m.get("role", "user")
-        text = m.get("content", "")
-        if role == "system":
-            system_parts.append(text)
-            continue
-        grole = "model" if role == "assistant" else "user"
-        if grole == last and contents:
-            contents[-1]["parts"].append({"text": text})
-        else:
-            contents.append({"role": grole, "parts": [{"text": text}]})
-            last = grole
-    if not contents:
-        contents = [{"role": "user", "parts": [{"text": "Hello."}]}]
-    body: Dict[str, Any] = {"contents": contents, "generationConfig": {"temperature": temperature, "maxOutputTokens": int(max_tokens)}}
-    if system_parts:
-        body["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
-    return url, body
+def _is_model_error(status: int, body: str) -> bool:
+    if status not in (400, 404):
+        return False
+    low = body.lower()
+    return ("model" in low) and any(k in low for k in ("not found", "does not exist", "invalid", "unsupported", "no model", "not exist"))
 
 
-def _openai_payload(messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, stream: bool) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
-    provider = "groq" if model and False else None  # placeholder; real routing below
-    return ("", {}, {})  # unused; see _build_openai
+def _is_retryable(status: int, body: str) -> bool:
+    if status in (429, 500, 502, 503, 504):
+        return True
+    if _is_model_error(status, body):
+        return True
+    low = body.lower()
+    return any(k in low for k in ("rate limit", "too many requests", "overloaded", "capacity", "timeout", "temporarily"))
 
 
-def _build_openai(provider: str, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, stream: bool) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
-    if provider == "groq":
-        base = _secret("GROQ_API_BASE") or "https://api.groq.com/openai"
-        key = _secret("GROQ_API_KEY")
-    else:  # openai_compat
-        base = _secret("OPENAI_COMPAT_BASE").rstrip("/")
-        key = _secret("OPENAI_COMPAT_KEY")
-    url = f"{base}/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": int(max_tokens), "stream": stream}
-    return url, headers, body
-
-
-# --------------------------------------------------------------------------- #
-#  delta extractors                                                           #
-# --------------------------------------------------------------------------- #
-def _delta_openai(obj: dict) -> str:
+def _resolve_model(provider_id: str) -> Optional[str]:
+    """Query /v1/models and pick a live chat model. Cached. Returns None on failure."""
+    spec = _BY_ID[provider_id]
+    url = f"{spec['base']}/v1/models"
     try:
-        return obj["choices"][0].get("delta", {}).get("content", "") or ""
+        status, raw = _get_json(url, _headers_for(provider_id), timeout=20.0)
+        if not (200 <= status < 300):
+            return None
+        data = json.loads(raw)
+        ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict) and m.get("id")]
     except Exception:
-        return ""
+        return None
+    if not ids:
+        return None
+    hints = ("instruct", "chat", "mini", "flash", "instant", "versatile", "maverick", "scout", "oss")
+    ranked = sorted(ids, key=lambda s: (0 if any(h in s.lower() for h in hints) else 1, len(s)))
+    # exclude obvious embedding / moderation / image models
+    ranked = [s for s in ranked if not any(b in s.lower() for b in ("embed", "moderation", "image", "tts", "whisper", "dall"))] or ranked
+    pick = ranked[0]
+    with _resolved_lock:
+        _resolved[provider_id] = pick
+    logger.info("Auto-resolved %s model -> %s", provider_id, pick)
+    return pick
 
 
-def _delta_gemini(obj: dict) -> str:
-    try:
-        return obj["candidates"][0]["content"]["parts"][0].get("text", "") or ""
-    except Exception:
-        return ""
-
-
-def _text_openai(obj: dict) -> str:
+def _extract_text(obj: dict) -> str:
     try:
         return obj["choices"][0]["message"]["content"] or ""
     except Exception:
         return ""
 
 
-def _text_gemini(obj: dict) -> str:
+def _extract_delta(obj: dict) -> str:
     try:
-        return obj["candidates"][0]["content"]["parts"][0].get("text", "") or ""
+        return obj["choices"][0].get("delta", {}).get("content", "") or ""
     except Exception:
         return ""
 
 
 # --------------------------------------------------------------------------- #
-#  public API                                                                 #
+#  single-provider attempts                                                   #
 # --------------------------------------------------------------------------- #
-def _resolve(provider: Optional[str]) -> str:
-    p = provider or detect_provider()
-    if not p:
-        raise BrainLLMError("No LLM provider configured. See BRAIN_SETUP.md (all options are free).")
-    return p
+def _chat_one(provider_id: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+    spec = _BY_ID[provider_id]
+    url = f"{spec['base']}/v1/chat/completions"
+    model = _model_for(provider_id)
+    body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": int(max_tokens), "stream": False}
+    status, raw = _post_json(url, _headers_for(provider_id), body, timeout=120.0)
+    if 200 <= status < 300:
+        txt = _extract_text(json.loads(raw)).strip()
+        if txt:
+            return txt
+        raise BrainLLMError(f"{spec['label']}: empty response")
+    if _is_model_error(status, raw):
+        new = _resolve_model(provider_id)
+        if new and new != model:
+            body["model"] = new
+            status, raw = _post_json(url, _headers_for(provider_id), body, timeout=120.0)
+            if 200 <= status < 300:
+                txt = _extract_text(json.loads(raw)).strip()
+                if txt:
+                    return txt
+    raise BrainLLMError(f"{spec['label']} ({status}): {raw[:240]}")
 
 
-def chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
-         temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
-    """Blocking call. Returns the full assistant text."""
-    p = _resolve(provider)
-    temp = float(_secret("BRAIN_TEMPERATURE") or 0.2) if temperature is None else float(temperature)
-    mtok = int(_secret("BRAIN_MAX_TOKENS") or 1024) if max_tokens is None else int(max_tokens)
-    model = _model_for(p)
-    if p in ("groq", "openai_compat"):
-        if not model:
-            raise BrainLLMError(f"Set {PROVIDER_INFO[p]['env_model']} (the model name) for the {p} provider.")
-        url, headers, body = _build_openai(p, messages, model, temp, mtok, False)
-        status, raw = _post_json(url, headers, body, timeout=120.0)
-        if not (200 <= status < 300):
-            raise BrainLLMError(f"{p} chat failed ({status}): {raw[:300]}")
-        return _text_openai(json.loads(raw)).strip()
-    # gemini
-    if not model:
-        raise BrainLLMError("Set GEMINI_MODEL for the gemini provider.")
-    url, body = _gemini_payload(messages, model, temp, mtok, stream=False)
-    status, raw = _post_json(url, {}, body, timeout=120.0)
-    if not (200 <= status < 300):
-        raise BrainLLMError(f"gemini chat failed ({status}): {raw[:300]}")
-    return _text_gemini(json.loads(raw)).strip()
-
-
-def stream_chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
-                temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> Iterator[str]:
-    """Yield text deltas. Connection errors raise (so callers can fall back to
-    chat()); mid-stream parse errors are swallowed (stream just ends)."""
-    p = _resolve(provider)
-    temp = float(_secret("BRAIN_TEMPERATURE") or 0.2) if temperature is None else float(temperature)
-    mtok = int(_secret("BRAIN_MAX_TOKENS") or 1024) if max_tokens is None else int(max_tokens)
-    model = _model_for(p)
-    if p in ("groq", "openai_compat"):
-        if not model:
-            raise BrainLLMError(f"Set {PROVIDER_INFO[p]['env_model']} for the {p} provider.")
-        url, headers, body = _build_openai(p, messages, model, temp, mtok, True)
-        resp = _open_stream(url, headers, body, timeout=120.0)  # raises on connect failure
-        extractor = _delta_openai
-    else:
-        if not model:
-            raise BrainLLMError("Set GEMINI_MODEL for the gemini provider.")
-        url, body = _gemini_payload(messages, model, temp, mtok, stream=True)
-        resp = _open_stream(url, {}, body, timeout=120.0)
-        extractor = _delta_gemini
+def _stream_one(provider_id: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> Iterator[str]:
+    spec = _BY_ID[provider_id]
+    url = f"{spec['base']}/v1/chat/completions"
+    model = _model_for(provider_id)
+    body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": int(max_tokens), "stream": True}
+    resp = _open_stream(url, _headers_for(provider_id), body, timeout=120.0)  # raises on connect failure
+    yielded = False
     try:
         for obj in _iter_sse(resp):
-            d = extractor(obj)
+            d = _extract_delta(obj)
             if d:
+                yielded = True
                 yield d
     finally:
         try:
             resp.close()
         except Exception:
             pass
+    if not yielded:
+        raise BrainLLMError(f"{spec['label']}: stream produced no tokens")
 
 
-def test_provider(provider: str) -> Tuple[bool, float, str]:
-    """Cheap connectivity probe. Returns (ok, latency_ms, message)."""
-    info = PROVIDER_INFO.get(provider)
-    if not info:
-        return False, 0.0, f"unknown provider '{provider}'"
-    if provider == "openai_compat" and not _secret("OPENAI_COMPAT_BASE"):
-        return False, 0.0, "OPENAI_COMPAT_BASE not set"
-    if provider != "openai_compat" and not _secret(info["env_key"]):
-        return False, 0.0, f"{info['env_key']} not set"
-    model = _model_for(provider)
-    if not model:
-        return False, 0.0, f"{info['env_model']} not set (no default for this provider)"
+# --------------------------------------------------------------------------- #
+#  public API — chain-aware                                                   #
+# --------------------------------------------------------------------------- #
+def _trace_add(trace: List[Dict[str, str]], provider_id: str, status: str, detail: str = "") -> None:
+    trace.append({"provider": _BY_ID[provider_id]["label"], "status": status, "detail": detail})
+
+
+def chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
+         temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
+    """Chain-aware blocking chat. Tries configured providers in priority order."""
+    temp = _temp() if temperature is None else float(temperature)
+    mtok = _maxtok() if max_tokens is None else int(max_tokens)
+    order = [provider] if (provider and _secret(_BY_ID.get(provider, {}).get("key_env", "__none__"))) else configured_providers()
+    if not order:
+        raise BrainLLMError("No LLM provider configured. See BRAIN_SETUP.md (all options have a free tier).")
+    trace: List[Dict[str, str]] = []
+    last: Optional[Exception] = None
+    for pid in order:
+        try:
+            result = _chat_one(pid, messages, temp, mtok)
+            _trace_add(trace, pid, "ok")
+            _set_trace(trace)
+            return result
+        except BrainLLMError as exc:
+            last = exc
+            _trace_add(trace, pid, "failed", str(exc)[:120])
+            logger.warning("chain: %s failed -> %s", pid, exc)
+            continue
+    _set_trace(trace)
+    raise BrainLLMError("All providers failed: " + " | ".join(f"{t['provider']}: {t['detail']}" for t in trace)) from last
+
+
+chat_with_chain = chat  # explicit alias used by the synthesis button
+
+
+def stream_chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
+                temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> Iterator[str]:
+    """Stream from the active provider; if it fails before any token, fall back
+    to the blocking chain so the user still gets an answer."""
+    temp = _temp() if temperature is None else float(temperature)
+    mtok = _maxtok() if max_tokens is None else int(max_tokens)
+    pid = provider or active_provider_id()
+    if pid and _secret(_BY_ID.get(pid, {}).get("key_env", "__none__")):
+        try:
+            yield from _stream_one(pid, messages, temp, mtok)
+            _set_trace([{"provider": _BY_ID[pid]["label"], "status": "ok", "detail": "stream"}])
+            return
+        except Exception as exc:
+            logger.warning("stream on %s failed, falling back to chain: %s", pid, exc)
+            _set_trace([{"provider": _BY_ID[pid]["label"], "status": "stream-failed", "detail": str(exc)[:120]}])
+    # blocking chain fallback, delivered as one chunk
+    text = chat(messages, temperature=temp, max_tokens=mtok)
+    if text:
+        yield text
+
+
+def test_provider(provider_id: str) -> Tuple[bool, float, str]:
+    spec = _BY_ID.get(provider_id)
+    if not spec:
+        return False, 0.0, f"unknown provider '{provider_id}'"
+    if not _secret(spec["key_env"]):
+        return False, 0.0, f"{spec['key_env']} not set"
     t0 = time.time()
     try:
-        reply = chat([{"role": "user", "content": "Reply with the single word: pong"}], provider=provider, max_tokens=16)
+        reply = _chat_one(provider_id, [{"role": "user", "content": "Reply with the single word: pong"}], 0.0, 16)
         dt = (time.time() - t0) * 1000.0
-        return True, dt, f"{info['label']} · {model} · {dt:.0f}ms · “{reply[:24]}”"
+        return True, dt, f"{spec['label']} · {_model_for(provider_id)} · {dt:.0f}ms · “{reply[:24]}”"
     except BrainLLMError as exc:
-        return False, (time.time() - t0) * 1000.0, f"{info['label']}: {exc}"
+        return False, (time.time() - t0) * 1000.0, f"{spec['label']}: {exc}"
+
+
+def test_chain() -> List[Dict[str, Any]]:
+    """Probe every configured provider in priority order; returns a report."""
+    out = []
+    for pid in configured_providers():
+        ok, dt, msg = test_provider(pid)
+        out.append({"id": pid, "label": _BY_ID[pid]["label"], "ok": ok, "ms": round(dt), "msg": msg})
+    return out
