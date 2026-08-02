@@ -1,19 +1,21 @@
-"""src/brain_llm.py — free-first LLM failover chain with model auto-resolution.
+"""src/brain_llm.py — free-first LLM failover chain with model auto-resolution
+and self-diagnosing errors.
 
-Priority order (exactly as requested): Groq -> OpenRouter (free) -> Cerebras ->
-OpenAI. All four speak the OpenAI-compatible /v1/chat/completions protocol, so
-there is ONE code path; providers differ only by base URL, key env var, and
-default model.
+Priority order: Groq -> OpenRouter (free) -> Cerebras -> OpenAI. All four speak
+the OpenAI-compatible /v1/chat/completions protocol, so there is ONE code path;
+providers differ only by base URL, key env var, and default model.
 
 Robustness:
   * chat / stream try every CONFIGURED provider in priority order and only fail
-    when all of them fail (429 / stale-model 404 / 403 host-block / 5xx / network
-    all roll over).
+    when all of them fail (429 / stale-model 404 / 403 host-block / 402 quota /
+    5xx / network all roll over).
   * MODEL AUTO-RESOLUTION: if a provider rejects the configured/default model,
     we query its /v1/models once, pick a live chat model, cache it, and retry.
-  * HUMANIZED ERRORS: known HTTP/provider codes are translated to plain English
-    (e.g. Groq 403/1010 = host/IP block on the free tier -> add a backstop),
-    so the UI shows the real reason + the real remedy, never a cryptic code.
+  * SELF-DIAGNOSING ERRORS: known HTTP/provider codes are translated to plain
+    English, and when the chain fails with only ONE provider configured the
+    message tells you exactly which Secrets lines to uncomment (Groq is often
+    blocked from Streamlit Cloud with 403/1010; a second provider on different
+    infra is the fix).
   * Every attempt is recorded in a chain trace the UI can show verbatim.
 
 Stdlib-only HTTP (urllib), like src/api_client.py -> no new pip dependency.
@@ -59,7 +61,7 @@ PROVIDERS: List[Dict[str, Any]] = [
         "key_env": "OPENROUTER_API_KEY", "model_env": "OPENROUTER_MODEL",
         "default_model": "google/gemini-2.5-flash:free",
         "signup": "https://openrouter.ai/keys",
-        "free_note": "Free ':free' models on different infra than Groq — the ideal backstop. Alternatives: deepseek/deepseek-chat-v3-0324:free, meta-llama/llama-4-maverick:free.",
+        "free_note": "Free ':free' models on different infra than Groq — the ideal backstop. If the default 404s, set OPENROUTER_MODEL to a current ':free' model (see openrouter.ai/models?order=pricing-low-to-high).",
     },
     {
         "id": "cerebras", "label": "Cerebras", "base": "https://api.cerebras.ai",
@@ -170,6 +172,9 @@ def _humanize(status: int, body: str) -> str:
     low = (body or "").lower()
     if status == 401:
         return "invalid or missing API key — re-check the secret in Streamlit Secrets / env"
+    if status == 402:
+        return ("payment/quota required on this key — for OpenRouter set OPENROUTER_MODEL to a ':free' "
+                "model, or rely on the next provider in the chain")
     if status == 403:
         if "1010" in (body or "") or any(t in low for t in ("cloudflare", "challenge", "blocked", "attention", "ray id", "sorry, you have been blocked")):
             return ("provider blocked this host's request (free tiers often sit behind a "
@@ -377,7 +382,14 @@ def chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
             logger.warning("chain: %s failed -> %s", pid, exc)
             continue
     _set_trace(trace)
-    raise BrainLLMError("All providers failed: " + " | ".join(f"{t['provider']}: {t['detail']}" for t in trace)) from last
+    detail = " | ".join(f"{t['provider']}: {t['detail']}" for t in trace)
+    msg = "All providers failed: " + detail
+    if len(order) == 1:
+        msg += (" — NOTE: only 1 provider is configured, so there was no backstop to fail over to. "
+                "Uncomment OPENROUTER_API_KEY and CEREBRAS_API_KEY in Streamlit Secrets (remove the leading #). "
+                "Groq is frequently blocked from Streamlit Cloud with 403/1010 (a Cloudflare/IP challenge); "
+                "a second provider on different infrastructure is what makes the brain work here.")
+    raise BrainLLMError(msg) from last
 
 
 chat_with_chain = chat
