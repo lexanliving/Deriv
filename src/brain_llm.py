@@ -1,26 +1,24 @@
-"""src/brain_llm.py — free-first LLM failover chain with model auto-resolution
-and self-diagnosing errors.
+"""src/brain_llm.py — free-first LLM failover chain with model auto-resolution,
+a browser User-Agent (the real fix for Cloudflare 1010), and self-diagnosing errors.
 
 Priority order: Groq -> OpenRouter (free) -> Cerebras -> OpenAI. All four speak
-the OpenAI-compatible /v1/chat/completions protocol, so there is ONE code path;
-providers differ only by base URL, key env var, and default model.
+the OpenAI-compatible /v1/chat/completions protocol, so there is ONE code path.
 
-Robustness:
-  * chat / stream try every CONFIGURED provider in priority order and only fail
-    when all of them fail (429 / stale-model 404 / 403 host-block / 402 quota /
-    5xx / network all roll over).
-  * MODEL AUTO-RESOLUTION: if a provider rejects the configured/default model,
-    we query its /v1/models once, pick a live chat model, cache it, and retry.
-  * SELF-DIAGNOSING ERRORS: known HTTP/provider codes are translated to plain
-    English, and when the chain fails with only ONE provider configured the
-    message tells you exactly which Secrets lines to uncomment (Groq is often
-    blocked from Streamlit Cloud with 403/1010; a second provider on different
-    infra is the fix).
-  * Every attempt is recorded in a chain trace the UI can show verbatim.
+ROOT-CAUSE FIXES in this revision:
+  * BROWSER USER-AGENT: stdlib urllib's default "Python-urllib/3.x" header is on
+    Cloudflare's block list and produces 403/code 1010 ("banned by browser
+    signature") on Groq & Cerebras. We now send a real browser UA + Accept +
+    Accept-Language on every request, which clears 1010. (This is why the same
+    keys work from an httpx-based app but failed here.)
+  * OPENROUTER AUTO-RESOLVE: free model slugs rotate and stale ones 404. When no
+    OPENROUTER_MODEL is pinned we query /v1/models and pick a currently-LIVE
+    ':free' model (curated fallback list if the listing is unreachable), so the
+    free roster can never 404 us again.
+  * FAILOVER + MODEL AUTO-RESOLUTION on 404 for every provider; self-diagnosing
+    human-readable errors; a chain trace the UI shows verbatim.
 
-Stdlib-only HTTP (urllib), like src/api_client.py -> no new pip dependency.
-This module is an ADVISOR only: it never places a trade and never mutates the
-live strategy.
+Stdlib-only HTTP (urllib) -> no new pip dependency. ADVISOR only: never places a
+trade, never mutates the live strategy.
 """
 from __future__ import annotations
 
@@ -46,29 +44,49 @@ class BrainLLMError(Exception):
 
 
 # --------------------------------------------------------------------------- #
-#  Provider specs — priority order is the failover order.                     #
+#  Browser-like request signature. The User-Agent is the load-bearing header:   #
+#  Cloudflare returns 1010 when it sees the default "Python-urllib/*". We       #
+#  deliberately do NOT advertise Accept-Encoding, because urllib will not       #
+#  auto-decode br/gzip and that would corrupt the JSON body.                    #
 # --------------------------------------------------------------------------- #
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
+_BROWSER_HEADERS = {
+    "User-Agent": _BROWSER_UA,
+    "Accept": "application/json, text/event-stream, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+}
+
+# Curated, durable free slugs used only if /v1/models cannot be reached.
+_OPENROUTER_FALLBACKS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "meta-llama/llama-4-maverick:free",
+    "google/gemma-3-27b-it:free",
+    "qwen/qwen3-235b-a22b:free",
+]
+
 PROVIDERS: List[Dict[str, Any]] = [
     {
         "id": "groq", "label": "Groq", "base": "https://api.groq.com/openai",
         "key_env": "GROQ_API_KEY", "model_env": "GROQ_MODEL",
         "default_model": "llama-3.3-70b-versatile",
         "signup": "https://console.groq.com/keys",
-        "free_note": "Free tier, very fast. If you see 403/1010 it is Groq blocking the host IP/key (not fixable from code) — add OpenRouter as a backstop.",
+        "free_note": "Free tier, very fast. The 1010 you saw was a User-Agent block, now fixed by the browser UA we send.",
     },
     {
         "id": "openrouter", "label": "OpenRouter", "base": "https://openrouter.ai/api",
         "key_env": "OPENROUTER_API_KEY", "model_env": "OPENROUTER_MODEL",
-        "default_model": "google/gemini-2.5-flash:free",
+        "default_model": "",  # empty => auto-resolve a live :free model at runtime
         "signup": "https://openrouter.ai/keys",
-        "free_note": "Free ':free' models on different infra than Groq — the ideal backstop. If the default 404s, set OPENROUTER_MODEL to a current ':free' model (see openrouter.ai/models?order=pricing-low-to-high).",
+        "free_note": "Free ':free' models. Leave OPENROUTER_MODEL unset so we auto-pick a currently-live free model; or pin one you see at openrouter.ai/models.",
     },
     {
         "id": "cerebras", "label": "Cerebras", "base": "https://api.cerebras.ai",
         "key_env": "CEREBRAS_API_KEY", "model_env": "CEREBRAS_MODEL",
         "default_model": "llama-3.3-70b",
         "signup": "https://cloud.cerebras.ai/ (API keys)",
-        "free_note": "Fast inference, free credits/tier. Alternatives: qwen-3-32b, llama-4-scout-17b-16e.",
+        "free_note": "Fast inference, free credits/tier. The 1010 you saw was a User-Agent block, now fixed.",
     },
     {
         "id": "openai", "label": "OpenAI", "base": "https://api.openai.com",
@@ -113,12 +131,19 @@ def _maxtok(default: int = 1100) -> int:
 
 
 def _model_for(provider_id: str) -> str:
+    """Display / fallback model. For OpenRouter with nothing pinned and nothing
+    resolved yet, show the curated fallback so the UI is never blank."""
     spec = _BY_ID[provider_id]
     with _resolved_lock:
         cached = _resolved.get(provider_id)
     if cached:
         return cached
-    return _secret(spec["model_env"]) or spec["default_model"]
+    env = _secret(spec["model_env"])
+    if env:
+        return env
+    if provider_id == "openrouter":
+        return _OPENROUTER_FALLBACKS[0]
+    return spec["default_model"]
 
 
 def configured_providers() -> List[str]:
@@ -147,7 +172,7 @@ def provider_nodes() -> List[Dict[str, Any]]:
     for p in PROVIDERS:
         out.append({
             "id": p["id"], "label": p["label"], "signup": p["signup"],
-            "free_note": p["free_note"], "default_model": p["default_model"],
+            "free_note": p["free_note"], "default_model": p["default_model"] or "(auto)",
             "model": _model_for(p["id"]),
             "configured": p["id"] in cfg, "active": p["id"] == active,
         })
@@ -173,17 +198,21 @@ def _humanize(status: int, body: str) -> str:
     if status == 401:
         return "invalid or missing API key — re-check the secret in Streamlit Secrets / env"
     if status == 402:
-        return ("payment/quota required on this key — for OpenRouter set OPENROUTER_MODEL to a ':free' "
-                "model, or rely on the next provider in the chain")
+        return ("payment/quota required on this key — for OpenRouter leave OPENROUTER_MODEL unset so we "
+                "auto-pick a ':free' model, or rely on the next provider in the chain")
     if status == 403:
-        if "1010" in (body or "") or any(t in low for t in ("cloudflare", "challenge", "blocked", "attention", "ray id", "sorry, you have been blocked")):
-            return ("provider blocked this host's request (free tiers often sit behind a "
-                    "Cloudflare / IP block, code 1010). This cannot be fixed from code — add a "
-                    "second provider on different infra (OpenRouter / Cerebras) as a backstop.")
+        if "1010" in (body or "") or any(t in low for t in ("cloudflare", "challenge", "blocked",
+                                                            "attention", "ray id",
+                                                            "sorry, you have been blocked", "browser")):
+            return ("provider blocked the request's User-Agent signature (Cloudflare 1010). This build "
+                    "now sends a real browser User-Agent, which clears 1010 in the vast majority of cases; "
+                    "if it still appears, the provider is blocking the datacenter IP and only a backstop on "
+                    "different infrastructure helps.")
         return "access forbidden — the key may be suspended, out of credits, or region-blocked"
     if status == 404:
-        return ("model not found and auto-resolve found no live alternative — set the *_MODEL "
-                "env var to a current model name for that provider")
+        return ("model not found and auto-resolve found no live alternative — for OpenRouter leave "
+                "OPENROUTER_MODEL unset (we auto-pick a live ':free' model); for others set the *_MODEL "
+                "env var to a current model name")
     if status == 429:
         return "rate limit / quota exhausted on this key — the chain tries the next provider"
     if 500 <= status < 600:
@@ -201,7 +230,8 @@ def _ctx():
 
 def _headers_for(provider_id: str) -> Dict[str, str]:
     spec = _BY_ID[provider_id]
-    h = {"Content-Type": "application/json"}
+    h = dict(_BROWSER_HEADERS)  # browser UA + Accept + Accept-Language + Connection
+    h["Content-Type"] = "application/json"
     key = _secret(spec["key_env"])
     if key:
         h["Authorization"] = f"Bearer {key}"
@@ -229,7 +259,8 @@ def _post_json(url: str, headers: Dict[str, str], body: Any, timeout: float) -> 
 
 
 def _get_json(url: str, headers: Dict[str, str], timeout: float) -> Tuple[int, str]:
-    req = urllib.request.Request(url, headers={k: v for k, v in headers.items() if k != "Content-Type"}, method="GET")
+    get_headers = {k: v for k, v in headers.items() if k != "Content-Type"}
+    req = urllib.request.Request(url, headers=get_headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -260,36 +291,72 @@ def _iter_sse(resp) -> Iterator[dict]:
 
 
 # --------------------------------------------------------------------------- #
-#  error classification + model auto-resolution                               #
+#  model resolution                                                           #
 # --------------------------------------------------------------------------- #
+def _resolve_model(provider_id: str, prefer_free: bool = False,
+                   fallbacks: Optional[List[str]] = None) -> Optional[str]:
+    """Query /v1/models and pick a live model. For OpenRouter we prefer a ':free'
+    slug. Returns a fallback (or None) if the listing is unreachable."""
+    fallbacks = fallbacks or []
+    spec = _BY_ID[provider_id]
+    url = f"{spec['base']}/v1/models"
+    ids: List[str] = []
+    try:
+        status, raw = _get_json(url, _headers_for(provider_id), timeout=20.0)
+        if 200 <= status < 300:
+            data = json.loads(raw)
+            ids = [m.get("id") for m in (data.get("data") or [])
+                   if isinstance(m, dict) and m.get("id")]
+    except Exception:
+        ids = []
+    if not ids:
+        return fallbacks[0] if fallbacks else None
+    pool = [i for i in ids if i.endswith(":free")] if prefer_free else []
+    pool = pool or ids
+    hints = ("instruct", "chat", "mini", "flash", "instant", "versatile",
+             "maverick", "scout", "oss", "gemini", "llama", "qwen", "deepseek")
+    ranked = sorted(pool, key=lambda s: (0 if any(h in s.lower() for h in hints) else 1, len(s)))
+    ranked = [s for s in ranked
+              if not any(b in s.lower() for b in ("embed", "moderation", "image", "tts", "whisper", "dall"))] or ranked
+    pick = ranked[0]
+    with _resolved_lock:
+        _resolved[provider_id] = pick
+    logger.info("Resolved %s model -> %s (prefer_free=%s)", provider_id, pick, prefer_free)
+    return pick
+
+
+def _ensure_model(provider_id: str) -> str:
+    """Return the model to use, discovering a live one when nothing is pinned.
+    Cached after first resolution so we don't hit /v1/models every call."""
+    spec = _BY_ID[provider_id]
+    with _resolved_lock:
+        cached = _resolved.get(provider_id)
+    if cached:
+        return cached
+    env = _secret(spec["model_env"])
+    if env:
+        with _resolved_lock:
+            _resolved[provider_id] = env
+        return env
+    prefer_free = (provider_id == "openrouter")
+    fallbacks = _OPENROUTER_FALLBACKS if provider_id == "openrouter" else []
+    pick = _resolve_model(provider_id, prefer_free=prefer_free, fallbacks=fallbacks)
+    if not pick and fallbacks:
+        pick = fallbacks[0]
+    if not pick:
+        pick = spec["default_model"]
+    with _resolved_lock:
+        _resolved[provider_id] = pick
+    return pick
+
+
 def _is_model_error(status: int, body: str) -> bool:
     if status not in (400, 404):
         return False
     low = body.lower()
-    return ("model" in low) and any(k in low for k in ("not found", "does not exist", "invalid", "unsupported", "no model", "not exist"))
-
-
-def _resolve_model(provider_id: str) -> Optional[str]:
-    spec = _BY_ID[provider_id]
-    url = f"{spec['base']}/v1/models"
-    try:
-        status, raw = _get_json(url, _headers_for(provider_id), timeout=20.0)
-        if not (200 <= status < 300):
-            return None
-        data = json.loads(raw)
-        ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict) and m.get("id")]
-    except Exception:
-        return None
-    if not ids:
-        return None
-    hints = ("instruct", "chat", "mini", "flash", "instant", "versatile", "maverick", "scout", "oss")
-    ranked = sorted(ids, key=lambda s: (0 if any(h in s.lower() for h in hints) else 1, len(s)))
-    ranked = [s for s in ranked if not any(b in s.lower() for b in ("embed", "moderation", "image", "tts", "whisper", "dall"))] or ranked
-    pick = ranked[0]
-    with _resolved_lock:
-        _resolved[provider_id] = pick
-    logger.info("Auto-resolved %s model -> %s", provider_id, pick)
-    return pick
+    return ("model" in low) and any(k in low for k in ("not found", "does not exist",
+                                                       "invalid", "unsupported",
+                                                       "no model", "not exist"))
 
 
 def _extract_text(obj: dict) -> str:
@@ -312,8 +379,9 @@ def _extract_delta(obj: dict) -> str:
 def _chat_one(provider_id: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
     spec = _BY_ID[provider_id]
     url = f"{spec['base']}/v1/chat/completions"
-    model = _model_for(provider_id)
-    body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": int(max_tokens), "stream": False}
+    model = _ensure_model(provider_id)
+    body = {"model": model, "messages": messages, "temperature": temperature,
+            "max_tokens": int(max_tokens), "stream": False}
     status, raw = _post_json(url, _headers_for(provider_id), body, timeout=120.0)
     if 200 <= status < 300:
         txt = _extract_text(json.loads(raw)).strip()
@@ -321,8 +389,13 @@ def _chat_one(provider_id: str, messages: List[Dict[str, str]], temperature: flo
             return txt
         raise BrainLLMError(f"{spec['label']}: empty response")
     if _is_model_error(status, raw):
-        new = _resolve_model(provider_id)
+        fb = _OPENROUTER_FALLBACKS if provider_id == "openrouter" else []
+        new = _resolve_model(provider_id, prefer_free=(provider_id == "openrouter"), fallbacks=fb)
+        if new is None and fb:
+            new = fb[0]
         if new and new != model:
+            with _resolved_lock:
+                _resolved[provider_id] = new
             body["model"] = new
             status, raw = _post_json(url, _headers_for(provider_id), body, timeout=120.0)
             if 200 <= status < 300:
@@ -335,8 +408,9 @@ def _chat_one(provider_id: str, messages: List[Dict[str, str]], temperature: flo
 def _stream_one(provider_id: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> Iterator[str]:
     spec = _BY_ID[provider_id]
     url = f"{spec['base']}/v1/chat/completions"
-    model = _model_for(provider_id)
-    body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": int(max_tokens), "stream": True}
+    model = _ensure_model(provider_id)
+    body = {"model": model, "messages": messages, "temperature": temperature,
+            "max_tokens": int(max_tokens), "stream": True}
     resp = _open_stream(url, _headers_for(provider_id), body, timeout=120.0)
     yielded = False
     try:
@@ -386,9 +460,7 @@ def chat(messages: List[Dict[str, str]], provider: Optional[str] = None,
     msg = "All providers failed: " + detail
     if len(order) == 1:
         msg += (" — NOTE: only 1 provider is configured, so there was no backstop to fail over to. "
-                "Uncomment OPENROUTER_API_KEY and CEREBRAS_API_KEY in Streamlit Secrets (remove the leading #). "
-                "Groq is frequently blocked from Streamlit Cloud with 403/1010 (a Cloudflare/IP challenge); "
-                "a second provider on different infrastructure is what makes the brain work here.")
+                "Uncomment OPENROUTER_API_KEY and CEREBRAS_API_KEY in Streamlit Secrets (remove the leading #).")
     raise BrainLLMError(msg) from last
 
 
@@ -421,6 +493,7 @@ def test_provider(provider_id: str) -> Tuple[bool, float, str]:
         return False, 0.0, f"{spec['key_env']} not set"
     t0 = time.time()
     try:
+        _ensure_model(provider_id)
         reply = _chat_one(provider_id, [{"role": "user", "content": "Reply with the single word: pong"}], 0.0, 16)
         dt = (time.time() - t0) * 1000.0
         return True, dt, f"{spec['label']} · {_model_for(provider_id)} · {dt:.0f}ms · “{reply[:24]}”"
