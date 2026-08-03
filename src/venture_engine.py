@@ -1,32 +1,39 @@
-"""src/venture_engine.py — the Venture Council (AI 'discusser' gate) over the live market.
+"""src/venture_engine.py — the Venture Council: signal-triggered entry review.
 
 Powered by the SAME failover chain as the Trading Brain (src.brain_llm:
 Groq -> OpenRouter -> Cerebras -> OpenAI). Whichever API keys are configured
-become the council members; every stage fails over across providers, so a
-council verdict is produced as long as ANY configured key answers.
+become the council.
 
-Council sequence (runs in the background every VENTURE_INTERVAL_SECONDS, never
-on the order path):
+HOW IT WORKS (signal-synced, not timer-synced):
 
-  Stage 1  ANALYST  - neutral technical read of the current chart snapshot
-  Stage 2  COUNCIL  - BULL and BEAR argue the next trend entry
-  Stage 3  CHAIR    - RISK chair issues the final verdict JSON
+  * MomentumMaster TF evaluates trigger candles ON CANDLE CLOSE: the 5m candle
+    for 1/2/5/15-minute contracts and the 15m candle for 30/60-minute
+    contracts. The council lives on that same rhythm — its background market
+    watch refreshes once per trigger candle, never on an arbitrary timer.
 
-Judgement basis: CURRENT MARKET CONDITIONS ONLY - trend, multi-timeframe
-agreement, momentum, volatility regime, candle structure, price vs EMAs -
-plus the contract DURATION and general trading knowledge. The bot's own trade
-history is deliberately NOT provided and can never cause a veto.
+  * When the strategy fires a TRUE signal (every hard gate and the score
+    threshold already passed), the engine hands that exact signal to the
+    council for ONE fast review call: BULL argues the entry, BEAR argues
+    against it, the CHAIR decides.
 
-Control switch (dashboard toggle):
-  ON  -> council may block (verdict POOR) or shrink the stake (risk_multiplier)
-  OFF -> advisory only: the council still reads the market and its reasoning is
-         visible, but get_venture_advice() returns NEUTRAL / 1.0 so nothing is
-         ever blocked or shrunk.
+  * THE CHAIR ONLY ALLOWS OR REFUSES:
+        PROCEED -> the trade executes EXACTLY as the bot planned it, at the
+                   full stake from the user's configured stake plan
+                   (starting stake + martingale). The council NEVER sizes,
+                   shrinks, or scales the stake.
+        SKIP    -> the setup is skipped and journaled with the council's reason
 
-Safety rails (always enforced):
-  * risk_multiplier clamped to [0, 1]; verdict whitelisted; confidence 0-100.
-  * Stage failures degrade gracefully; total failure -> NEUTRAL (never blocks).
-  * Malformed council output -> NEUTRAL.
+  * Judgement basis: CURRENT MARKET CONDITIONS ONLY (trend, multi-timeframe
+    agreement, momentum, volatility regime, candle structure, price vs EMAs),
+    the contract DURATION, and broad trading knowledge. The bot's own trade
+    history is never provided and can never influence the verdict.
+
+  * FAIL-OPEN discipline: no keys, a timeout, or an unreadable reply all mean
+    PROCEED. The council can only skip a setup when it is sure; uncertainty or
+    absence never blocks a technically qualified entry.
+
+  * Dashboard switch (unchanged): ON = the council may allow/refuse entries;
+    OFF = advisory only, never consulted at signal time.
 """
 from __future__ import annotations
 
@@ -44,7 +51,6 @@ from src.supabase_service import get_supabase
 logger = get_logger("venture")
 
 ADVICE_FILE = os.path.join(LOG_DIR, "venture_advice.json")
-VENTURE_INTERVAL_SECONDS = 240
 
 DEFAULT_ADVICE = {
     "verdict": "NEUTRAL",
@@ -57,7 +63,7 @@ DEFAULT_ADVICE = {
     "created_at": "",
 }
 
-_enabled = True  # runtime control switch (dashboard toggle)
+_enabled = True  # dashboard toggle (ON = council may allow/refuse entries)
 _trade_context = {"symbol": None, "duration_minutes": None, "sensitivity": None}
 
 
@@ -70,8 +76,8 @@ def is_venture_enabled() -> bool:
     return _enabled
 
 
-def set_trade_context(symbol=None, duration_minutes=None, sensitivity=None) -> None:
-    """Dashboard feeds the current setup so the council judges the right duration."""
+def bind_trade_setup(symbol=None, duration_minutes=None, sensitivity=None) -> None:
+    """The trading engine calls this on start so the council knows the setup."""
     try:
         if symbol:
             _trade_context["symbol"] = str(symbol)
@@ -81,6 +87,38 @@ def set_trade_context(symbol=None, duration_minutes=None, sensitivity=None) -> N
             _trade_context["sensitivity"] = str(sensitivity)
     except Exception:
         pass
+
+
+def _trigger_seconds() -> int:
+    """Trigger-candle period for the configured duration (5m or 15m)."""
+    try:
+        from config import ENTRY_TIMEFRAME_BY_DURATION
+        dur = _trade_context.get("duration_minutes")
+        tf = ENTRY_TIMEFRAME_BY_DURATION.get(int(dur), "5m") if dur else "5m"
+        return 900 if tf == "15m" else 300
+    except Exception:
+        return 300
+
+
+def _duration_guidance(minutes):
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return ("Duration unknown: judge for a generic short binary-option trend entry. "
+                "Uncertainty must resolve to PROCEED.")
+    if minutes <= 2:
+        return (f"Duration {minutes}m (scalp): needs clean immediate momentum and a decisive trigger; chop or "
+                "dead volatility kills it fast, a healthy impulse carries 1-2 minutes easily. Only SKIP on clear, "
+                "immediate hostility to the move.")
+    if minutes <= 15:
+        return (f"Duration {minutes}m (short): needs genuine trending 5m tape with follow-through. Mild pullbacks "
+                "can recover inside the window; flat EMAs, opposite higher-timeframe bias, or volatility spikes "
+                "are the real threats.")
+    if minutes <= 30:
+        return (f"Duration {minutes}m (medium): 30m and 1h agreement matters more than the last candle; normal "
+                "noise is fine. The threats are a late-stage stretched trend or a regime flip mid-contract.")
+    return (f"Duration {minutes}m (long): higher-timeframe structure dominates; short-term wiggles are irrelevant, "
+            "exhaustion and divergence are not. Requires a sustained trend with intact structure.")
 
 
 # ---------------------------------------------------------------------------
@@ -110,28 +148,6 @@ def _ema(values, period):
     return e
 
 
-def _duration_guidance(minutes):
-    try:
-        minutes = int(minutes)
-    except (TypeError, ValueError):
-        return ("Duration unknown: judge for a generic short binary-option trend entry; "
-                "prefer CAUTION over POOR when unsure.")
-    if minutes <= 2:
-        return (f"Duration {minutes}m (scalp): entry quality is everything. Needs clean immediate "
-                "momentum, a decisive trigger candle, normal-or-lower noise, and no exhaustion. "
-                "Chop or dead volatility kills these fast; a healthy impulse usually carries 1-2 minutes easily.")
-    if minutes <= 15:
-        return (f"Duration {minutes}m (short): needs a genuine, trending 5m tape with follow-through. "
-                "Mild pullbacks can recover inside 15m, but flat EMAs, opposite higher-timeframe bias, "
-                "or volatility spikes are serious threats.")
-    if minutes <= 30:
-        return (f"Duration {minutes}m (medium): 30m and 1h agreement matters more than the last candle. "
-                "Normal noise is fine; the threat is a late-stage, stretched trend or a regime flip mid-contract.")
-    return (f"Duration {minutes}m (long): higher-timeframe structure dominates. Requires a sustained trend "
-            "with intact structure and aligned momentum; short-term wiggles are irrelevant, exhaustion and "
-            "divergence are not.")
-
-
 class VentureEngine:
     def __init__(self):
         self._state = None
@@ -147,7 +163,7 @@ class VentureEngine:
             return
         self._started = True
         threading.Thread(target=self._run, daemon=True, name="venture-council").start()
-        logger.info("Venture council started (market-condition judgement over the LLM chain).")
+        logger.info("Venture council armed (signal-triggered reviews on the trigger-candle rhythm).")
 
     def _load_local(self):
         try:
@@ -162,7 +178,7 @@ class VentureEngine:
         with self._lock:
             return dict(self._advice)
 
-    # ---- live market snapshot --------------------------------------------
+    # ---- live market snapshot ------------------------------------------------
     def _market_snapshot(self):
         snap = {"generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")}
         snap.update({k: v for k, v in _trade_context.items() if v is not None})
@@ -218,7 +234,6 @@ class VentureEngine:
                     snap["stretch_from_ema20_pct"] = round((last - ema20) / ema20 * 100.0, 4)
                 if ema20 and ema50:
                     snap["ema_trend"] = "bullish" if ema20 > ema50 else "bearish"
-                # ATR + volatility regime vs the symbol's own norm
                 trs = []
                 for i in range(1, len(candles)):
                     trs.append(max(highs[i] - lows[i],
@@ -233,12 +248,10 @@ class VentureEngine:
                                           "normal" if ratio < 1.3 else
                                           "elevated" if ratio < 2.0 else "spiking")
                     snap["vol_ratio_vs_norm"] = round(ratio, 2)
-                # momentum
                 if len(closes) >= 13 and closes[-13] > 0:
                     snap["momentum_1h_pct"] = round((closes[-1] - closes[-13]) / closes[-13] * 100.0, 4)
                 if len(closes) >= 4 and closes[-4] > 0:
                     snap["momentum_15m_pct"] = round((closes[-1] - closes[-4]) / closes[-4] * 100.0, 4)
-                # last CLOSED candle (the final element may still be forming)
                 if len(candles) >= 2:
                     lc = candles[-2]
                     rng = max(lc["h"] - lc["l"], 1e-12)
@@ -258,7 +271,6 @@ class VentureEngine:
                             break
                     if streak:
                         snap["candle_streak"] = f"{streak} {direction}"
-                # simple structure over the last ~12 closed candles
                 if len(candles) >= 14:
                     seg_h = highs[-13:-1]
                     seg_l = lows[-13:-1]
@@ -270,191 +282,169 @@ class VentureEngine:
             pass
         return snap
 
-    # ---- council stages ----------------------------------------------------
-    def _call(self, prompt, max_tokens, temperature):
-        from src import brain_llm
-        return brain_llm.chat_with_chain(
-            [{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-    @staticmethod
-    def _last_ok_provider():
-        try:
-            from src import brain_llm
-            for t in reversed(brain_llm.chain_trace()):
-                if t.get("status") == "ok":
-                    return str(t.get("provider", "")) + " · " + str(t.get("detail", ""))
-        except Exception:
-            pass
-        return ""
-
+    # ---- background watch on the trigger rhythm (deterministic, no LLM) -------
     def _run(self):
         time.sleep(8)
         while not self._stop.is_set():
             try:
-                self._discuss()
+                self._market_watch()
             except Exception as exc:
-                logger.error("Venture council cycle failed: %s", exc)
-            self._stop.wait(VENTURE_INTERVAL_SECONDS)
+                logger.error("Market watch failed: %s", exc)
+            self._stop.wait(self._seconds_to_next_trigger())
 
-    def _discuss(self):
-        started = time.time()
+    def _seconds_to_next_trigger(self) -> float:
+        period = _trigger_seconds()
+        now = time.time()
+        next_boundary = (int(now // period) + 1) * period
+        return max(5.0, (next_boundary + 35.0) - now)
+
+    def _market_watch(self):
         snap = self._market_snapshot()
+        watch = dict(DEFAULT_ADVICE)
+        watch["verdict"] = "NEUTRAL"
+        watch["risk_multiplier"] = 1.0
+        watch["reasoning"] = ("Market watch on the trigger-candle rhythm. The council spends its judgement "
+                              "on fired signals only — no timer verdicts between candles.")
+        watch["discussion"] = {
+            "trend": str(snap.get("trend_direction") or "-"),
+            "mtf": str(snap.get("mtf_tf_biases") or {}),
+            "vol_regime": str(snap.get("vol_regime") or "-"),
+            "momentum_1h_pct": snap.get("momentum_1h_pct"),
+            "structure_5m": str(snap.get("structure_5m") or "-"),
+        }
+        watch["created_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            self._advice = watch
+        try:
+            os.makedirs(os.path.dirname(ADVICE_FILE), exist_ok=True)
+            with open(ADVICE_FILE, "w", encoding="utf-8") as f:
+                json.dump(watch, f, ensure_ascii=False)
+        except Exception:
+            pass
+        logger.info("Market watch refreshed (trigger rhythm %ds).", _trigger_seconds())
+
+    # ---- THE SIGNAL REVIEW (the real gate: allow or refuse, never size) --------
+    def review_signal(self, signal, entry_price=None):
+        """One fast council review of a fired signal. FAIL-OPEN on any problem.
+
+        The council ONLY decides PROCEED (allow) or SKIP (refuse). It never
+        scales the stake — the trade always runs on the user's configured
+        stake plan.
+        """
+        base_result = {
+            "decision": "PROCEED",
+            "risk_multiplier": 1.0,
+            "confidence": 0,
+            "reasoning": "",
+            "discussion": {},
+            "signal": signal,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if not is_venture_enabled():
+            base_result["reasoning"] = "Council control is OFF — advisory only."
+            return base_result
+
+        snap = self._market_snapshot()
+        snap["signal_under_review"] = signal
+        if entry_price is not None:
+            snap["entry_price"] = entry_price
         data = json.dumps(snap, default=str)
         duration = _trade_context.get("duration_minutes")
         guidance = _duration_guidance(duration)
         dur_txt = f"{duration} minutes" if duration else "the configured duration"
 
-        base = (
-            "CONTEXT: You are part of the Venture Council for 'MomentumMaster TF', a Deriv binary-options "
-            "trend-following bot. A contract is UP/DOWN (CALL/PUT): it wins if price is above/below the entry "
-            "at expiry. There is NO stop-loss and NO early exit - entry quality and duration fit are everything. "
-            "The bot enters only in the higher-timeframe trend direction, on a closed trigger candle, after hard "
-            "gates already passed. You are given LIVE MARKET CONDITIONS ONLY. You receive NO trade history and "
-            "must never reason from, or ask for, past results.\n"
+        prompt = (
+            "CONTEXT: You are the Venture Council for 'MomentumMaster TF', a Deriv binary-options "
+            "trend-following bot. A contract is UP/DOWN (CALL/PUT): it wins if price is above/below the "
+            "entry at expiry. There is NO stop-loss and NO early exit — entry quality and duration fit "
+            "are everything.\n"
+            f"A live {signal} signal has JUST FIRED on a closed trigger candle for a {dur_txt} contract. "
+            "Every hard gate ALREADY PASSED: higher-timeframe trend agreement for this contract length, "
+            "EMAs not flat, entry-timeframe ADX floor, volatility inside the allowed band, a real trigger "
+            "break of the prior candle, close beyond the fast EMA, the express-aware exhaustion limit, no "
+            "RSI/price divergence, intact entry-timeframe structure, and the regime gates. The confluence "
+            "score also cleared its threshold. The technical system has fully qualified this entry.\n"
+            "YOUR JOB: one fast confirmation — is this entry the right call RIGHT NOW, for this duration?\n"
+            "YOU ONLY ALLOW OR REFUSE. You never size the trade: a PROCEED executes at the full stake from "
+            "the bot's own stake plan, untouched. Your only outputs are PROCEED (allow) or SKIP (refuse).\n"
+            "Judge ONLY the current market conditions below plus your broad trading knowledge. You receive "
+            "NO trade history and must never reason from, or ask for, past results.\n"
+            "DECISION RULES:\n"
+            f"- PROCEED: allow the entry. This is the DEFAULT whenever you are not sure. Conditions support "
+            f"this entry for its {dur_txt} life.\n"
+            "- SKIP: refuse the entry. ONLY when you are sure the market will punish this entry within the "
+            "contract duration — the tape has clearly gone flat/choppy since the trigger, a hard reversal is "
+            "already printing, volatility is spiking against the direction, or the move is visibly exhausted "
+            "into a wall. Uncertainty, ambiguity, or missing data must NEVER produce a SKIP.\n"
+            f"DURATION FIT: {guidance}\n"
+            f"MARKET SNAPSHOT (live): {data}\n"
+            "Deliberate in order: the BULL case for the entry, the BEAR case against it, then the CHAIR's "
+            "final decision.\n"
+            "ANSWER ONLY JSON:\n"
+            '{"decision":"PROCEED|SKIP","confidence":0,'
+            '"bull":"max 60 words","bear":"max 60 words","chair":"one sentence",'
+            '"reasoning":"2 sentences citing snapshot numbers"}'
         )
 
-        trace = []
-        analyst = bull = bear = chair_summary = ""
-
-        # ---- Stage 1: ANALYST ------------------------------------------------
         try:
-            analyst = self._call(
-                base +
-                "ROLE: Stage 1 of 3 - neutral technical analyst.\n"
-                "TASK: Read the MARKET SNAPSHOT below and give a crisp, neutral technical read. Exactly one short "
-                "line for each: (1) trend quality and multi-timeframe agreement, (2) momentum - expanding or "
-                "fading, (3) volatility regime vs the symbol's own norm, (4) candle structure - impulse vs chop "
-                "and wick pressure, (5) stretch vs the EMAs - healthy or extended, (6) the single biggest risk "
-                f"for a trend entry of {dur_txt} right now. Facts only. No verdict. Plain text, max 180 words.\n"
-                f"CONTRACT DURATION: {dur_txt}. {guidance}\n"
-                f"MARKET SNAPSHOT: {data}",
-                max_tokens=300, temperature=0.2,
-            ).strip()
-            trace.append("analyst: " + (self._last_ok_provider() or "failed"))
-        except Exception as exc:
-            logger.warning("Council stage 1 (analyst) failed: %s", exc)
-            trace.append("analyst: failed")
-
-        # ---- Stage 2: COUNCIL (bull vs bear) ----------------------------------
-        try:
-            raw = self._call(
-                base +
-                "ROLE: Stage 2 of 3 - council debate between two members.\n"
-                "Using the MARKET SNAPSHOT and the ANALYST READ below, argue the next trend entry:\n"
-                '- "bull": the strongest HONEST case that a trend entry now settles in favour within ' + dur_txt + ".\n"
-                '- "bear": the strongest HONEST case that it fails, chops out, or expires on the wrong side.\n'
-                "Rules: cite numbers from the snapshot; invent nothing; max 90 words per side; be concrete about "
-                "what a trend-following entry needs (clean continuation, follow-through, room to run before expiry).\n"
-                f"ANALYST READ: {analyst or 'unavailable'}\n"
-                f"MARKET SNAPSHOT: {data}\n"
-                'ANSWER ONLY JSON: {"bull": "...", "bear": "..."}',
-                max_tokens=420, temperature=0.4,
+            from src import brain_llm
+            text = brain_llm.chat_with_chain(
+                [{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=560,
             )
-            obj = _extract_json(raw) or {}
-            bull = str(obj.get("bull", ""))[:500]
-            bear = str(obj.get("bear", ""))[:500]
-            trace.append("council: " + (self._last_ok_provider() or "failed"))
         except Exception as exc:
-            logger.warning("Council stage 2 (bull/bear) failed: %s", exc)
-            trace.append("council: failed")
+            logger.warning("Council unavailable at signal; PROCEED by default: %s", exc)
+            base_result["reasoning"] = "Council unavailable — the technical gates stand."
+            self._publish(base_result)
+            return base_result
 
-        # ---- Stage 3: CHAIR (final verdict) ------------------------------------
-        final = None
+        obj = _extract_json(text)
+        if not obj:
+            base_result["reasoning"] = "Council reply unreadable — the technical gates stand."
+            self._publish(base_result)
+            return base_result
+
+        decision = str(obj.get("decision", "")).strip().upper()
+        if decision not in ("PROCEED", "SKIP"):
+            base_result["reasoning"] = "Council verdict unclear — the technical gates stand."
+            self._publish(base_result)
+            return base_result
+
         try:
-            raw = self._call(
-                base +
-                "ROLE: Stage 3 of 3 - you are the RISK CHAIR and issue the final, binding verdict on whether the "
-                f"bot may take its next trend entry of {dur_txt}, and at what fraction of the planned stake.\n"
-                "VERDICT RULES:\n"
-                "- GOOD: clean trend, timeframes agree, healthy momentum, normal volatility, room to run. "
-                "risk_multiplier 0.9-1.0.\n"
-                "- CAUTION: choppy/mixed tape, late-stage or stretched trend, volatility too dead or too hot, "
-                "conflicting signals. risk_multiplier 0.5-0.85.\n"
-                "- POOR: ONLY when conditions are clearly hostile to trend-following right now (flat EMAs without "
-                "agreement, volatility spike or collapse, blow-off exhaustion, hard divergence against the trend). "
-                "risk_multiplier 0.0-0.4. NEVER output POOR out of general caution, ambiguity, or missing history.\n"
-                "- If the snapshot is incomplete or ambiguous, prefer CAUTION (multiplier >= 0.7) over POOR.\n"
-                f"DURATION FIT: {guidance}\n"
-                f"ANALYST READ: {analyst or 'unavailable'}\n"
-                f"BULL CASE: {bull or 'unavailable'}\n"
-                f"BEAR CASE: {bear or 'unavailable'}\n"
-                f"MARKET SNAPSHOT: {data}\n"
-                "ANSWER ONLY JSON:\n"
-                '{"verdict":"GOOD|CAUTION|POOR","risk_multiplier":0.0,"max_risk_pct":null,'
-                '"chair_summary":"one sentence","reasoning":"2-3 sentences citing snapshot numbers",'
-                '"confidence":0,"period_days":30}',
-                max_tokens=520, temperature=0.1,
-            )
-            final = _extract_json(raw)
-            trace.append("chair: " + (self._last_ok_provider() or "failed"))
-        except Exception as exc:
-            logger.warning("Council stage 3 (chair) failed: %s", exc)
-            trace.append("chair: failed")
-
-        # ---- single-shot fallback if the staged council collapsed --------------
-        if not final:
-            try:
-                raw = self._call(
-                    base +
-                    "The staged council could not reach a verdict. Give the final verdict yourself, judging ONLY "
-                    f"the snapshot below for a {dur_txt} trend entry. {guidance}\n"
-                    "POOR is reserved for clearly hostile conditions; when unsure choose CAUTION with "
-                    "risk_multiplier >= 0.7.\n"
-                    f"MARKET SNAPSHOT: {data}\n"
-                    "ANSWER ONLY JSON:\n"
-                    '{"verdict":"GOOD|CAUTION|POOR","risk_multiplier":0.0,"max_risk_pct":null,'
-                    '"chair_summary":"one sentence","reasoning":"2-3 sentences citing snapshot numbers",'
-                    '"confidence":0,"period_days":30}',
-                    max_tokens=400, temperature=0.1,
-                )
-                final = _extract_json(raw)
-                trace.append("fallback: " + (self._last_ok_provider() or "failed"))
-            except Exception as exc:
-                logger.warning("Council fallback failed; staying NEUTRAL: %s", exc)
-                trace.append("fallback: failed")
-
-        # ---- assemble + clamp ---------------------------------------------------
-        advice = dict(DEFAULT_ADVICE)
-        if isinstance(final, dict):
-            verdict = str(final.get("verdict", "")).strip().upper()
-            advice["verdict"] = verdict if verdict in ("GOOD", "CAUTION", "POOR") else "NEUTRAL"
-            try:
-                advice["risk_multiplier"] = max(0.0, min(1.0, float(final.get("risk_multiplier", 1.0))))
-            except (TypeError, ValueError):
-                advice["risk_multiplier"] = 1.0
-            mrp = final.get("max_risk_pct")
-            try:
-                advice["max_risk_pct"] = max(0.0, min(100.0, float(mrp))) if mrp is not None else None
-            except (TypeError, ValueError):
-                advice["max_risk_pct"] = None
-            try:
-                advice["confidence"] = max(0, min(100, int(float(final.get("confidence", 0)))))
-            except (TypeError, ValueError):
-                advice["confidence"] = 0
-            chair_summary = str(final.get("chair_summary", "")).strip()
-            reasoning = str(final.get("reasoning", "")).strip()
-            if reasoning:
-                advice["reasoning"] = reasoning
-        else:
-            chair_summary = ""
-            advice["reasoning"] = "Council unavailable - neutral by default (never blocks on an error)."
-
-        if advice["verdict"] == "POOR":
-            advice["risk_multiplier"] = min(advice["risk_multiplier"], 0.4)
-
-        advice["discussion"] = {
-            "analyst": analyst[:800],
-            "bull": bull,
-            "bear": bear,
-            "risk": chair_summary[:400],
+            conf = max(0, min(100, int(float(obj.get("confidence", 0)))))
+        except (TypeError, ValueError):
+            conf = 0
+        result = {
+            "decision": decision,
+            "risk_multiplier": 1.0 if decision == "PROCEED" else 0.0,
+            "confidence": conf,
+            "reasoning": str(obj.get("reasoning", "")).strip()[:300],
+            "discussion": {
+                "bull": str(obj.get("bull", ""))[:400],
+                "bear": str(obj.get("bear", ""))[:400],
+                "chair": str(obj.get("chair", ""))[:300],
+            },
+            "signal": signal,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         }
-        advice["trace"] = trace
-        advice["period_days"] = 30
-        advice["created_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self._publish(result)
+        logger.info(
+            "Council reviewed %s: %s (conf %d) — %s",
+            signal, decision, conf, result["reasoning"] or "no reasoning",
+        )
+        return result
 
+    def _publish(self, result):
+        """Persist the review locally + Supabase (advice-table shape)."""
+        advice = dict(DEFAULT_ADVICE)
+        advice["verdict"] = result.get("decision", "PROCEED")
+        advice["risk_multiplier"] = result.get("risk_multiplier", 1.0)
+        advice["discussion"] = result.get("discussion", {})
+        advice["reasoning"] = result.get("reasoning", "")
+        advice["confidence"] = result.get("confidence", 0)
+        advice["period_days"] = 30
+        advice["created_at"] = result.get("created_at", "")
         with self._lock:
             self._advice = advice
         try:
@@ -463,17 +453,12 @@ class VentureEngine:
                 json.dump(advice, f, ensure_ascii=False)
         except Exception:
             pass
-        sb = get_supabase()
-        if sb.enabled:
-            try:
+        try:
+            sb = get_supabase()
+            if sb.enabled:
                 sb.upsert_venture_advice(advice)
-            except Exception:
-                pass
-        logger.info(
-            "Council verdict: %s (mult %.2f, conf %d) in %.1fs [%s]",
-            advice.get("verdict"), advice.get("risk_multiplier", 1.0),
-            advice.get("confidence", 0), time.time() - started, "; ".join(trace),
-        )
+        except Exception:
+            pass
 
 
 _singleton = None
@@ -486,23 +471,25 @@ def get_venture_engine():
     return _singleton
 
 
-def get_venture_advice():
-    """Gate input. Advisory mode (switch OFF) ALWAYS yields NEUTRAL / 1.0."""
-    if not is_venture_enabled():
-        return dict(DEFAULT_ADVICE)
-    if _singleton is not None:
-        return _singleton.current_advice()
+def review_signal(signal, entry_price=None):
+    """Module-level entry point used by the trading engine (thread-safe)."""
     try:
-        if os.path.exists(ADVICE_FILE):
-            with open(ADVICE_FILE, "r", encoding="utf-8") as f:
-                return {**DEFAULT_ADVICE, **json.load(f)}
-    except Exception:
-        pass
-    return dict(DEFAULT_ADVICE)
+        return get_venture_engine().review_signal(signal, entry_price)
+    except Exception as exc:
+        logger.warning("Council review crashed open: %s", exc)
+        return {
+            "decision": "PROCEED",
+            "risk_multiplier": 1.0,
+            "confidence": 0,
+            "reasoning": "Council error — the technical gates stand.",
+            "discussion": {},
+            "signal": signal,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
 
-def get_venture_read():
-    """Latest council read regardless of the switch (for display)."""
+def get_venture_advice():
+    """Backward-compatible read of the latest council output (never blocks)."""
     if _singleton is not None:
         return _singleton.current_advice()
     try:
