@@ -1,15 +1,22 @@
-"""src/supabase_service.py — Supabase service via REST + service-role key.
-
+"""src/supabase_service.py — Supabase service via the official client.
 Uses the official `supabase` client over HTTPS (no raw sockets), which is the
 most reliable method from Streamlit Cloud. Tables are created once via the SQL
 Editor (see supabase/001_research_schema.sql); this service only reads/writes.
 We NEVER write profit/loss/manual notes (those belong to the Personal OS).
 """
 from __future__ import annotations
-import json, os, threading, time
+
+import json
+import os
+import threading
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
 from src.logger import get_logger
+
 logger = get_logger("supabase")
+
 
 def _secret(name: str, default: str = "") -> str:
     val = (os.getenv(name) or "").strip()
@@ -21,6 +28,12 @@ def _secret(name: str, default: str = "") -> str:
         return str(v).strip() if v else default
     except Exception:
         return default
+
+
+def _utc_now() -> str:
+    """A real UTC timestamp string PostgREST accepts for timestamptz columns."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
 
 class SupabaseService:
     def __init__(self):
@@ -35,10 +48,12 @@ class SupabaseService:
         self.research_table = "deriv_trade_research"
         self.knowledge_table = "deriv_research_knowledge"
         self.advice_table = "deriv_venture_advice"
+
     @property
     def enabled(self):
         return bool(self.url and self.key)
-    def _client_(self):
+
+    def _client_instance(self):
         if self._client is not None:
             return self._client
         if self._client_failed or not self.enabled:
@@ -51,6 +66,7 @@ class SupabaseService:
             self._client_failed = True
             logger.error("Supabase client init failed: %s", exc)
             return None
+
     def _with_retry(self, fn, attempts=3, base=1.5):
         last = None
         for i in range(attempts):
@@ -63,10 +79,11 @@ class SupabaseService:
                 time.sleep(base * (2 ** i))
         logger.error("Supabase op failed after %d attempts: %s", attempts, last)
         return None
+
     def ensure_schema(self):
         # REST cannot create tables; verify they exist and log a clear hint if not.
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return False
             c.table(self.research_table).select("trade_id").limit(1).execute()
@@ -75,11 +92,13 @@ class SupabaseService:
         if not ok:
             logger.error("Tables missing or unreachable — run supabase/001_research_schema.sql once in the SQL Editor.")
         return bool(ok)
+
     def link_trade(self, trade_id, meta):
         if not (self.enabled and self.write_os_row):
             return
+
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return None
             c.table(self.os_table).upsert(
@@ -92,9 +111,10 @@ class SupabaseService:
         if self._with_retry(op, attempts=2) is None:
             logger.warning("OS trade-row write disabled (schema differs?).")
             self.write_os_row = False
+
     def upsert_research(self, rec):
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return None
             c.table(self.research_table).upsert({
@@ -110,11 +130,13 @@ class SupabaseService:
                 "model": rec.get("model")}, on_conflict="trade_id").execute()
             return True
         return self._with_retry(op) is not None
+
     def upsert_knowledge(self, rows):
         if not rows:
             return True
+
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return None
             for r in rows:
@@ -127,7 +149,7 @@ class SupabaseService:
                         "wins": int(row["wins"]) + int(r.get("wins", 0)),
                         "losses": int(row["losses"]) + int(r.get("losses", 0)),
                         "description": r.get("description"), "last_trade_id": r.get("last_trade_id"),
-                        "last_seen": "now()"}).eq("id", row["id"]).execute()
+                        "last_seen": _utc_now()}).eq("id", row["id"]).execute()
                 else:
                     c.table(self.knowledge_table).insert({
                         "kind": r["kind"], "pattern_key": r["pattern_key"], "description": r.get("description"),
@@ -135,9 +157,10 @@ class SupabaseService:
                         "last_trade_id": r.get("last_trade_id")}).execute()
             return True
         return self._with_retry(op) is not None
+
     def upsert_venture_advice(self, a):
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return None
             c.table(self.advice_table).insert({
@@ -147,9 +170,10 @@ class SupabaseService:
                 "period_days": a.get("period_days", 30)}).execute()
             return True
         return self._with_retry(op, attempts=2) is not None
+
     def fetch_recent_research(self, limit=5):
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return []
             res = c.table(self.research_table).select("symbol,outcome,pattern_detected,ai_summary").order(
@@ -157,9 +181,10 @@ class SupabaseService:
             return [dict(symbol=r.get("symbol"), outcome=r.get("outcome"), pattern=r.get("pattern_detected"),
                          summary=r.get("ai_summary")) for r in res.data]
         return self._with_retry(op, attempts=2) or []
+
     def fetch_knowledge(self, limit=8):
         def op():
-            c = self._client_()
+            c = self._client_instance()
             if c is None:
                 return []
             res = c.table(self.knowledge_table).select("kind,pattern_key,description,occurrences,wins,losses").order(
@@ -168,7 +193,10 @@ class SupabaseService:
                          occurrences=r.get("occurrences"), wins=r.get("wins"), losses=r.get("losses")) for r in res.data]
         return self._with_retry(op, attempts=2) or []
 
+
 _singleton = None
+
+
 def get_supabase():
     global _singleton
     if _singleton is None:
