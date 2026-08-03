@@ -121,9 +121,6 @@ def _duration_guidance(minutes):
             "exhaustion and divergence are not. Requires a sustained trend with intact structure.")
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 def _extract_json(text):
     if not text:
         return None
@@ -325,12 +322,7 @@ class VentureEngine:
 
     # ---- THE SIGNAL REVIEW (the real gate: allow or refuse, never size) --------
     def review_signal(self, signal, entry_price=None):
-        """One fast council review of a fired signal. FAIL-OPEN on any problem.
-
-        The council ONLY decides PROCEED (allow) or SKIP (refuse). It never
-        scales the stake — the trade always runs on the user's configured
-        stake plan.
-        """
+        """One fast council review of a fired signal. FAIL-OPEN on any problem."""
         base_result = {
             "decision": "PROCEED",
             "risk_multiplier": 1.0,
