@@ -18,6 +18,13 @@ from src.logger import get_logger
 from src.state_manager import StateManager, TradeRecord
 from src.strategy import StrategyEngine
 
+# Venture advisor — defensive import so the bot still runs if the advisor is absent.
+try:
+    from src.venture_engine import get_venture_advice
+except Exception:
+    def get_venture_advice() -> Dict[str, Any]:
+        return {"verdict": "NEUTRAL", "risk_multiplier": 1.0}
+
 logger = get_logger("trading_engine")
 
 INITIAL_WARMUP_COOLDOWN_SECONDS = 30.0
@@ -221,6 +228,10 @@ class TradingEngine:
             return False, "starting up"
         if self._daily_trade_count >= MAX_TRADES_PER_DAY:
             return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
+        # Venture advisor gate: POOR verdict blocks new entries.
+        advice = get_venture_advice()
+        if str(advice.get("verdict")) == "POOR":
+            return False, f"venture advisor: POOR — {str(advice.get('reasoning', ''))[:60]}"
         warmup_remaining = INITIAL_WARMUP_COOLDOWN_SECONDS - (now_mono - self._engine_ready_monotonic)
         if warmup_remaining > 0:
             return False, f"warming up, {warmup_remaining:.0f}s left"
@@ -376,6 +387,16 @@ class TradingEngine:
         martingale_state = self.state.get_martingale_state()
         stake = martingale_state["stake"]
         martingale_step = martingale_state["step"]
+        # Venture advisor stake scaling: shrink stake by the risk multiplier.
+        mult = max(0.0, min(1.0, float(get_venture_advice().get("risk_multiplier", 1.0) or 1.0)))
+        stake = round(stake * mult, 2)
+        if stake < 0.35:
+            reason = "Venture advisor scaled stake below minimum — standing down."
+            self.state.set_status(reason)
+            self._journal.record_outcome(signal_id, "SKIPPED", 0.0, 0.0, None,
+                                         self.execution_mode, martingale_step, note=reason)
+            self._trade_in_progress = False
+            return
         contract_type = CONTRACT_TYPE_BUY if signal == "BUY" else CONTRACT_TYPE_SELL
         trade_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -387,11 +408,10 @@ class TradingEngine:
                 reason = ("Order blocked: select a recognised DEMO account, or type LIVE exactly "
                           "to enable orders on a REAL account. No proposal or buy request was sent.")
                 self.state.add_trade(TradeRecord(
-                    trade_id=trade_id, direction=signal, stake=stake, barrier="-",
+                    trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-",
                     entry_price=entry_price, timestamp=timestamp, status="CANCELLED",
                     martingale_step=martingale_step, execution_mode="BLOCKED",
-                    account_type=self.account_type, error_message=reason,
-                    signal_id=signal_id or ""))
+                    account_type=self.account_type, error_message=reason))
                 self._strategy.on_trade_executed()
                 self.state.set_error(reason)
                 self.state.set_status(f"Signal: {signal}. Order blocked by safety gate.")
@@ -399,10 +419,10 @@ class TradingEngine:
                     signal_id, "CANCELLED", 0.0, stake, None, "BLOCKED", martingale_step, note=reason)
                 return
             trade_record = TradeRecord(
-                trade_id=trade_id, direction=signal, stake=stake, barrier="-",
-                entry_price=entry_price, timestamp=timestamp, status="OPEN",
+                trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake,
+                barrier="-", entry_price=entry_price, timestamp=timestamp, status="OPEN",
                 martingale_step=martingale_step, execution_mode=self.execution_mode,
-                account_type=self.account_type, signal_id=signal_id or "")
+                account_type=self.account_type)
             self.state.add_trade(trade_record)
             self._strategy.on_trade_executed()
             self.state.clear_error()
