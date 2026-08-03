@@ -1,7 +1,9 @@
 """src/supabase_service.py — Supabase service via the official client.
+
 Uses the official `supabase` client over HTTPS (no raw sockets), which is the
 most reliable method from Streamlit Cloud. Tables are created once via the SQL
 Editor (see supabase/001_research_schema.sql); this service only reads/writes.
+
 We NEVER write profit/loss/manual notes (those belong to the Personal OS).
 """
 from __future__ import annotations
@@ -31,7 +33,7 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def _utc_now() -> str:
-    """A real UTC timestamp string PostgREST accepts for timestamptz columns."""
+    """A real UTC timestamp string that PostgREST accepts for timestamptz."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -81,7 +83,6 @@ class SupabaseService:
         return None
 
     def ensure_schema(self):
-        # REST cannot create tables; verify they exist and log a clear hint if not.
         def op():
             c = self._client_instance()
             if c is None:
