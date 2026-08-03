@@ -117,16 +117,21 @@ class TradingEngine:
             return ("", "")
 
     async def _validate_symbol(self):
+        """Best-effort symbol check.
+
+        The account socket does not always serve a usable symbol catalogue, so
+        an empty or unavailable catalogue is normal and stays quiet (debug).
+        The real confirmation is the tick subscription itself: an invalid
+        symbol fails there with a clear Deriv error.
+        """
         try:
             active_symbols = await self._client.get_active_symbols()
         except DerivAPIError as exc:
-            logger.warning("Symbol catalogue unavailable (%s); letting Deriv confirm.", exc)
-            self.state.set_status(f"Checking {self.symbol} with Deriv…")
+            logger.debug("Symbol catalogue unavailable (%s); Deriv will confirm via the subscription.", exc)
             return True
         all_syms = sorted({str(i.get("symbol", "")) for i in active_symbols if i.get("symbol")})
         if not all_syms:
-            logger.warning("Empty symbol catalogue; proceeding with %s.", self.symbol)
-            self.state.set_status(f"Subscribing to {self.symbol} — Deriv will confirm.")
+            logger.debug("No symbol catalogue on this socket; Deriv will confirm %s via the subscription.", self.symbol)
             return True
         if self.symbol in all_syms:
             match = next((i for i in active_symbols if str(i.get("symbol", "")) == self.symbol), None)
@@ -341,10 +346,28 @@ class TradingEngine:
 
     async def _refresh_candles(self):
         self.state.set_status("Refreshing candle data…")
-        candles_by_tf = {}
+        candles_by_tf = None
+        for attempt in (1, 2):
+            try:
+                fetched = {}
+                for tf, granularity in CANDLE_GRANULARITIES.items():
+                    fetched[tf] = await self._client.get_candles(self.symbol, granularity, CANDLE_LOOKBACK)
+                candles_by_tf = fetched
+                break
+            except DerivAPIError as e:
+                if attempt == 1 and e.code in ("CONNECTION_LOST", "TIMEOUT", "NOT_CONNECTED"):
+                    logger.warning("Candle refresh interrupted (%s); reconnecting and retrying once.", e.code)
+                    if await self._reconnect():
+                        continue
+                logger.warning("Candle refresh failed: %s", e)
+                self.state.set_status("Candle refresh paused — using last data.")
+                return
+            except Exception as e:
+                logger.exception("Unexpected error during candle refresh: %s", e)
+                return
+        if candles_by_tf is None:
+            return
         try:
-            for tf, granularity in CANDLE_GRANULARITIES.items():
-                candles_by_tf[tf] = await self._client.get_candles(self.symbol, granularity, CANDLE_LOOKBACK)
             now = time.time()
             self._strategy.update_candles(candles_by_tf, now)
             self.state.update_candles_5m(candles_by_tf.get("5m", []))
@@ -370,9 +393,6 @@ class TradingEngine:
             trend = strategy_state.get("trend_direction") or "no trend"
             stage = strategy_state.get("pattern_stage") or "IDLE"
             self.state.set_status(f"{self.symbol_display} · trend {trend} · {stage}")
-        except DerivAPIError as e:
-            logger.warning("Candle refresh failed: %s", e)
-            self.state.set_status("Candle refresh paused — using last data.")
         except Exception as e:
             logger.exception("Unexpected error during candle refresh: %s", e)
 
