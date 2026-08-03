@@ -426,13 +426,13 @@ class TradingEngine:
         try:
             if self.execution_mode == "BLOCKED":
                 reason = "Order blocked: select a recognised DEMO account, or type LIVE exactly to enable orders on a REAL account. No proposal or buy request was sent."
-                self.state.add_trade(TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp, status="CANCELLED", martingale_step=martingale_step, execution_mode="BLOCKED", account_type=self.account_type, error_message=reason))
+                self.state.add_trade(TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp, status="CANCELLED", martingale_step=martingale_step, execution_mode="BLOCKED", account_type=self.account_type, error_message=reason, symbol=self.symbol))
                 self._strategy.on_trade_executed()
                 self.state.set_error(reason)
                 self.state.set_status(f"Signal: {signal}. Order blocked by safety gate.")
                 self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, "BLOCKED", martingale_step, note=reason)
                 return
-            trade_record = TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp, status="OPEN", martingale_step=martingale_step, execution_mode=self.execution_mode, account_type=self.account_type)
+            trade_record = TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp, status="OPEN", martingale_step=martingale_step, execution_mode=self.execution_mode, account_type=self.account_type, symbol=self.symbol)
             self.state.add_trade(trade_record)
             self._strategy.on_trade_executed()
             self.state.clear_error()
