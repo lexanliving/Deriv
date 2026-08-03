@@ -1,4 +1,11 @@
-"""src/venture_engine.py — periodic AI venture advisor (the 'discusser' gate)."""
+"""src/venture_engine.py — periodic AI venture advisor (the 'discusser' gate).
+
+Advisory-first: it NEVER blocks or shrinks a trade while trade history is thin
+(below MIN_HISTORY_TRADES closed trades) — it is forced to NEUTRAL / 1.0 then.
+It judges from market conditions + general trading knowledge, not from missing
+history. A runtime on/off switch (set_venture_enabled) lets the user turn the
+governor fully off (purely advisory).
+"""
 from __future__ import annotations
 import json, os, threading, time
 from datetime import datetime, timedelta, timezone
@@ -11,8 +18,20 @@ logger = get_logger("venture")
 ADVICE_FILE = os.path.join(LOG_DIR, "venture_advice.json")
 VENTURE_INTERVAL_SECONDS = 300
 WINDOWS_DAYS = (7, 30, 90)
+MIN_HISTORY_TRADES = 5  # below this closed-trade count the governor is advisory-only
+
 DEFAULT_ADVICE = {"verdict": "NEUTRAL", "risk_multiplier": 1.0, "max_risk_pct": None, "discussion": {},
                   "reasoning": "No advice yet.", "confidence": 0, "period_days": 30, "created_at": ""}
+
+_enabled = True  # runtime on/off (dashboard toggle)
+
+def set_venture_enabled(on: bool) -> None:
+    global _enabled
+    _enabled = bool(on)
+
+def is_venture_enabled() -> bool:
+    return _enabled
+
 class VentureEngine:
     def __init__(self):
         self._state = None; self._stop = threading.Event(); self._started = False
@@ -34,22 +53,38 @@ class VentureEngine:
             pass
         return dict(DEFAULT_ADVICE)
     def current_advice(self):
+        if not is_venture_enabled():
+            return dict(DEFAULT_ADVICE)  # off => purely advisory, never blocks
         with self._lock:
             return dict(self._advice)
     def _run(self):
         time.sleep(10)
         while not self._stop.is_set():
             try:
-                self._discuss()
+                if is_venture_enabled():
+                    self._discuss()
             except Exception as exc:
                 logger.error("Venture discussion failed: %s", exc)
             self._stop.wait(VENTURE_INTERVAL_SECONDS)
+    def _market_context(self):
+        st = self._state
+        if st is None:
+            return {}
+        try:
+            s = st.get_strategy_state()
+            return {"trend": s.get("trend_direction"), "mtf_bias": s.get("mtf_bias"),
+                    "mtf_agreement": s.get("mtf_agreement"), "mtf_tf_biases": s.get("mtf_tf_biases", {}),
+                    "micro_bias": s.get("micro_bias")}
+        except Exception:
+            return {}
     def _context(self):
         rows = get_journal().read_archive_merged(); now = datetime.now(timezone.utc); windows = {}
+        total_closed = 0
         for d in WINDOWS_DAYS:
             cutoff = (now - timedelta(days=d)).strftime("%Y-%m-%d %H:%M:%S")
             sub = [r for r in rows if (r.get("timestamp_utc") or "") >= cutoff]
             closed = [r for r in sub if r.get("outcome") in ("WON", "LOST")]
+            total_closed = max(total_closed, len(closed))
             wins = [r for r in closed if r.get("outcome") == "WON"]; losses = [r for r in closed if r.get("outcome") == "LOST"]
             pnls = [analytics._f(r, "pnl") or 0.0 for r in closed]; avoid = fragile = 0
             for r in losses:
@@ -65,11 +100,18 @@ class VentureEngine:
                           "net_pnl": round(sum(pnls), 2),
                           "avoidable_loss_frac": round(avoid / len(losses) * 100, 1) if losses else 0.0,
                           "fragile_win_frac": round(fragile / len(wins) * 100, 1) if wins else 0.0}
-        return {"windows": windows, "overall": analytics.aggregate_stats(rows)}
+        return {"windows": windows, "total_closed": total_closed,
+                "overall": analytics.aggregate_stats(rows), "market": self._market_context()}
     def _discuss(self):
         ctx = self._context(); sb = get_supabase()
         prior = sb.fetch_recent_research(6) if sb.enabled else []
-        prompt = ("You are a panel of three quantitative discussers deciding whether a Deriv binary-options trend bot is a GOOD venture now and how much to risk. BULL argues for, BEAR against, RISK sets sizing. Base every claim ONLY on DATA below. DATA: " + str(ctx) + " PRIOR RESEARCH: " + str(prior) + ". Answer ONLY JSON: {\"verdict\":\"GOOD|CAUTION|POOR\",\"risk_multiplier\":0..1,\"max_risk_pct\":number|null,\"discussion\":{\"bull\":str,\"bear\":str,\"risk\":str},\"reasoning\":str,\"confidence\":0-100,\"period_days\":30}")
+        prompt = ("You are a panel of three quantitative discussers (BULL, BEAR, RISK) advising whether a Deriv "
+                  "binary-options trend bot should trade now and how much to risk. Judge using the CURRENT MARKET "
+                  "CONDITIONS provided and your general trading knowledge. Do NOT output POOR or a tiny risk multiplier "
+                  "simply because there is little or no trade history; if history is thin, base the verdict on the market "
+                  f"conditions and default to NEUTRAL or CAUTION. DATA: {ctx} PRIOR RESEARCH: {prior}. "
+                  "Answer ONLY JSON: {\"verdict\":\"GOOD|CAUTION|POOR\",\"risk_multiplier\":0..1,\"max_risk_pct\":number|null,"
+                  "\"discussion\":{\"bull\":str,\"bear\":str,\"risk\":str},\"reasoning\":str,\"confidence\":0-100,\"period_days\":30}")
         advice = dict(DEFAULT_ADVICE)
         try:
             from src import brain_llm
@@ -88,6 +130,12 @@ class VentureEngine:
             advice["risk_multiplier"] = 1.0
         if advice.get("verdict") not in ("GOOD", "CAUTION", "POOR", "NEUTRAL"):
             advice["verdict"] = "NEUTRAL"
+        # NO-HISTORY GUARD: advisory-only until enough closed trades exist.
+        if int(ctx.get("total_closed", 0)) < MIN_HISTORY_TRADES:
+            if advice.get("verdict") == "POOR":
+                advice["verdict"] = "CAUTION"
+            advice["risk_multiplier"] = max(advice.get("risk_multiplier", 1.0), 1.0)
+            advice["reasoning"] = ("Insufficient trade history — advisory only, not controlling. " + str(advice.get("reasoning", "")))
         advice["created_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self._lock:
             self._advice = advice
@@ -99,13 +147,18 @@ class VentureEngine:
         if sb.enabled:
             sb.upsert_venture_advice(advice)
         logger.info("Venture advice: %s (mult %.2f)", advice.get("verdict"), advice.get("risk_multiplier", 1.0))
+
 _singleton = None
 def get_venture_engine():
     global _singleton
     if _singleton is None:
         _singleton = VentureEngine()
     return _singleton
+
 def get_venture_advice():
+    """Synchronous, never-blocking read used by the trade gate."""
+    if not is_venture_enabled():
+        return dict(DEFAULT_ADVICE)
     if _singleton is not None:
         return _singleton.current_advice()
     try:
