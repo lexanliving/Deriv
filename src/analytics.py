@@ -1,6 +1,7 @@
 """src/analytics.py — deterministic stats that feed the AI research prompt."""
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 FACTORS = [("s_trend", "trend", 5), ("s_trigger", "trigger", 3), ("s_momentum", "momentum", 3),
@@ -9,7 +10,9 @@ FACTORS = [("s_trend", "trend", 5), ("s_trigger", "trigger", 3), ("s_momentum", 
            ("s_structure", "structure", 2)]
 
 
-def _f(d: Dict[str, Any], k: str) -> Optional[float]:
+def _f(d: Optional[Dict[str, Any]], k: str) -> Optional[float]:
+    if not d:
+        return None
     v = d.get(k)
     if v is None or str(v).strip() == "":
         return None
@@ -55,31 +58,30 @@ def aggregate_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (s or "").lower()).strip("_")[:80] or "generic"
+
+
 def knowledge_rows_from(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    import re as _re
-
-    def slug(s: str) -> str:
-        return _re.sub(r"[^a-z0-9]+", "_", (s or "").lower()).strip("_")[:80] or "generic"
-
     rows: List[Dict[str, Any]] = []
     won = rec.get("outcome") == "WON"
     tid = rec.get("trade_id")
     if rec.get("pattern_detected"):
         rows.append({"kind": "win_pattern" if won else "losing_pattern",
-                     "pattern_key": slug(rec["pattern_detected"]),
+                     "pattern_key": _slug(rec["pattern_detected"]),
                      "description": rec["pattern_detected"],
                      "wins": 1 if won else 0, "losses": 0 if won else 1, "last_trade_id": tid})
     for m in rec.get("mistakes", []):
-        rows.append({"kind": "mistake", "pattern_key": slug(str(m)), "description": str(m),
+        rows.append({"kind": "mistake", "pattern_key": _slug(str(m)), "description": str(m),
                      "wins": 0, "losses": 1, "last_trade_id": tid})
     for s in rec.get("strengths", []):
-        rows.append({"kind": "success", "pattern_key": slug(str(s)), "description": str(s),
+        rows.append({"kind": "success", "pattern_key": _slug(str(s)), "description": str(s),
                      "wins": 1, "losses": 0, "last_trade_id": tid})
     if rec.get("market_behaviour"):
-        rows.append({"kind": "market_behaviour", "pattern_key": slug(rec["market_behaviour"]),
+        rows.append({"kind": "market_behaviour", "pattern_key": _slug(rec["market_behaviour"]),
                      "description": rec["market_behaviour"],
                      "wins": 1 if won else 0, "losses": 0 if won else 1, "last_trade_id": tid})
     for im in rec.get("suggested_improvements", []):
-        rows.append({"kind": "improvement", "pattern_key": slug(str(im)), "description": str(im),
+        rows.append({"kind": "improvement", "pattern_key": _slug(str(im)), "description": str(im),
                      "wins": 0, "losses": 0, "last_trade_id": tid})
     return rows
