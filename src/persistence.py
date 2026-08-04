@@ -5,10 +5,10 @@ snapshot file only. It never imports the trading engine and never mutates
 strategy behaviour.
 
 Provides:
-(A) Backup / restore helpers
-(B) Post-mortem analytics
-(C) Offline gate backtest
-(D) Learning bundle export
+  (A) Backup / restore helpers
+  (B) Post-mortem analytics
+  (C) Offline gate backtest
+  (D) Learning bundle export
 """
 
 import csv
@@ -72,8 +72,8 @@ except Exception:
         "tf_1h",
         "mtf_agreement",
     ]
-
     JOURNAL_ARCHIVE_COLUMNS = ["kind"] + JOURNAL_COLUMNS
+
 
 SNAPSHOT_FILE = os.path.join(LOG_DIR, "trade_snapshots.jsonl")
 
@@ -110,10 +110,8 @@ SWEEP_THRESHOLDS = [13, 16, 20, 23]
 
 def _make_variant(overrides: Optional[Dict[str, float]] = None) -> Dict[str, float]:
     variant = {name: 1.0 for name in BASE_FACTOR_WEIGHTS}
-
     if overrides:
         variant.update(overrides)
-
     return variant
 
 
@@ -171,18 +169,13 @@ WEIGHT_VARIANTS: Dict[str, Dict[str, float]] = {
 def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value is None:
         return default
-
     if isinstance(value, bool):
         return float(value)
-
     if isinstance(value, (int, float)):
         return float(value)
-
     text = str(value).strip()
-
     if not text:
         return default
-
     try:
         return float(text)
     except (TypeError, ValueError):
@@ -196,12 +189,10 @@ def _to_bool(value: Any) -> bool:
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if value is None:
         return None
-
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
     text = str(value).strip()
-
     if not text:
         return None
 
@@ -212,7 +203,6 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%SZ",
     ]
-
     for fmt in formats:
         try:
             parsed = datetime.strptime(text, fmt)
@@ -228,10 +218,9 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _clean_record(row: Optional[Dict[Any, Any]]) -> Dict[str, str]:
-    """
-    Normalise a journal row.
+    """Normalise a journal row.
 
-    Uploaded files can contain harmless formatting damage, trailing spaces,
+    The uploaded files can contain harmless formatting damage, trailing spaces,
     or mixed key forms. This keeps imports robust without touching live code.
     """
     out: Dict[str, str] = {}
@@ -240,7 +229,6 @@ def _clean_record(row: Optional[Dict[Any, Any]]) -> Dict[str, str]:
     for key, value in row.items():
         if key is None:
             continue
-
         raw_key = str(key)
         clean_key = raw_key.strip()
 
@@ -258,7 +246,6 @@ def _clean_record(row: Optional[Dict[Any, Any]]) -> Dict[str, str]:
     for column in JOURNAL_COLUMNS:
         column_s = str(column).strip()
         value = out.get(column_s, out.get(str(column), ""))
-
         out[str(column)] = value
         out[column_s] = value
 
@@ -286,7 +273,6 @@ def _eval_fingerprint(row: Dict[str, Any]) -> Tuple[str, ...]:
         "tf_1h",
         "mtf_agreement",
     ] + FACTOR_KEYS
-
     return tuple(str(row.get(k, "") or "").strip().lower() for k in keys)
 
 
@@ -303,7 +289,6 @@ def _outcome_fingerprint(row: Dict[str, Any]) -> Tuple[str, ...]:
         "mae",
         "mfe",
     ]
-
     return tuple(str(row.get(k, "") or "").strip().lower() for k in keys)
 
 
@@ -314,7 +299,6 @@ def _read_file_bytes(path: str) -> bytes:
                 return handle.read()
     except Exception:
         pass
-
     return b""
 
 
@@ -322,7 +306,6 @@ def _snapshot_count() -> int:
     try:
         if not os.path.exists(SNAPSHOT_FILE):
             return 0
-
         with open(SNAPSHOT_FILE, "r", encoding="utf-8") as handle:
             return sum(1 for _ in handle)
     except Exception:
@@ -336,7 +319,6 @@ def _existing_fingerprints(journal: Any) -> Tuple[set, set, set, set]:
     outcome_hashes: set = set()
 
     archive_path = getattr(journal, "_archive", None)
-
     if archive_path and os.path.exists(archive_path):
         try:
             with open(archive_path, "r", newline="", encoding="utf-8") as handle:
@@ -348,23 +330,18 @@ def _existing_fingerprints(journal: Any) -> Tuple[set, set, set, set]:
                     if kind == "EVAL":
                         if signal_id:
                             eval_signal_ids.add(signal_id)
-
                         eval_hashes.add(_eval_fingerprint(row))
                     elif kind == "OUTCOME":
                         if signal_id:
                             outcome_signal_ids.add(signal_id)
-
                         outcome_hashes.add(_outcome_fingerprint(row))
                     else:
                         # Be permissive: treat unknown kinds as merged rows.
                         if signal_id:
                             eval_signal_ids.add(signal_id)
-
                             if row.get("outcome"):
                                 outcome_signal_ids.add(signal_id)
-
                         eval_hashes.add(_eval_fingerprint(row))
-
                         if row.get("outcome"):
                             outcome_hashes.add(_outcome_fingerprint(row))
         except Exception:
@@ -375,15 +352,11 @@ def _existing_fingerprints(journal: Any) -> Tuple[set, set, set, set]:
         for raw in journal.read_archive_merged():
             row = _clean_record(raw)
             signal_id = str(row.get("signal_id", "") or "").strip()
-
             if signal_id:
                 eval_signal_ids.add(signal_id)
-
                 if row.get("outcome"):
                     outcome_signal_ids.add(signal_id)
-
             eval_hashes.add(_eval_fingerprint(row))
-
             if row.get("outcome"):
                 outcome_hashes.add(_outcome_fingerprint(row))
     except Exception:
@@ -397,14 +370,12 @@ def _existing_fingerprints(journal: Any) -> Tuple[set, set, set, set]:
 # ---------------------------------------------------------------------------
 
 def export_archive_csv_bytes(journal: Any) -> bytes:
-    """
-    Return the raw append-only archive CSV if present.
+    """Return the raw append-only archive CSV if present.
 
     This archive is the lossless master copy: every EVAL and OUTCOME event.
     """
     archive_path = getattr(journal, "_archive", None)
     data = _read_file_bytes(archive_path) if archive_path else b""
-
     if data:
         return data
 
@@ -423,18 +394,15 @@ def export_merged_json_bytes(journal: Any) -> bytes:
         rows = []
 
     clean_rows = [_clean_record(row) for row in rows]
-
     payload = {
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "rows": clean_rows,
     }
-
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
 
 
 def import_journal(journal: Any, data: Any, filename: str = "import.csv") -> Dict[str, int]:
-    """
-    Import an archive CSV or merged JSON into the journal idempotently.
+    """Import an archive CSV or merged JSON into the journal idempotently.
 
     Merge rule:
       - EVAL rows are de-duplicated by signal_id where possible, otherwise by
@@ -504,7 +472,6 @@ def import_journal(journal: Any, data: Any, filename: str = "import.csv") -> Dic
                     kind = str(raw.get("kind", "EVAL") or "EVAL").strip().upper()
                 else:
                     kind = "MERGED"
-
                 records.append((kind, raw))
         except Exception:
             counts["errors"] += 1
@@ -522,7 +489,6 @@ def import_journal(journal: Any, data: Any, filename: str = "import.csv") -> Dic
                     continue
 
                 fingerprint = _outcome_fingerprint(row)
-
                 if signal_id in outcome_signal_ids or fingerprint in outcome_hashes:
                     counts["skipped"] += 1
                     continue
@@ -543,26 +509,21 @@ def import_journal(journal: Any, data: Any, filename: str = "import.csv") -> Dic
                 outcome_signal_ids.add(signal_id)
                 outcome_hashes.add(fingerprint)
                 counts["outcome_added"] += 1
-
                 continue
 
             # EVAL or MERGED
             fingerprint = _eval_fingerprint(row)
-
             if (signal_id and signal_id in eval_signal_ids) or fingerprint in eval_hashes:
                 counts["skipped"] += 1
             else:
                 journal.record_evaluation(row)
-
                 if signal_id:
                     eval_signal_ids.add(signal_id)
-
                 eval_hashes.add(fingerprint)
                 counts["eval_added"] += 1
 
             if outcome and signal_id:
                 outcome_fp = _outcome_fingerprint(row)
-
                 if signal_id in outcome_signal_ids or outcome_fp in outcome_hashes:
                     counts["skipped"] += 1
                 else:
@@ -578,7 +539,6 @@ def import_journal(journal: Any, data: Any, filename: str = "import.csv") -> Dic
                         row.get("mae", "") or "",
                         row.get("mfe", "") or "",
                     )
-
                     outcome_signal_ids.add(signal_id)
                     outcome_hashes.add(outcome_fp)
                     counts["outcome_added"] += 1
@@ -599,16 +559,13 @@ def _is_trending_review(row: Dict[str, Any]) -> bool:
     for key in ("trend", "tf_30m", "tf_1h"):
         if str(row.get(key, "") or "").strip().upper() in {"UP", "DOWN"}:
             return True
-
     return False
 
 
 def _weakest_factor(row: Dict[str, Any]) -> Optional[str]:
     values: List[Tuple[float, str]] = []
-
     for key in FACTOR_KEYS:
         value = _to_float(row.get(key), None)
-
         if value is not None:
             values.append((value, FACTOR_TO_BASE.get(key, key)))
 
@@ -616,22 +573,13 @@ def _weakest_factor(row: Dict[str, Any]) -> Optional[str]:
         return None
 
     values.sort(key=lambda item: item[0])
-
     return values[0][1]
 
 
-def _trade_brief(
-    row: Dict[str, Any],
-    pnl: float,
-    mae: Optional[float],
-    mfe: Optional[float],
-    lens: str,
-) -> Dict[str, Any]:
+def _trade_brief(row: Dict[str, Any], pnl: float, mae: Optional[float], mfe: Optional[float], lens: str) -> Dict[str, Any]:
     mae_f = _to_float(mae, None)
     mfe_f = _to_float(mfe, None)
-
     spread = None
-
     if mae_f is not None and mfe_f is not None:
         spread = round(mfe_f - mae_f, 5)
 
@@ -659,26 +607,22 @@ def _trade_brief(
 def _edge_add(bucket: Dict[str, Any], won: bool, pnl: float) -> None:
     bucket["trades"] += 1
     bucket["pnl"] += pnl
-
     if won:
         bucket["wins"] += 1
 
 
 def _finalize_edges(edges: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
-
     for key, data in edges.items():
         trades = int(data.get("trades", 0))
         wins = int(data.get("wins", 0))
         pnl = float(data.get("pnl", 0.0))
-
         out[str(key)] = {
             "trades": trades,
             "wins": wins,
             "win_rate": round((wins / trades * 100.0) if trades else 0.0, 1),
             "pnl": round(pnl, 2),
         }
-
     return out
 
 
@@ -709,7 +653,6 @@ def compute_postmortem(journal: Any) -> Dict[str, Any]:
         reviews += 1
 
         was_taken = _to_bool(row.get("taken")) or _to_bool(row.get("executed"))
-
         if was_taken:
             taken += 1
 
@@ -722,7 +665,6 @@ def compute_postmortem(journal: Any) -> Dict[str, Any]:
         if outcome in {"WON", "LOST"}:
             closed += 1
             net_pnl += pnl
-
             won = outcome == "WON"
 
             if won:
@@ -751,25 +693,15 @@ def compute_postmortem(journal: Any) -> Dict[str, Any]:
         if not was_taken:
             score = _to_float(row.get("score"), None)
             threshold = _to_float(row.get("threshold"), float(SCORE_MAX))
-
             if score is not None and threshold is not None:
                 gap = threshold - score
-
                 if 0 <= gap <= 8 and _is_trending_review(row):
                     weakest = _weakest_factor(row)
-
                     if weakest:
                         gatekeeper_counter[weakest] += 1
 
-    avoidable_losses.sort(
-        key=lambda item: _to_float(item.get("mfe_minus_mae"), 0.0) or 0.0,
-        reverse=True,
-    )
-
-    fragile_wins.sort(
-        key=lambda item: abs(_to_float(item.get("mfe_minus_mae"), 0.0) or 0.0),
-        reverse=True,
-    )
+    avoidable_losses.sort(key=lambda item: _to_float(item.get("mfe_minus_mae"), 0.0) or 0.0, reverse=True)
+    fragile_wins.sort(key=lambda item: abs(_to_float(item.get("mfe_minus_mae"), 0.0) or 0.0), reverse=True)
 
     win_rate = round((wins / closed * 100.0) if closed else 0.0, 1)
 
@@ -806,7 +738,6 @@ def _recompute_score(row: Dict[str, Any], multipliers: Dict[str, float]) -> Opti
 
     for key in FACTOR_KEYS:
         raw_value = _to_float(row.get(key), None)
-
         if raw_value is None:
             continue
 
@@ -833,19 +764,16 @@ def _baseline_sweep(clean_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     for row in clean_rows:
         was_taken = _to_bool(row.get("taken")) or _to_bool(row.get("executed"))
-
         if not was_taken:
             continue
 
         taken += 1
-
         outcome = str(row.get("outcome", "") or "").strip().upper()
         pnl = _to_float(row.get("pnl"), 0.0) or 0.0
 
         if outcome in {"WON", "LOST"}:
             closed += 1
             net_pnl += pnl
-
             if outcome == "WON":
                 wins += 1
 
@@ -865,8 +793,7 @@ def _baseline_sweep(clean_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def sweep_gates(journal: Any) -> List[Dict[str, Any]]:
-    """
-    Offline, non-destructive gate backtest.
+    """Offline, non-destructive gate backtest.
 
     This never changes the bot. It only asks: if we had used this variant and
     threshold, what would have been kept / dropped / added-unknown?
@@ -882,7 +809,6 @@ def sweep_gates(journal: Any) -> List[Dict[str, Any]]:
     for variant_name, multipliers in WEIGHT_VARIANTS.items():
         for threshold in SWEEP_THRESHOLDS:
             would_take = 0
-
             kept = 0
             kept_closed = 0
             kept_wins = 0
@@ -898,7 +824,6 @@ def sweep_gates(journal: Any) -> List[Dict[str, Any]]:
 
             for row in clean_rows:
                 recomputed = _recompute_score(row, multipliers)
-
                 if recomputed is None:
                     continue
 
@@ -913,24 +838,22 @@ def sweep_gates(journal: Any) -> List[Dict[str, Any]]:
 
                 if would and was_taken:
                     kept += 1
-
                     if closed:
                         kept_closed += 1
                         kept_pnl += pnl
-
                         if outcome == "WON":
                             kept_wins += 1
+
                 elif (not would) and was_taken:
                     dropped += 1
-
                     if closed:
                         dropped_closed += 1
                         dropped_pnl += pnl
-
                         if outcome == "LOST":
                             dropped_losses_avoided += 1
                         elif outcome == "WON":
                             dropped_wins_lost += 1
+
                 elif would and (not was_taken):
                     added_unknown += 1
 
@@ -956,8 +879,7 @@ def sweep_gates(journal: Any) -> List[Dict[str, Any]]:
 
 
 def export_preset_text(variant_name: str, threshold: Any) -> str:
-    """
-    Export a plain-text preset proposal.
+    """Export a plain-text preset proposal.
 
     This is deliberately proposal-only. It must be forward-tested on demo and
     manually opted into later. Nothing here auto-applies.
@@ -965,7 +887,6 @@ def export_preset_text(variant_name: str, threshold: Any) -> str:
     multipliers = WEIGHT_VARIANTS.get(variant_name, WEIGHT_VARIANTS["current"])
 
     lines: List[str] = []
-
     lines.append("MomentumMaster TF — Offline Preset Proposal")
     lines.append("==========================================")
     lines.append(f"generated_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -979,16 +900,12 @@ def export_preset_text(variant_name: str, threshold: Any) -> str:
     lines.append("If you want to use it, forward-test on demo first, then opt in manually.")
     lines.append("")
     lines.append("weight_multipliers:")
-
     for name in sorted(BASE_FACTOR_WEIGHTS):
         lines.append(f"  {name}: {float(multipliers.get(name, 1.0)):.2f}")
-
     lines.append("")
     lines.append("base_factor_max_points:")
-
     for name in sorted(BASE_FACTOR_WEIGHTS):
         lines.append(f"  {name}: {BASE_FACTOR_WEIGHTS[name]}")
-
     lines.append("")
     lines.append("Interpretation:")
     lines.append("- kept_pnl = real P&L from trades this variant would still have taken.")
@@ -1013,57 +930,53 @@ def export_preset_text(variant_name: str, threshold: Any) -> str:
 
 def _read_me_first_text() -> str:
     return """MomentumMaster TF — Learning Bundle
+===================================
 
 This bundle is the offline learning loop.
 
 CADENCE
-Review this weekly, not after every trade.
-Small samples overfit fast. Binary options are noisy. Be boring.
+- Review this weekly, not after every trade.
+- Small samples overfit fast. Binary options are noisy. Be boring.
 
 CONTENTS
-trade_journal.csv
-Live journal view.
-
-journal_archive.csv
-Append-only master copy. This is the lossless record.
-
-trade_snapshots.jsonl
-Candle windows around taken trades only.
-Each line is one taken setup with compact candle rows per timeframe.
-
-postmortem.json
-Structured post-mortem.
-
-gate_backtest.json
-Offline gate sweep. Non-destructive. Proposal only.
-
-READ_ME_FIRST.txt
-This file.
+- trade_journal.csv
+    Live journal view.
+- journal_archive.csv
+    Append-only master copy. This is the lossless record.
+- trade_snapshots.jsonl
+    Candle windows around taken trades only.
+    Each line is one taken setup with compact candle rows per timeframe.
+- postmortem.json
+    Structured post-mortem.
+- gate_backtest.json
+    Offline gate sweep. Non-destructive. Proposal only.
+- READ_ME_FIRST.txt
+    This file.
 
 LENSES
-avoidable_losses
-LOST trades where MFE > MAE.
-Price was in favour, then reversed before expiry.
-Lever: duration / exit choice.
+- avoidable_losses
+    LOST trades where MFE > MAE.
+    Price was in favour, then reversed before expiry.
+    Lever: duration / exit choice.
 
-fragile_wins
-WON trades where MAE > MFE.
-The trade survived, but it spent too much time against you.
-Lever: entry timing / trigger strictness.
+- fragile_wins
+    WON trades where MAE > MFE.
+    The trade survived, but it spent too much time against you.
+    Lever: entry timing / trigger strictness.
 
-gatekeeper_factors
-For near-miss stand-asides in trending conditions, the weakest soft factor.
-Lever: the one gate to re-test, not everything at once.
+- gatekeeper_factors
+    For near-miss stand-asides in trending conditions, the weakest soft factor.
+    Lever: the one gate to re-test, not everything at once.
 
-edges
-By symbol, hour, and regime.
-Lever: selection. Trade the best pools, not everything.
+- edges
+    By symbol, hour, and regime.
+    Lever: selection. Trade the best pools, not everything.
 
 THE CEILING
-The bot does NOT rewrite itself.
-This bundle helps a human propose one change.
-That change must be forward-tested on demo.
-Only then should it be manually opted into.
+- The bot does NOT rewrite itself.
+- This bundle helps a human propose one change.
+- That change must be forward-tested on demo.
+- Only then should it be manually opted into.
 
 A blank day is legitimate.
 Even stand-asides produce data.
@@ -1095,7 +1008,6 @@ def build_learning_bundle(journal: Any) -> bytes:
 
         try:
             postmortem = compute_postmortem(journal)
-
             bundle.writestr(
                 "postmortem.json",
                 json.dumps(postmortem, indent=2, default=str).encode("utf-8"),
@@ -1105,7 +1017,6 @@ def build_learning_bundle(journal: Any) -> bytes:
 
         try:
             sweep = sweep_gates(journal)
-
             bundle.writestr(
                 "gate_backtest.json",
                 json.dumps(sweep, indent=2, default=str).encode("utf-8"),
