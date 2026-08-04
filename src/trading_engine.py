@@ -27,7 +27,7 @@ from config import (
 from src.api_client import DerivAPIClient, DerivAPIError
 from src.journal import get_journal
 from src.logger import get_logger
-from src.state_manager import StateManager, TradeRecord
+from src.state_manager import TradeRecord
 from src.strategy import StrategyEngine
 
 try:
@@ -36,8 +36,8 @@ except Exception:
     def review_entry(setup):
         return {
             "approved": True,
-            "reason": "council unavailable",
-            "reasoning": "council unavailable",
+            "reason": "guard unavailable",
+            "reasoning": "guard unavailable",
             "thinking_ms": 0.0,
             "wait_seconds": 0.0,
         }
@@ -174,19 +174,11 @@ class TradingEngine:
             return True
 
         if self.symbol in all_syms:
-            match = next((i for i in active_symbols if str(i.get("symbol", "")) == self.symbol), None)
-
-            if match is not None and bool(match.get("is_trading_suspended", False)):
-                logger.warning("Symbol %s reports suspended; proceeding anyway.", self.symbol)
-                self.state.set_status(f"{self.symbol} may be paused — Deriv will confirm.")
-            else:
-                logger.info("Symbol %s confirmed.", self.symbol)
-
+            logger.info("Symbol %s confirmed.", self.symbol)
             return True
 
         logger.warning("Symbol %s not listed (%d returned). Proceeding.", self.symbol, len(all_syms))
-        self.state.set_status(f"{self.symbol} isn't in the catalogue Deriv returned; subscribing anyway.")
-
+        self.state.set_status(f"{self.symbol} is not in the catalogue Deriv returned; subscribing anyway.")
         return True
 
     async def run(self):
@@ -230,8 +222,15 @@ class TradingEngine:
 
         await self._validate_symbol()
 
-        self.state.set_status("Connected. Fetching initial candle data…")
-        await self._refresh_candles()
+        self.state.set_status("Connected. Fetching candle data…")
+
+        for _ in range(5):
+            await self._refresh_candles()
+
+            if self.state.get_candles_5m():
+                break
+
+            await asyncio.sleep(2)
 
         self._engine_ready_monotonic = time.monotonic()
         self._last_strategy_state_version = self._strategy.state_version
@@ -283,11 +282,9 @@ class TradingEngine:
                     if allowed:
                         self._signal_monotonic = now_mono
                         entry_price = self.state.current_price or self._strategy.get_current_price()
-                        express = self._strategy.express_bonus
-                        tag = " · EXPRESS" if express > 0 else ""
 
                         self.state.set_status(
-                            f"{signal} setup{tag} on {self.symbol_display} — council reviewing…"
+                            f"{signal} setup on {self.symbol_display} — checking guard…"
                         )
 
                         await self._execute_trade(signal, entry_price, signal_id)
@@ -327,8 +324,9 @@ class TradingEngine:
         if self._engine_ready_monotonic == 0.0:
             return False, "starting up"
 
-        if self._daily_trade_count >= MAX_TRADES_PER_DAY:
-            return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
+        if MAX_TRADES_PER_DAY and MAX_TRADES_PER_DAY > 0:
+            if self._daily_trade_count >= MAX_TRADES_PER_DAY:
+                return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
 
         warmup_remaining = INITIAL_WARMUP_COOLDOWN_SECONDS - (now_mono - self._engine_ready_monotonic)
         if warmup_remaining > 0:
@@ -446,23 +444,45 @@ class TradingEngine:
         else:
             self.state.update_tick(price, epoch)
 
+    async def _fetch_tf_candles(self, tf, granularity):
+        for attempt in range(2):
+            try:
+                candles = await self._client.get_candles(
+                    self.symbol,
+                    granularity,
+                    CANDLE_LOOKBACK,
+                )
+
+                if candles:
+                    return candles
+
+            except DerivAPIError as exc:
+                logger.warning("Candle fetch failed for %s (attempt %d): %s", tf, attempt + 1, exc)
+            except Exception:
+                logger.exception("Unexpected candle fetch failure for %s.", tf)
+
+            await asyncio.sleep(0.75)
+
+        return []
+
     async def _refresh_candles(self):
+        if self._client is None or not self._client.connected:
+            return
+
         self.state.set_status("Refreshing candle data…")
 
         candles_by_tf = {}
 
-        try:
-            for tf, granularity in CANDLE_GRANULARITIES.items():
-                try:
-                    candles_by_tf[tf] = await self._client.get_candles(
-                        self.symbol,
-                        granularity,
-                        CANDLE_LOOKBACK,
-                    )
-                except DerivAPIError as exc:
-                    logger.warning("Candle fetch failed for %s: %s", tf, exc)
-                    candles_by_tf[tf] = []
+        for tf, granularity in CANDLE_GRANULARITIES.items():
+            candles_by_tf[tf] = await self._fetch_tf_candles(tf, granularity)
 
+        entry_tf = getattr(self._strategy, "_entry_tf", "5m")
+
+        if not candles_by_tf.get(entry_tf):
+            self.state.set_status("Waiting for candle data…")
+            return
+
+        try:
             now = time.time()
 
             self._strategy.update_candles(candles_by_tf, now)
@@ -502,11 +522,18 @@ class TradingEngine:
             trend = strategy_state.get("trend_direction") or "no trend"
             stage = strategy_state.get("pattern_stage") or "IDLE"
 
-            self.state.set_status(f"{self.symbol_display} · trend {trend} · {stage}")
+            missing = [tf for tf, c in candles_by_tf.items() if not c]
 
-        except Exception as e:
-            logger.exception("Unexpected error during candle refresh: %s", e)
-            self.state.set_status("Candle refresh paused — using last data.")
+            if missing:
+                self.state.set_status(
+                    f"{self.symbol_display} · trend {trend} · {stage} · syncing {len(missing)} timeframe(s)"
+                )
+            else:
+                self.state.set_status(f"{self.symbol_display} · trend {trend} · {stage}")
+
+        except Exception:
+            logger.exception("Candle processing failed.")
+            self.state.set_status("Candle refresh paused — retrying.")
 
     def _contract_duration_seconds(self):
         unit = self.contract_duration_unit.lower()
@@ -555,22 +582,18 @@ class TradingEngine:
                 }
             )
         except Exception as exc:
-            logger.exception("Council failed; allowing trade to continue.")
+            logger.exception("Guard failed; continuing without it.")
             council = {
                 "approved": True,
-                "reason": f"council error fallback: {exc}",
-                "reasoning": f"council error fallback: {exc}",
-                "wait_seconds": 0.0,
+                "reason": f"guard error fallback: {exc}",
+                "reasoning": f"guard error fallback: {exc}",
             }
 
-        approved = bool(council.get("approved"))
-
-        reason_text = council.get("reason") or council.get("reasoning") or ""
-        if not reason_text:
-            reason_text = "; ".join(str(x) for x in council.get("reasons", []) if x)
+        approved = bool(council.get("approved", True))
 
         if not approved:
-            reason = f"venture council declined: {reason_text or 'no reason returned'}"
+            reason_text = council.get("reason") or council.get("reasoning") or "guard declined"
+            reason = f"guard declined: {reason_text}"
 
             self.state.set_status(reason)
             self._strategy.on_signal_skipped()
@@ -589,46 +612,12 @@ class TradingEngine:
             self._trade_in_progress = False
             return
 
-        wait_seconds = float(council.get("wait_seconds", 0.0) or 0.0)
-
-        if wait_seconds > 0:
-            self.state.set_status(f"Council approved — deliberating {wait_seconds:.1f}s before quote…")
-            deadline = time.time() + wait_seconds
-
-            while time.time() < deadline:
-                if self.state.stop_requested:
-                    reason = "stop requested during council deliberation"
-
-                    self.state.set_status(reason)
-                    self._strategy.on_signal_skipped()
-
-                    self._journal.record_outcome(
-                        signal_id,
-                        "SKIPPED",
-                        0.0,
-                        0.0,
-                        None,
-                        self.execution_mode,
-                        martingale_step,
-                        note=reason,
-                    )
-
-                    self._trade_in_progress = False
-                    return
-
-                await asyncio.sleep(0.1)
-
-            entry_price = self.state.current_price or entry_price
-            self._active_entry_price = entry_price
-            self._active_worst = entry_price
-            self._active_best = entry_price
-
         contract_type = CONTRACT_TYPE_BUY if signal == "BUY" else CONTRACT_TYPE_SELL
         trade_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         logger.info(
-            "Council approved | handling %s | %s | stake=%s | %d%s | step=%s | id=%s",
+            "Guard approved | handling %s | %s | stake=%s | %d%s | step=%s | id=%s",
             signal,
             self.symbol,
             stake,
