@@ -77,6 +77,16 @@ def build_snapshot(
     aligned = (cl > o) if direction == "BUY" else (cl < o)
     candle_quality = body if aligned else body * 0.3
 
+    body_ratio = body
+    close_position = (cl - lows[-1]) / rng if rng > 0 else 0.5
+    close_vs_fast = (cl - e_fast[-1]) if e_fast else 0.0
+    recent_ret_3 = (
+        (closes[-1] - closes[-4]) / closes[-4]
+        if len(closes) >= 4 and closes[-4]
+        else 0.0
+    )
+    slope_slow_norm = slope_slow / max(vol_short, 1e-9)
+
     swing_high = max(highs[-n:])
     swing_low = min(lows[-n:])
 
@@ -126,11 +136,17 @@ def build_snapshot(
         "vol_long": vol_long,
         "vol_ratio_regime": vol_ratio_regime,
         "atr": atr,
+        "atr_abs": atr_abs,
         "rsi": rsi,
         "chop": chop,
         "noise": noise,
         "efficiency": efficiency,
         "candle_quality": candle_quality,
+        "body_ratio": body_ratio,
+        "close_position": close_position,
+        "close_vs_fast": close_vs_fast,
+        "recent_ret_3": recent_ret_3,
+        "slope_slow_norm": slope_slow_norm,
         "sr_dist": sr_dist,
         "pull_dist": pull_dist,
         "structure": structure,
