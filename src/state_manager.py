@@ -1,4 +1,5 @@
 """src/state_manager.py — thread-safe shared state between engine and UI."""
+
 import threading
 import time
 from collections import deque
@@ -32,25 +33,34 @@ class TradeRecord:
 
 class StateManager:
     _STRATEGY_STATE_ATTRS = {
-        "trend_direction": "_current_trend_direction", "trend_tick_count": "_trend_tick_count",
-        "trend_kind": "_trend_kind", "trades_in_trend": "_trades_in_current_trend",
-        "in_cooldown": "_in_cooldown", "pattern_stage": "_pattern_stage",
-        "pattern_ticks": "_pattern_ticks", "mtf_bias": "_mtf_bias",
-        "mtf_agreement": "_mtf_agreement", "mtf_tf_biases": "_mtf_tf_biases",
-        "micro_bias": "_micro_bias", "last_entry_mode": "_last_entry_mode",
+        "trend_direction": "_current_trend_direction",
+        "trend_tick_count": "_trend_tick_count",
+        "trend_kind": "_trend_kind",
+        "trades_in_trend": "_trades_in_current_trend",
+        "in_cooldown": "_in_cooldown",
+        "pattern_stage": "_pattern_stage",
+        "pattern_ticks": "_pattern_ticks",
+        "mtf_bias": "_mtf_bias",
+        "mtf_agreement": "_mtf_agreement",
+        "mtf_tf_biases": "_mtf_tf_biases",
+        "micro_bias": "_micro_bias",
+        "last_entry_mode": "_last_entry_mode",
         "last_signal_score": "_last_signal_score",
         "last_signal_score_breakdown": "_last_signal_score_breakdown",
     }
 
     def __init__(self):
         self._lock = threading.Lock()
+
         self._is_running = False
         self._stop_requested = False
+
         self._current_price = 0.0
         self._recent_ticks = deque(maxlen=TICK_BUFFER_SIZE)
         self._tick_timestamps = deque(maxlen=TICK_BUFFER_SIZE)
         self._total_ticks_processed = 0
         self._candles_5m: List[Dict[str, Any]] = []
+
         self._current_trend_direction: Optional[str] = None
         self._trend_tick_count = 0
         self._trend_kind: Optional[str] = None
@@ -65,10 +75,12 @@ class StateManager:
         self._last_entry_mode: Optional[str] = None
         self._last_signal_score = 0
         self._last_signal_score_breakdown: Dict[str, int] = {}
+
         self._current_martingale_step = 0
         self._current_stake = DEFAULT_INITIAL_STAKE
         self._initial_stake = DEFAULT_INITIAL_STAKE
         self._last_trade_time = 0.0
+
         self._session_pnl = 0.0
         self._consecutive_losses = 0
         self._trade_history: deque = deque(maxlen=TRADE_HISTORY_LIMIT)
@@ -78,7 +90,14 @@ class StateManager:
         self._losses = 0
         self._total_won = 0.0
         self._total_lost = 0.0
-        self._execution_context: Dict[str, str] = {"account_id": "", "account_type": "UNKNOWN", "currency": "USD", "execution_mode": "UNCONFIGURED"}
+
+        self._execution_context: Dict[str, str] = {
+            "account_id": "",
+            "account_type": "UNKNOWN",
+            "currency": "USD",
+            "execution_mode": "UNCONFIGURED",
+        }
+
         self._status_message = "Stopped."
         self._error_message = ""
 
@@ -121,7 +140,17 @@ class StateManager:
     def update_candles_5m(self, candles):
         with self._lock:
             src = candles or []
-            self._candles_5m = [{"open": c.get("open"), "high": c.get("high"), "low": c.get("low"), "close": c.get("close"), "epoch": c.get("epoch")} for c in src if c is not None][-120:]
+            self._candles_5m = [
+                {
+                    "open": c.get("open"),
+                    "high": c.get("high"),
+                    "low": c.get("low"),
+                    "close": c.get("close"),
+                    "epoch": c.get("epoch"),
+                }
+                for c in src
+                if c is not None
+            ][-120:]
 
     def get_candles_5m(self):
         with self._lock:
@@ -130,18 +159,29 @@ class StateManager:
     def get_tick_heartbeat(self):
         with self._lock:
             last_tick_time = self._tick_timestamps[-1] if self._tick_timestamps else None
-            return {"total_ticks_processed": self._total_ticks_processed, "last_tick_time": last_tick_time}
+            return {
+                "total_ticks_processed": self._total_ticks_processed,
+                "last_tick_time": last_tick_time,
+            }
 
     def get_strategy_state(self):
         with self._lock:
-            return {"trend_direction": self._current_trend_direction, "trend_tick_count": self._trend_tick_count,
-                    "trend_kind": self._trend_kind, "trades_in_trend": self._trades_in_current_trend,
-                    "in_cooldown": self._in_cooldown, "pattern_stage": self._pattern_stage,
-                    "pattern_ticks": list(self._pattern_ticks), "mtf_bias": self._mtf_bias,
-                    "mtf_agreement": self._mtf_agreement, "mtf_tf_biases": dict(self._mtf_tf_biases),
-                    "micro_bias": self._micro_bias, "last_entry_mode": self._last_entry_mode,
-                    "last_signal_score": self._last_signal_score,
-                    "last_signal_score_breakdown": dict(self._last_signal_score_breakdown)}
+            return {
+                "trend_direction": self._current_trend_direction,
+                "trend_tick_count": self._trend_tick_count,
+                "trend_kind": self._trend_kind,
+                "trades_in_trend": self._trades_in_current_trend,
+                "in_cooldown": self._in_cooldown,
+                "pattern_stage": self._pattern_stage,
+                "pattern_ticks": list(self._pattern_ticks),
+                "mtf_bias": self._mtf_bias,
+                "mtf_agreement": self._mtf_agreement,
+                "mtf_tf_biases": dict(self._mtf_tf_biases),
+                "micro_bias": self._micro_bias,
+                "last_entry_mode": self._last_entry_mode,
+                "last_signal_score": self._last_signal_score,
+                "last_signal_score_breakdown": dict(self._last_signal_score_breakdown),
+            }
 
     def update_strategy_state(self, **kwargs):
         with self._lock:
@@ -163,7 +203,11 @@ class StateManager:
 
     def get_martingale_state(self):
         with self._lock:
-            return {"step": self._current_martingale_step, "stake": self._current_stake, "initial_stake": self._initial_stake}
+            return {
+                "step": self._current_martingale_step,
+                "stake": self._current_stake,
+                "initial_stake": self._initial_stake,
+            }
 
     def set_initial_stake(self, stake):
         with self._lock:
@@ -187,13 +231,16 @@ class StateManager:
     def _cooldown_remaining_unsafe(self):
         if self._last_trade_time == 0.0:
             return 0.0
+
         elapsed = time.time() - self._last_trade_time
+
         if self._consecutive_losses >= 2:
             required = 180.0
         elif self._consecutive_losses >= 1:
             required = 90.0
         else:
             required = 30.0
+
         return max(0.0, required - elapsed)
 
     def get_cooldown_remaining(self):
@@ -209,6 +256,7 @@ class StateManager:
             if len(self._trade_history) == self._trade_history.maxlen:
                 evicted = self._trade_history.popleft()
                 self._trades_by_id.pop(evicted.trade_id, None)
+
             self._trade_history.append(trade)
             self._trades_by_id[trade.trade_id] = trade
 
@@ -217,14 +265,19 @@ class StateManager:
             trade = self._trades_by_id.get(trade_id)
             if trade is None:
                 return
+
             if trade.status in FINAL_TRADE_STATUSES:
                 return
+
             trade.status = status
             trade.pnl = pnl
+
             if error_message:
                 trade.error_message = error_message
+
             self._total_pnl += pnl
             self._session_pnl += pnl
+
             if status == "WON":
                 self._wins += 1
                 self._consecutive_losses = 0
@@ -250,16 +303,32 @@ class StateManager:
             avg_win = (self._total_won / self._wins) if self._wins > 0 else 0.0
             avg_loss = (self._total_lost / self._losses) if self._losses > 0 else 0.0
             expectancy = (win_rate / 100.0 * avg_win) - ((1 - win_rate / 100.0) * avg_loss)
-            return {"total_trades": total, "wins": self._wins, "losses": self._losses, "win_rate": round(win_rate, 1),
-                    "avg_win": round(avg_win, 2), "avg_loss": round(avg_loss, 2), "expectancy": round(expectancy, 2),
-                    "total_pnl": round(self._total_pnl, 2), "session_pnl": round(self._session_pnl, 2),
-                    "current_stake": self._current_stake, "initial_stake": self._initial_stake,
-                    "martingale_step": self._current_martingale_step, "consecutive_losses": self._consecutive_losses,
-                    "cooldown_remaining": self._cooldown_remaining_unsafe()}
+
+            return {
+                "total_trades": total,
+                "wins": self._wins,
+                "losses": self._losses,
+                "win_rate": round(win_rate, 1),
+                "avg_win": round(avg_win, 2),
+                "avg_loss": round(avg_loss, 2),
+                "expectancy": round(expectancy, 2),
+                "total_pnl": round(self._total_pnl, 2),
+                "session_pnl": round(self._session_pnl, 2),
+                "current_stake": self._current_stake,
+                "initial_stake": self._initial_stake,
+                "martingale_step": self._current_martingale_step,
+                "consecutive_losses": self._consecutive_losses,
+                "cooldown_remaining": self._cooldown_remaining_unsafe(),
+            }
 
     def set_execution_context(self, account_id, account_type, currency, execution_mode):
         with self._lock:
-            self._execution_context = {"account_id": str(account_id or ""), "account_type": str(account_type or "UNKNOWN").upper(), "currency": str(currency or "USD").upper(), "execution_mode": str(execution_mode or "UNCONFIGURED").upper()}
+            self._execution_context = {
+                "account_id": str(account_id or ""),
+                "account_type": str(account_type or "UNKNOWN").upper(),
+                "currency": str(currency or "USD").upper(),
+                "execution_mode": str(execution_mode or "UNCONFIGURED").upper(),
+            }
 
     def get_execution_context(self):
         with self._lock:
@@ -291,11 +360,13 @@ class StateManager:
         with self._lock:
             self._is_running = False
             self._stop_requested = False
+
             self._current_price = 0.0
             self._recent_ticks.clear()
             self._tick_timestamps.clear()
             self._total_ticks_processed = 0
             self._candles_5m = []
+
             self._current_trend_direction = None
             self._trend_tick_count = 0
             self._trend_kind = None
@@ -310,9 +381,11 @@ class StateManager:
             self._last_entry_mode = None
             self._last_signal_score = 0
             self._last_signal_score_breakdown = {}
+
             self._current_martingale_step = 0
             self._initial_stake = initial_stake
             self._current_stake = initial_stake
+
             self._trade_history = deque(maxlen=TRADE_HISTORY_LIMIT)
             self._trades_by_id = {}
             self._total_pnl = 0.0
@@ -323,6 +396,13 @@ class StateManager:
             self._session_pnl = 0.0
             self._last_trade_time = 0.0
             self._consecutive_losses = 0
-            self._execution_context = {"account_id": "", "account_type": "UNKNOWN", "currency": "USD", "execution_mode": "UNCONFIGURED"}
+
+            self._execution_context = {
+                "account_id": "",
+                "account_type": "UNKNOWN",
+                "currency": "USD",
+                "execution_mode": "UNCONFIGURED",
+            }
+
             self._status_message = "Stopped."
             self._error_message = ""
