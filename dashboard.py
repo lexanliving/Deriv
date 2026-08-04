@@ -75,92 +75,255 @@ def _load_accounts(app_id: str, token: str):
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
-
-html,body,.stApp{background-color:#060912;color:#c7d2e0;font-family:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;}
-.stApp{
-background-image:
-radial-gradient(900px 460px at 6% -8%, rgba(16,185,129,0.10), transparent 60%),
-radial-gradient(820px 440px at 100% 108%, rgba(56,132,255,0.09), transparent 60%),
-radial-gradient(rgba(120,150,190,0.05) 1px, transparent 1px);
-background-size:auto,auto,22px 22px;
-background-attachment:fixed;
+html,body,.stApp{
+background-color:#060912;
+color:#c7d2e0;
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 }
 
-[data-testid="stMainBlockContainer"]{max-width:1480px;padding-top:1.3rem;}
-[data-testid="stSidebar"]{background-color:#0a0f1c;border-right:1px solid #1b2740;}
-[data-testid="stSidebarNav"]{padding-top:6px;margin-bottom:6px;}
-[data-testid="stSidebarNav"] li button,[data-testid="stSidebarNav"] a{font-family:'Space Grotesk',sans-serif;letter-spacing:.04em;}
+[data-testid="stMainBlockContainer"]{
+max-width:1480px;
+padding-top:1.2rem;
+}
 
-.mm-header{display:flex;align-items:flex-end;justify-content:space-between;padding:4px 2px 14px 2px;position:relative;}
-.mm-header::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,#10b981,#3884ff 45%,transparent 92%);background-size:220% 100%;animation:mm-scan 6s linear infinite;border-radius:2px;}
-@keyframes mm-scan{0%{background-position:120% 0;}100%{background-position:-120% 0;}}
+[data-testid="stSidebar"]{
+background-color:#0a0f1c;
+border-right:1px solid #1b2740;
+}
 
-.mm-logo{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.32rem;letter-spacing:0.18em;color:#eef3fb;text-transform:uppercase;}
-.mm-logo .mm-dot{color:#10b981;}
-.mm-eyebrow{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;letter-spacing:.22em;color:#4f6080;text-transform:uppercase;margin-top:5px;}
-.mm-sub{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:#8294b0;letter-spacing:.03em;margin-top:2px;}
-.mm-acct{text-align:right;font-family:'JetBrains Mono',monospace;}
-.mm-acct .mm-mode{font-size:.86rem;font-weight:600;color:#eef3fb;letter-spacing:.06em;}
-.mm-acct .mm-id{font-size:.68rem;color:#6b7c97;margin-top:2px;}
+.mm-header{
+display:flex;
+align-items:flex-end;
+justify-content:space-between;
+padding:4px 2px 14px 2px;
+}
 
-.mm-dotlive{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:middle;}
-.mm-run{background:#10b981;animation:mm-pulse 2.2s ease-in-out infinite;}
-.mm-stop{background:#5b6b85;}
-.mm-err{background:#f43f5e;box-shadow:0 0 9px #f43f5e99;}
-@keyframes mm-pulse{0%,100%{box-shadow:0 0 4px rgba(16,185,129,0.5);}50%{box-shadow:0 0 14px rgba(16,185,129,0.95);}}
+.mm-logo{
+font-weight:700;
+font-size:1.25rem;
+letter-spacing:0.14em;
+color:#eef3fb;
+text-transform:uppercase;
+}
 
-.mm-strip{padding:10px 16px;border-radius:9px;font-size:.82rem;font-weight:500;margin:14px 0 18px 0;letter-spacing:.01em;}
-.mm-strip-run{background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.28);color:#34d399;}
-.mm-strip-stop{background:rgba(91,107,133,0.07);border:1px solid rgba(91,107,133,0.22);color:#8294b0;}
-.mm-strip-err{background:rgba(244,63,94,0.09);border:1px solid rgba(244,63,94,0.3);color:#fb7185;}
+.mm-logo .mm-dot{
+color:#10b981;
+}
 
-.mm-kpi-grid{display:grid;grid-template-columns:1.9fr 1.05fr 0.85fr 0.85fr;gap:14px;margin-bottom:18px;}
-@media(max-width:900px){.mm-kpi-grid{grid-template-columns:1fr 1fr;}}
+.mm-eyebrow{
+font-size:.6rem;
+font-weight:600;
+letter-spacing:.18em;
+color:#4f6080;
+text-transform:uppercase;
+margin-top:5px;
+}
 
-.mm-kpi{position:relative;background:linear-gradient(150deg,#0c1426,#0e1830);border:1px solid #1d2c49;border-radius:11px;padding:16px 18px 15px 18px;overflow:hidden;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;}
-.mm-kpi:hover{transform:translateY(-3px);border-color:#33507e;box-shadow:0 10px 26px rgba(0,0,0,0.4);}
-.mm-kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent,#33507e);}
-.mm-kpi-hero{padding-top:20px;padding-bottom:20px;}
-.mm-kpi__label{font-family:'Space Grotesk',sans-serif;font-size:.62rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;}
-.mm-kpi__value{font-family:'JetBrains Mono',monospace;font-weight:700;line-height:1.02;margin-top:8px;color:var(--val,#eef3fb);font-variant-numeric:tabular-nums;}
-.mm-kpi-hero .mm-kpi__value{font-size:clamp(2.3rem,4.4vw,3.4rem);letter-spacing:-0.03em;}
-.mm-kpi:not(.mm-kpi-hero) .mm-kpi__value{font-size:clamp(1.5rem,2.4vw,2rem);}
-.mm-kpi__sub{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#6b7c97;margin-top:7px;}
+.mm-sub{
+font-family:monospace;
+font-size:.74rem;
+color:#8294b0;
+margin-top:2px;
+}
 
-.mm-rail{background:linear-gradient(160deg,#0c1426,#0b1222);border:1px solid #1d2c49;border-radius:12px;padding:16px 16px 18px 16px;}
-.mm-rail__label{font-family:'Space Grotesk',sans-serif;font-size:.6rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;margin:13px 0 4px 0;}
-.mm-rail__label:first-child{margin-top:0;}
-.mm-price{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;color:#eef3fb;}
-.mm-caret{display:inline-block;width:7px;color:#10b981;animation:mm-blink 1.1s steps(1) infinite;}
-@keyframes mm-blink{50%{opacity:0;}}
+.mm-acct{
+text-align:right;
+font-family:monospace;
+}
 
-.mm-trend{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.05rem;letter-spacing:.04em;}
+.mm-acct .mm-mode{
+font-size:.86rem;
+font-weight:600;
+color:#eef3fb;
+}
+
+.mm-acct .mm-id{
+font-size:.68rem;
+color:#6b7c97;
+margin-top:2px;
+}
+
+.mm-strip{
+padding:10px 16px;
+border-radius:9px;
+font-size:.84rem;
+font-weight:500;
+margin:14px 0 18px 0;
+}
+
+.mm-strip-run{
+background:rgba(16,185,129,0.08);
+border:1px solid rgba(16,185,129,0.28);
+color:#34d399;
+}
+
+.mm-strip-stop{
+background:rgba(91,107,133,0.07);
+border:1px solid rgba(91,107,133,0.22);
+color:#8294b0;
+}
+
+.mm-strip-err{
+background:rgba(244,63,94,0.09);
+border:1px solid rgba(244,63,94,0.3);
+color:#fb7185;
+}
+
+.mm-kpi-grid{
+display:grid;
+grid-template-columns:1.9fr 1.05fr 0.85fr 0.85fr;
+gap:14px;
+margin-bottom:18px;
+}
+
+@media(max-width:900px){
+.mm-kpi-grid{
+grid-template-columns:1fr 1fr;
+}
+}
+
+.mm-kpi{
+background:linear-gradient(150deg,#0c1426,#0e1830);
+border:1px solid #1d2c49;
+border-radius:11px;
+padding:16px 18px;
+}
+
+.mm-kpi__label{
+font-size:.62rem;
+font-weight:600;
+letter-spacing:.14em;
+text-transform:uppercase;
+color:#6b7c97;
+}
+
+.mm-kpi__value{
+font-family:monospace;
+font-weight:700;
+line-height:1.05;
+margin-top:8px;
+color:#eef3fb;
+font-variant-numeric:tabular-nums;
+}
+
+.mm-kpi-hero .mm-kpi__value{
+font-size:2.5rem;
+}
+
+.mm-kpi:not(.mm-kpi-hero) .mm-kpi__value{
+font-size:1.7rem;
+}
+
+.mm-kpi__sub{
+font-family:monospace;
+font-size:.68rem;
+color:#6b7c97;
+margin-top:7px;
+}
+
+.mm-rail{
+background:linear-gradient(160deg,#0c1426,#0b1222);
+border:1px solid #1d2c49;
+border-radius:12px;
+padding:16px;
+}
+
+.mm-rail__label{
+font-size:.6rem;
+font-weight:600;
+letter-spacing:.14em;
+text-transform:uppercase;
+color:#6b7c97;
+margin:13px 0 4px 0;
+}
+
+.mm-rail__label:first-child{
+margin-top:0;
+}
+
+.mm-price{
+font-family:monospace;
+font-size:1.45rem;
+font-weight:700;
+color:#eef3fb;
+}
+
+.mm-trend{
+font-weight:700;
+font-size:1.02rem;
+}
+
 .mm-up{color:#34d399;}
 .mm-down{color:#fb7185;}
 .mm-flat{color:#8294b0;}
 
-.mm-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
-.mm-chip{font-family:'JetBrains Mono',monospace;font-size:.66rem;font-weight:600;padding:3px 8px;border-radius:6px;border:1px solid #233452;background:#0e1830;}
+.mm-chips{
+display:flex;
+flex-wrap:wrap;
+gap:6px;
+margin-top:6px;
+}
 
-.mm-stage{display:inline-block;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:.82rem;letter-spacing:.06em;padding:3px 11px;border-radius:20px;}
-.mm-scorebar{height:7px;border-radius:5px;background:#16223c;overflow:hidden;margin-top:7px;}
-.mm-scorefill{height:100%;border-radius:5px;background:linear-gradient(90deg,#3884ff,#10b981);transition:width .4s ease;}
-.mm-hb{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#6b7c97;margin-top:12px;}
+.mm-chip{
+font-family:monospace;
+font-size:.66rem;
+font-weight:600;
+padding:3px 8px;
+border-radius:6px;
+border:1px solid #233452;
+background:#0e1830;
+}
 
-.mm-ledger-head{font-family:'Space Grotesk',sans-serif;font-size:.7rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;margin:22px 0 10px 0;padding-bottom:7px;border-bottom:1px solid #1b2740;}
+.mm-stage{
+display:inline-block;
+font-weight:600;
+font-size:.82rem;
+padding:3px 11px;
+border-radius:20px;
+}
+
+.mm-scorebar{
+height:7px;
+border-radius:5px;
+background:#16223c;
+overflow:hidden;
+margin-top:7px;
+}
+
+.mm-scorefill{
+height:100%;
+background:linear-gradient(90deg,#3884ff,#10b981);
+}
+
+.mm-hb{
+font-family:monospace;
+font-size:.7rem;
+color:#6b7c97;
+margin-top:12px;
+}
+
+.mm-ledger-head{
+font-size:.7rem;
+font-weight:600;
+letter-spacing:.14em;
+text-transform:uppercase;
+color:#6b7c97;
+margin:22px 0 10px 0;
+padding-bottom:7px;
+border-bottom:1px solid #1b2740;
+}
+
 .pos{color:#4ade80;}
 .neg{color:#fb7185;}
+.mut{color:#6b7c97;}
 
-.mm-glitch{margin:14px 0;padding:14px 16px;border-radius:11px;background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);}
-.mm-glitch .t{font-family:'Space Grotesk',sans-serif;font-weight:600;color:#fb7185;font-size:.84rem;letter-spacing:.04em;}
-.mm-glitch .s{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#9fb0c9;margin-top:6px;line-height:1.5;}
+[data-testid="stDataFrame"]{
+border:0;
+}
 
-[data-testid="stDataFrame"]{border:0;}
-[data-testid="stButton"] button{border-radius:8px;font-family:'Space Grotesk',sans-serif;font-weight:600;min-height:2.6rem;letter-spacing:.05em;transition:filter .15s ease,transform .12s ease;}
-[data-testid="stButton"] button:hover{filter:brightness(1.14);}
-[data-testid="stButton"] button:active{transform:scale(0.985);}
-#MainMenu,footer{visibility:hidden;}
+#MainMenu,footer{
+visibility:hidden;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -192,8 +355,6 @@ if "last_auto_restart" not in st.session_state:
 
 state: StateManager = st.session_state.state_manager
 
-# Attach the background AI-research + venture pipeline.
-# It never touches the order path.
 try:
     from src.research_engine import get_research_engine
     get_research_engine().attach(state)
@@ -203,9 +364,11 @@ except Exception:
 
 def _glitch(where, exc):
     st.markdown(
-        f'<div class="mm-glitch"><div class="t">⚠ {where} hit a snag</div>'
-        f'<div class="s">The bot is fine — this is a rendering edge case, not a trading fault. '
-        f'Details are in the expander; the controls stay live.</div></div>',
+        f'<div style="margin:14px 0;padding:14px 16px;border-radius:11px;'
+        f'background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);">'
+        f'<div style="font-weight:600;color:#fb7185;">⚠ {html.escape(where)} hit a snag</div>'
+        f'<div style="font-family:monospace;font-size:.72rem;color:#9fb0c9;margin-top:6px;">'
+        f'The bot is fine — this is a rendering edge case, not a trading fault.</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -429,8 +592,8 @@ def stop_bot():
 
 with st.sidebar:
     st.markdown(
-        "<div style='font-family:Space Grotesk;font-size:0.74rem;color:#6b7c97;font-weight:600;"
-        "letter-spacing:0.16em;text-transform:uppercase;margin-bottom:14px;'>Setup</div>",
+        "<div style='font-size:0.74rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
+        "text-transform:uppercase;margin-bottom:14px;'>Setup</div>",
         unsafe_allow_html=True,
     )
 
@@ -499,12 +662,6 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown(
-        "<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
-        "text-transform:uppercase;margin-bottom:8px;'>Market</div>",
-        unsafe_allow_html=True,
-    )
-
     market_options = list(AVAILABLE_MARKETS.keys())
 
     try:
@@ -528,12 +685,6 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown(
-        "<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
-        "text-transform:uppercase;margin-bottom:8px;'>Contract</div>",
-        unsafe_allow_html=True,
-    )
-
     default_duration = CONTRACT_DURATION if CONTRACT_DURATION_UNIT == "m" else 30
 
     duration_minutes = st.select_slider(
@@ -548,12 +699,6 @@ with st.sidebar:
     st.caption("Up to 10 trades a day.")
 
     st.divider()
-
-    st.markdown(
-        "<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
-        "text-transform:uppercase;margin-bottom:8px;'>Account safety</div>",
-        unsafe_allow_html=True,
-    )
 
     if selected_account:
         if selected_account_type == "DEMO":
@@ -578,12 +723,6 @@ with st.sidebar:
         execution_mode = resolve_execution_mode(selected_account_type, real_execution_confirmed)
 
     st.divider()
-
-    st.markdown(
-        "<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
-        "text-transform:uppercase;margin-bottom:8px;'>Stake</div>",
-        unsafe_allow_html=True,
-    )
 
     initial_stake = st.number_input(
         "Starting stake",
@@ -626,12 +765,6 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown(
-        "<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
-        "text-transform:uppercase;margin-bottom:8px;'>Selectivity</div>",
-        unsafe_allow_html=True,
-    )
-
     _sens_opts = list(STRATEGY_SENSITIVITY_PRESETS.keys()) or ["Conservative"]
     _sens_val = DEFAULT_STRATEGY_SENSITIVITY if DEFAULT_STRATEGY_SENSITIVITY in _sens_opts else _sens_opts[0]
 
@@ -644,35 +777,19 @@ with st.sidebar:
 
     preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, {}) or {}
 
-    if duration_minutes <= 2:
-        regime_note = "scalp → 5m trigger; 5m must trend; power candles get the express lane"
-    elif duration_minutes <= 15:
-        regime_note = "short → 5m trigger; 5m must trend & decisive body"
-    elif duration_minutes <= 30:
-        regime_note = "medium → 5m trigger; 30m + 1h must agree"
-    else:
-        regime_note = "long → 15m trigger; 30m + 1h agree, 1h ADX & MACD confirm"
-
     st.caption(
         f"Needs {preset.get('entry_score_threshold', SCORE_MAX)}/{SCORE_MAX} · "
-        f"{entry_tf} ADX ≥ {preset.get('entry_adx_floor', 15)} · {regime_note}"
+        f"{entry_tf} trigger · 30m + 1h confirmation"
     )
 
     st.divider()
-
-    st.markdown(
-        "<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;"
-        "text-transform:uppercase;margin-bottom:8px;'>Venture governor</div>",
-        unsafe_allow_html=True,
-    )
 
     venture_on = st.toggle(
         "Venture control (AI risk governor)",
         value=st.session_state.get("venture_on", True),
         key="venture_on",
         help=(
-            "ON = the AI panel can scale stake / block trades it judges POOR "
-            "(only once enough trade history exists). OFF = purely advisory, never blocks."
+            "ON = council can reject weak entries. OFF = council disabled."
         ),
     )
 
@@ -779,26 +896,27 @@ def status_fragment():
         msg = state.status_message
 
         if err:
-            cls, dot, text = "mm-strip-err", "", html.escape(err)
+            cls, text = "mm-strip-err", html.escape(err)
         elif state.is_running:
-            cls, dot, text = "mm-strip-run", '<span class="mm-dotlive mm-run"></span>', html.escape(msg)
+            cls, text = "mm-strip-run", html.escape(msg)
         else:
-            cls, dot, text = "mm-strip-stop", '<span class="mm-dotlive mm-stop"></span>', html.escape(msg)
+            cls, text = "mm-strip-stop", html.escape(msg)
 
-        st.markdown(f'<div class="mm-strip {cls}">{dot}{text}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="mm-strip {cls}">{text}</div>', unsafe_allow_html=True)
 
     except Exception as _e:
         _glitch("Status", _e)
 
 
-def _kpi(label, value, sub=" ", accent="#33507e", val_color="#eef3fb", hero=False):
+def _kpi(label, value, sub=" ", hero=False):
     cls = "mm-kpi mm-kpi-hero" if hero else "mm-kpi"
 
     return (
-        f'<div class="{cls}" style="--accent:{accent};--val:{val_color};">'
+        f'<div class="{cls}">'
         f'<div class="mm-kpi__label">{html.escape(label)}</div>'
         f'<div class="mm-kpi__value">{html.escape(value)}</div>'
-        f'<div class="mm-kpi__sub">{html.escape(sub)}</div></div>'
+        f'<div class="mm-kpi__sub">{html.escape(sub)}</div>'
+        f'</div>'
     )
 
 
@@ -811,16 +929,11 @@ def metrics_fragment():
 
         pnl = stats["total_pnl"]
         pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
-        pnl_accent = "#10b981" if pnl > 0 else "#f43f5e" if pnl < 0 else "#33507e"
-        pnl_val = "#34d399" if pnl > 0 else "#fb7185" if pnl < 0 else "#eef3fb"
 
         exp = stats["expectancy"]
         exp_str = f"+{exp:.2f}" if exp > 0 else f"{exp:.2f}"
-        exp_accent = "#10b981" if exp > 0 else "#f43f5e" if exp < 0 else "#33507e"
-        exp_val = "#34d399" if exp > 0 else "#fb7185" if exp < 0 else "#9fb0c9"
 
         wr = stats["win_rate"]
-        wr_accent = "#10b981" if wr >= 55 else "#f43f5e" if wr < 45 and stats["total_trades"] > 0 else "#3884ff"
 
         mart = state.get_martingale_state()
         step = mart["step"]
@@ -831,10 +944,10 @@ def metrics_fragment():
             sub_trades += f" · step {step}"
 
         cards = (
-            _kpi("Net result", pnl_str, f"{currency} · this session", pnl_accent, pnl_val, hero=True)
-            + _kpi("Edge / trade", exp_str, "expected value", exp_accent, exp_val)
-            + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed", wr_accent)
-            + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades, "#3884ff")
+            _kpi("Net result", pnl_str, f"{currency} · this session", hero=True)
+            + _kpi("Edge / trade", exp_str, "expected value")
+            + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed")
+            + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades)
         )
 
         st.markdown(f'<div class="mm-kpi-grid">{cards}</div>', unsafe_allow_html=True)
@@ -847,15 +960,12 @@ def _chart_layout(height):
     return dict(
         paper_bgcolor="#0a1120",
         plot_bgcolor="#0a1120",
-        font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
+        font=dict(color="#6b7c97", size=10, family="monospace"),
         xaxis=dict(
             gridcolor="#16223c",
             tickcolor="#16223c",
             rangeslider_visible=False,
             tickfont=dict(size=9),
-            showspikes=True,
-            spikecolor="#33507e",
-            spikethickness=1,
         ),
         yaxis=dict(
             gridcolor="#16223c",
@@ -871,135 +981,99 @@ def _chart_layout(height):
     )
 
 
-@st.fragment(run_every=5.0)
+@st.fragment(run_every=30.0)
 def chart_fragment():
+    """
+    5m candle chart only.
+    No tick line. No fast flicker.
+    """
     try:
         candles = state.get_candles_5m()
 
-        if candles:
-            dfc = candles[-120:]
-
-            times = pd.to_datetime([c.get("epoch") for c in dfc], unit="s", utc=True)
-            o = [float(c.get("open")) for c in dfc]
-            h = [float(c.get("high")) for c in dfc]
-            l = [float(c.get("low")) for c in dfc]
-            cl = [float(c.get("close")) for c in dfc]
-
-            last = cl[-1]
-            first = cl[0]
-            chg = last - first
-            chg_pct = (chg / first * 100) if first else 0.0
-            chg_cls = "pos" if chg >= 0 else "neg"
-
-            st.markdown(
-                f'<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 6px 2px;flex-wrap:wrap">'
-                f'<span style="font-family:Space Grotesk,sans-serif;font-size:.62rem;font-weight:600;'
-                f'letter-spacing:.16em;text-transform:uppercase;color:#6b7c97">5m candles</span>'
-                f'<span style="font-family:JetBrains Mono,monospace;font-weight:700;color:#eef3fb;'
-                f'font-size:1.05rem">{last:.5f}</span>'
-                f'<span class="{chg_cls}" style="font-family:JetBrains Mono,monospace;font-size:.8rem;'
-                f'font-weight:600">{chg:+.5f} ({chg_pct:+.2f}%)</span></div>',
-                unsafe_allow_html=True,
+        if not candles:
+            st.info(
+                "Waiting for 5m candle history. The chart appears once the engine downloads the first candle batch."
             )
+            return
 
-            fig = go.Figure()
+        dfc = candles[-120:]
 
-            fig.add_trace(
-                go.Scatter(
-                    x=times,
-                    y=cl,
-                    mode="lines",
-                    line=dict(color="rgba(127,176,255,0.35)", width=1),
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
+        times = pd.to_datetime([c.get("epoch") for c in dfc], unit="s", utc=True)
+        o = [float(c.get("open")) for c in dfc]
+        h = [float(c.get("high")) for c in dfc]
+        l = [float(c.get("low")) for c in dfc]
+        cl = [float(c.get("close")) for c in dfc]
 
-            fig.add_trace(
-                go.Candlestick(
-                    x=times,
-                    open=o,
-                    high=h,
-                    low=l,
-                    close=cl,
-                    name="",
-                    increasing_line_color="#34d399",
-                    increasing_fillcolor="#34d399",
-                    decreasing_line_color="#fb7185",
-                    decreasing_fillcolor="#fb7185",
-                    whiskerwidth=0.5,
-                    hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>"
-                                  "L %{low:.5f}  C %{close:.5f}<extra></extra>",
-                )
-            )
+        last = cl[-1]
+        first = cl[0]
+        chg = last - first
+        chg_pct = (chg / first * 100) if first else 0.0
+        chg_cls = "pos" if chg >= 0 else "neg"
 
-            fig.add_trace(
-                go.Scatter(
-                    x=[times[-1]],
-                    y=[last],
-                    mode="markers",
-                    marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)),
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
+        st.markdown(
+            f'<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 6px 2px;flex-wrap:wrap">'
+            f'<span style="font-size:.68rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97">5m candles</span>'
+            f'<span style="font-family:monospace;font-weight:700;color:#eef3fb;font-size:1.02rem">{last:.5f}</span>'
+            f'<span class="{chg_cls}" style="font-family:monospace;font-size:.8rem;font-weight:600">{chg:+.5f} ({chg_pct:+.2f}%)</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-            fig.add_hline(y=last, line=dict(color="#34d399", width=1, dash="dot"), opacity=0.45)
-            fig.update_layout(**_chart_layout(360))
+        fig = go.Figure()
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={"displayModeBar": False, "scrollZoom": True},
-            )
-
-        else:
-            ticks = state.get_recent_ticks()
-
-            if not ticks:
-                st.info("Waiting for market data — the 5m chart fills in within ~30s of connecting.")
-                return
-
-            fig = go.Figure()
-
-            fig.add_trace(
-                go.Scatter(
-                    x=list(range(len(ticks))),
-                    y=ticks,
-                    mode="lines",
-                    line=dict(color="#3884ff", width=1.6),
-                    hovertemplate="price %{y:.5f}<extra></extra>",
-                )
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=[len(ticks) - 1],
-                    y=[ticks[-1]],
-                    mode="markers",
-                    marker=dict(color="#10b981", size=9, line=dict(color="#06281f", width=1)),
-                    hoverinfo="skip",
-                )
-            )
-
-            fig.update_layout(
-                paper_bgcolor="#0a1120",
-                plot_bgcolor="#0a1120",
-                font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
-                xaxis=dict(gridcolor="#16223c", showticklabels=False, zeroline=False),
-                yaxis=dict(gridcolor="#16223c", zeroline=False, side="right", tickformat=".5f"),
-                margin=dict(l=8, r=8, t=8, b=8),
-                height=360,
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=cl,
+                mode="lines",
+                line=dict(color="rgba(127,176,255,0.35)", width=1),
                 showlegend=False,
+                hoverinfo="skip",
             )
+        )
 
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        fig.add_trace(
+            go.Candlestick(
+                x=times,
+                open=o,
+                high=h,
+                low=l,
+                close=cl,
+                name="",
+                increasing_line_color="#34d399",
+                increasing_fillcolor="#34d399",
+                decreasing_line_color="#fb7185",
+                decreasing_fillcolor="#fb7185",
+                whiskerwidth=0.5,
+                hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>L %{low:.5f}  C %{close:.5f}<extra></extra>",
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[times[-1]],
+                y=[last],
+                mode="markers",
+                marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+        fig.add_hline(y=last, line=dict(color="#34d399", width=1, dash="dot"), opacity=0.45)
+        fig.update_layout(**_chart_layout(380))
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"displayModeBar": False, "scrollZoom": True},
+        )
 
     except Exception as _e:
         _glitch("5m chart", _e)
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=5.0)
 def state_panel_fragment():
     try:
         s = state.get_strategy_state()
@@ -1017,7 +1091,9 @@ def state_panel_fragment():
                 v = tf_biases[tf]
                 c = "#34d399" if v == "UP" else ("#fb7185" if v == "DOWN" else "#8294b0")
                 ic = "▲" if v == "UP" else ("▼" if v == "DOWN" else "·")
-                chips.append(f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>')
+                chips.append(
+                    f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>'
+                )
 
         chips_html = f'<div class="mm-chips">{" ".join(chips)}</div>' if chips else ""
 
@@ -1055,7 +1131,7 @@ def state_panel_fragment():
 
         rail = (
             '<div class="mm-rail"><div class="mm-rail__label">Price</div>'
-            f'<div class="mm-price">{price:.5f} <span class="mm-caret">▌</span></div>'
+            f'<div class="mm-price">{price:.5f}</div>'
             '<div class="mm-rail__label">Trend</div>'
             f'<div class="mm-trend {t_cls}">{t_arrow} {html.escape(str(trend))}</div>'
             '<div class="mm-rail__label">Timeframes</div>'
@@ -1064,8 +1140,7 @@ def state_panel_fragment():
             f'<span class="mm-stage" style="color:{sc};background:{sbg};border:1px solid {sc}55;">'
             f'{html.escape(str(stage_label))}</span>'
             '<div class="mm-rail__label">Setup score</div>'
-            f'<div style="font-family:\'JetBrains Mono\',monospace;font-weight:700;color:#eef3fb;">'
-            f'{score} / {SCORE_MAX}</div>'
+            f'<div style="font-family:monospace;font-weight:700;color:#eef3fb;">{score} / {SCORE_MAX}</div>'
             '<div class="mm-scorebar">'
             f'<div class="mm-scorefill" style="width:{pct}%;"></div></div>'
             f'<div class="mm-hb">{hb_html}</div></div>'
@@ -1203,7 +1278,7 @@ watchdog_fragment()
 status_fragment()
 metrics_fragment()
 
-col_chart, col_rail = st.columns([3, 1], gap="medium")
+col_chart, col_rail = st.columns([3, 1])
 
 with col_chart:
     chart_fragment()
