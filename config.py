@@ -19,20 +19,6 @@ def _streamlit_secret(name: str) -> str:
         return ""
 
 
-def _streamlit_secret_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-
-    if raw is None or str(raw).strip() == "":
-        raw = _streamlit_secret(name)
-
-    return str(raw if raw not in (None, "") else default).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 DERIV_APP_ID = os.getenv("DERIV_APP_ID") or _streamlit_secret("DERIV_APP_ID") or ""
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN") or _streamlit_secret("DERIV_API_TOKEN") or ""
 DERIV_WS_URL = ""
@@ -139,31 +125,22 @@ LOG_LEVEL = "INFO"
 # Council settings
 # ---------------------------------------------------------------------------
 
-# Council must deliberate at least this long before an approved entry continues.
 COUNCIL_MIN_THINK_SECONDS = 3.0
-
-# Upper bound so council cannot stall execution forever.
 COUNCIL_MAX_THINK_SECONDS = 8.0
 
-# Projection gate minimum persistence score.
-# 0.45 is strict but not trade-killing.
-COUNCIL_PROJECTION_MIN = 0.45
+# Lowered so the council does not choke all trades.
+COUNCIL_PROJECTION_MIN = 0.35
 
-# Wrong-from-start protection.
-COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.42
-COUNCIL_WRONG_START_MIN_BODY = 0.28
+# Wrong-from-start protection, but not overly restrictive.
+COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.35
+COUNCIL_WRONG_START_MIN_BODY = 0.20
 
-# Supabase diagnostics.
-SUPABASE_DEBUG = _streamlit_secret_bool("SUPABASE_DEBUG", False)
+SUPABASE_DEBUG = str(
+    os.getenv("SUPABASE_DEBUG") or _streamlit_secret("SUPABASE_DEBUG") or ""
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _patch_streamlit_width_kwargs() -> None:
-    """
-    Streamlit compatibility patch.
-
-    Translates deprecated use_container_width=True into width='stretch'
-    where supported, while preserving old behavior on older Streamlit builds.
-    """
     try:
         import streamlit as st
     except Exception:
