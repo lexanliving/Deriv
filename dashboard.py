@@ -63,7 +63,6 @@ _MODE_LABEL = {
     "REAL": "Live",
     "BLOCKED": "Paused",
     "UNCONFIGURED": "No account",
-    "SIGNAL_ONLY": "Preview",
 }
 
 
@@ -355,26 +354,6 @@ if "last_auto_restart" not in st.session_state:
 
 state: StateManager = st.session_state.state_manager
 
-try:
-    from src.research_engine import get_research_engine
-    get_research_engine().attach(state)
-except Exception:
-    pass
-
-
-def _glitch(where, exc):
-    st.markdown(
-        f'<div style="margin:14px 0;padding:14px 16px;border-radius:11px;'
-        f'background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);">'
-        f'<div style="font-weight:600;color:#fb7185;">⚠ {html.escape(where)} hit a snag</div>'
-        f'<div style="font-family:monospace;font-size:.72rem;color:#9fb0c9;margin-top:6px;">'
-        f'The bot is fine — this is a rendering edge case, not a trading fault.</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Technical details"):
-        st.exception(exc)
-
 
 def _run_engine_in_thread(engine, loop):
     asyncio.set_event_loop(loop)
@@ -404,36 +383,12 @@ MAX_AUTO_RESTARTS = 5
 HEALTHY_WINDOW_SECONDS = 120.0
 
 
-def _today_filled_trade_count(state_obj):
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    count = 0
-
-    for t in state_obj.get_trade_history():
-        if getattr(t, "contract_id", None) is None:
-            continue
-
-        if str(t.timestamp).startswith(today_str):
-            count += 1
-
-    return count
-
-
 def _launch_engine(config, reset_state):
     try:
         if reset_state:
             state.reset_for_new_session(config["initial_stake"])
         else:
             state.clear_error()
-
-        history = state.get_trade_history()
-
-        if history and history[0].status == "OPEN":
-            state.update_trade_outcome(
-                history[0].trade_id,
-                "UNKNOWN",
-                0.0,
-                "The engine restarted while this contract was open — check the Deriv statement.",
-            )
 
         engine = TradingEngine(
             api_token=config["api_token"],
@@ -452,10 +407,6 @@ def _launch_engine(config, reset_state):
             real_execution_confirmed=config["real_execution_confirmed"],
             martingale_multiplier=config["martingale_multiplier"],
         )
-
-        if not reset_state:
-            engine._daily_trade_count = _today_filled_trade_count(state)
-            engine._daily_date = datetime.now(timezone.utc).date()
 
     except Exception as exc:
         state.set_running(False)
@@ -696,7 +647,7 @@ with st.sidebar:
 
     entry_tf = ENTRY_TIMEFRAME_BY_DURATION.get(int(duration_minutes), DEFAULT_ENTRY_TIMEFRAME)
 
-    st.caption("Up to 10 trades a day.")
+    st.caption("No daily trade limit.")
 
     st.divider()
 
@@ -784,21 +735,6 @@ with st.sidebar:
 
     st.divider()
 
-    venture_on = st.toggle(
-        "Venture control (AI risk governor)",
-        value=st.session_state.get("venture_on", True),
-        key="venture_on",
-        help=(
-            "ON = council can reject weak entries. OFF = council disabled."
-        ),
-    )
-
-    try:
-        from src.venture_engine import set_venture_enabled
-        set_venture_enabled(bool(venture_on))
-    except Exception:
-        pass
-
     col_start, col_stop = st.columns(2)
 
     with col_start:
@@ -885,27 +821,23 @@ try:
         unsafe_allow_html=True,
     )
 
-except Exception as _e:
-    _glitch("Header", _e)
+except Exception:
+    st.warning("Header could not render, but the bot controls still work.")
 
 
 @st.fragment(run_every=2.0)
 def status_fragment():
-    try:
-        err = state.error_message
-        msg = state.status_message
+    err = state.error_message
+    msg = state.status_message
 
-        if err:
-            cls, text = "mm-strip-err", html.escape(err)
-        elif state.is_running:
-            cls, text = "mm-strip-run", html.escape(msg)
-        else:
-            cls, text = "mm-strip-stop", html.escape(msg)
+    if err:
+        cls, text = "mm-strip-err", html.escape(err)
+    elif state.is_running:
+        cls, text = "mm-strip-run", html.escape(msg)
+    else:
+        cls, text = "mm-strip-stop", html.escape(msg)
 
-        st.markdown(f'<div class="mm-strip {cls}">{text}</div>', unsafe_allow_html=True)
-
-    except Exception as _e:
-        _glitch("Status", _e)
+    st.markdown(f'<div class="mm-strip {cls}">{text}</div>', unsafe_allow_html=True)
 
 
 def _kpi(label, value, sub=" ", hero=False):
@@ -922,38 +854,34 @@ def _kpi(label, value, sub=" ", hero=False):
 
 @st.fragment(run_every=2.0)
 def metrics_fragment():
-    try:
-        stats = state.get_performance_stats()
-        ctx = state.get_execution_context()
-        currency = ctx.get("currency", "USD")
+    stats = state.get_performance_stats()
+    ctx = state.get_execution_context()
+    currency = ctx.get("currency", "USD")
 
-        pnl = stats["total_pnl"]
-        pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
+    pnl = stats["total_pnl"]
+    pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
 
-        exp = stats["expectancy"]
-        exp_str = f"+{exp:.2f}" if exp > 0 else f"{exp:.2f}"
+    exp = stats["expectancy"]
+    exp_str = f"+{exp:.2f}" if exp > 0 else f"{exp:.2f}"
 
-        wr = stats["win_rate"]
+    wr = stats["win_rate"]
 
-        mart = state.get_martingale_state()
-        step = mart["step"]
+    mart = state.get_martingale_state()
+    step = mart["step"]
 
-        sub_trades = f"{stats['wins']}W · {stats['losses']}L"
+    sub_trades = f"{stats['wins']}W · {stats['losses']}L"
 
-        if step > 0:
-            sub_trades += f" · step {step}"
+    if step > 0:
+        sub_trades += f" · step {step}"
 
-        cards = (
-            _kpi("Net result", pnl_str, f"{currency} · this session", hero=True)
-            + _kpi("Edge / trade", exp_str, "expected value")
-            + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed")
-            + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades)
-        )
+    cards = (
+        _kpi("Net result", pnl_str, f"{currency} · this session", hero=True)
+        + _kpi("Edge / trade", exp_str, "expected value")
+        + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed")
+        + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades)
+    )
 
-        st.markdown(f'<div class="mm-kpi-grid">{cards}</div>', unsafe_allow_html=True)
-
-    except Exception as _e:
-        _glitch("Metrics", _e)
+    st.markdown(f'<div class="mm-kpi-grid">{cards}</div>', unsafe_allow_html=True)
 
 
 def _chart_layout(height):
@@ -983,295 +911,250 @@ def _chart_layout(height):
 
 @st.fragment(run_every=30.0)
 def chart_fragment():
-    """
-    5m candle chart only.
-    No tick line. No fast flicker.
-    """
-    try:
-        candles = state.get_candles_5m()
+    candles = state.get_candles_5m()
 
-        if not candles:
-            st.info(
-                "Waiting for 5m candle history. The chart appears once the engine downloads the first candle batch."
-            )
-            return
+    if not candles:
+        st.info("Waiting for 5m candle history. The chart appears once the engine downloads candles.")
+        return
 
-        dfc = candles[-120:]
+    dfc = [c for c in candles[-120:] if c.get("epoch") is not None]
 
-        times = pd.to_datetime([c.get("epoch") for c in dfc], unit="s", utc=True)
-        o = [float(c.get("open")) for c in dfc]
-        h = [float(c.get("high")) for c in dfc]
-        l = [float(c.get("low")) for c in dfc]
-        cl = [float(c.get("close")) for c in dfc]
+    if not dfc:
+        st.info("Waiting for valid candle rows.")
+        return
 
-        last = cl[-1]
-        first = cl[0]
-        chg = last - first
-        chg_pct = (chg / first * 100) if first else 0.0
-        chg_cls = "pos" if chg >= 0 else "neg"
+    times = pd.to_datetime([c.get("epoch") for c in dfc], unit="s", utc=True)
+    o = [float(c.get("open")) for c in dfc]
+    h = [float(c.get("high")) for c in dfc]
+    l = [float(c.get("low")) for c in dfc]
+    cl = [float(c.get("close")) for c in dfc]
 
-        st.markdown(
-            f'<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 6px 2px;flex-wrap:wrap">'
-            f'<span style="font-size:.68rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97">5m candles</span>'
-            f'<span style="font-family:monospace;font-weight:700;color:#eef3fb;font-size:1.02rem">{last:.5f}</span>'
-            f'<span class="{chg_cls}" style="font-family:monospace;font-size:.8rem;font-weight:600">{chg:+.5f} ({chg_pct:+.2f}%)</span>'
-            f'</div>',
-            unsafe_allow_html=True,
+    last = cl[-1]
+    first = cl[0]
+    chg = last - first
+    chg_pct = (chg / first * 100) if first else 0.0
+    chg_cls = "pos" if chg >= 0 else "neg"
+
+    st.markdown(
+        f'<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 6px 2px;flex-wrap:wrap">'
+        f'<span style="font-size:.68rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#6b7c97">5m candles</span>'
+        f'<span style="font-family:monospace;font-weight:700;color:#eef3fb;font-size:1.02rem">{last:.5f}</span>'
+        f'<span class="{chg_cls}" style="font-family:monospace;font-size:.8rem;font-weight:600">{chg:+.5f} ({chg_pct:+.2f}%)</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=cl,
+            mode="lines",
+            line=dict(color="rgba(127,176,255,0.35)", width=1),
+            showlegend=False,
+            hoverinfo="skip",
         )
+    )
 
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Scatter(
-                x=times,
-                y=cl,
-                mode="lines",
-                line=dict(color="rgba(127,176,255,0.35)", width=1),
-                showlegend=False,
-                hoverinfo="skip",
-            )
+    fig.add_trace(
+        go.Candlestick(
+            x=times,
+            open=o,
+            high=h,
+            low=l,
+            close=cl,
+            name="",
+            increasing_line_color="#34d399",
+            increasing_fillcolor="#34d399",
+            decreasing_line_color="#fb7185",
+            decreasing_fillcolor="#fb7185",
+            whiskerwidth=0.5,
+            hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>L %{low:.5f}  C %{close:.5f}<extra></extra>",
         )
+    )
 
-        fig.add_trace(
-            go.Candlestick(
-                x=times,
-                open=o,
-                high=h,
-                low=l,
-                close=cl,
-                name="",
-                increasing_line_color="#34d399",
-                increasing_fillcolor="#34d399",
-                decreasing_line_color="#fb7185",
-                decreasing_fillcolor="#fb7185",
-                whiskerwidth=0.5,
-                hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>L %{low:.5f}  C %{close:.5f}<extra></extra>",
-            )
+    fig.add_trace(
+        go.Scatter(
+            x=[times[-1]],
+            y=[last],
+            mode="markers",
+            marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)),
+            showlegend=False,
+            hoverinfo="skip",
         )
+    )
 
-        fig.add_trace(
-            go.Scatter(
-                x=[times[-1]],
-                y=[last],
-                mode="markers",
-                marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)),
-                showlegend=False,
-                hoverinfo="skip",
-            )
-        )
+    fig.add_hline(y=last, line=dict(color="#34d399", width=1, dash="dot"), opacity=0.45)
+    fig.update_layout(**_chart_layout(380))
 
-        fig.add_hline(y=last, line=dict(color="#34d399", width=1, dash="dot"), opacity=0.45)
-        fig.update_layout(**_chart_layout(380))
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True,
-            config={"displayModeBar": False, "scrollZoom": True},
-        )
-
-    except Exception as _e:
-        _glitch("5m chart", _e)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": False, "scrollZoom": True},
+    )
 
 
 @st.fragment(run_every=5.0)
 def state_panel_fragment():
-    try:
-        s = state.get_strategy_state()
-        price = state.current_price
+    s = state.get_strategy_state()
+    price = state.current_price
 
-        trend = s.get("trend_direction") or "—"
-        t_cls = "mm-up" if trend == "UP" else ("mm-down" if trend == "DOWN" else "mm-flat")
-        t_arrow = "▲" if trend == "UP" else ("▼" if trend == "DOWN" else "—")
+    trend = s.get("trend_direction") or "—"
+    t_cls = "mm-up" if trend == "UP" else ("mm-down" if trend == "DOWN" else "mm-flat")
+    t_arrow = "▲" if trend == "UP" else ("▼" if trend == "DOWN" else "—")
 
-        tf_biases = s.get("mtf_tf_biases", {})
-        chips = []
+    tf_biases = s.get("mtf_tf_biases", {})
+    chips = []
 
-        for tf in ["5m", "15m", "30m", "1h"]:
-            if tf in tf_biases:
-                v = tf_biases[tf]
-                c = "#34d399" if v == "UP" else ("#fb7185" if v == "DOWN" else "#8294b0")
-                ic = "▲" if v == "UP" else ("▼" if v == "DOWN" else "·")
-                chips.append(
-                    f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>'
-                )
+    for tf in ["5m", "15m", "30m", "1h"]:
+        if tf in tf_biases:
+            v = tf_biases[tf]
+            c = "#34d399" if v == "UP" else ("#fb7185" if v == "DOWN" else "#8294b0")
+            ic = "▲" if v == "UP" else ("▼" if v == "DOWN" else "·")
+            chips.append(
+                f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>'
+            )
 
-        chips_html = f'<div class="mm-chips">{" ".join(chips)}</div>' if chips else ""
+    chips_html = f'<div class="mm-chips">{" ".join(chips)}</div>' if chips else ""
 
-        stage = s.get("pattern_stage", "IDLE")
+    stage = s.get("pattern_stage", "IDLE")
 
-        stage_colors = {
-            "IDLE": ("#5b6b85", "#10182b"),
-            "TREND": ("#a78bfa", "#1a1430"),
-            "PULLBACK": ("#fbbf24", "#241c08"),
-            "MOMENTUM": ("#3884ff", "#0c1730"),
-            "SIGNAL": ("#34d399", "#08241a"),
-        }
+    stage_colors = {
+        "IDLE": ("#5b6b85", "#10182b"),
+        "TREND": ("#a78bfa", "#1a1430"),
+        "PULLBACK": ("#fbbf24", "#241c08"),
+        "MOMENTUM": ("#3884ff", "#0c1730"),
+        "SIGNAL": ("#34d399", "#08241a"),
+    }
 
-        sc, sbg = stage_colors.get(stage, ("#5b6b85", "#10182b"))
-        stage_label = _STAGE_LABEL.get(stage, stage)
+    sc, sbg = stage_colors.get(stage, ("#5b6b85", "#10182b"))
+    stage_label = _STAGE_LABEL.get(stage, stage)
 
-        score = int(s.get("last_signal_score", 0))
-        pct = max(0, min(100, int(round(score / SCORE_MAX * 100)))) if SCORE_MAX else 0
+    score = int(s.get("last_signal_score", 0))
+    pct = max(0, min(100, int(round(score / SCORE_MAX * 100)))) if SCORE_MAX else 0
 
-        hb = state.get_tick_heartbeat()
-        total = hb.get("total_ticks_processed", 0)
-        last_t = hb.get("last_tick_time")
+    hb = state.get_tick_heartbeat()
+    total = hb.get("total_ticks_processed", 0)
+    last_t = hb.get("last_tick_time")
 
-        if last_t is not None:
-            age = time.time() - last_t
+    if last_t is not None:
+        age = time.time() - last_t
 
-            if age <= 35:
-                hb_html = f'<span style="color:#34d399;">●</span> live · {total:,} ticks'
-            elif age <= 90:
-                hb_html = f'<span style="color:#fbbf24;">●</span> {age:.0f}s ago · {total:,} ticks'
-            else:
-                hb_html = f'<span style="color:#fb7185;">●</span> waiting · {age:.0f}s'
+        if age <= 35:
+            hb_html = f'<span style="color:#34d399;">●</span> live · {total:,} ticks'
+        elif age <= 90:
+            hb_html = f'<span style="color:#fbbf24;">●</span> {age:.0f}s ago · {total:,} ticks'
         else:
-            hb_html = '<span style="color:#fb7185;">●</span> awaiting first tick'
+            hb_html = f'<span style="color:#fb7185;">●</span> waiting · {age:.0f}s'
+    else:
+        hb_html = '<span style="color:#fb7185;">●</span> awaiting first tick'
 
-        rail = (
-            '<div class="mm-rail"><div class="mm-rail__label">Price</div>'
-            f'<div class="mm-price">{price:.5f}</div>'
-            '<div class="mm-rail__label">Trend</div>'
-            f'<div class="mm-trend {t_cls}">{t_arrow} {html.escape(str(trend))}</div>'
-            '<div class="mm-rail__label">Timeframes</div>'
-            f'{chips_html}'
-            '<div class="mm-rail__label">Status</div>'
-            f'<span class="mm-stage" style="color:{sc};background:{sbg};border:1px solid {sc}55;">'
-            f'{html.escape(str(stage_label))}</span>'
-            '<div class="mm-rail__label">Setup score</div>'
-            f'<div style="font-family:monospace;font-weight:700;color:#eef3fb;">{score} / {SCORE_MAX}</div>'
-            '<div class="mm-scorebar">'
-            f'<div class="mm-scorefill" style="width:{pct}%;"></div></div>'
-            f'<div class="mm-hb">{hb_html}</div></div>'
-        )
+    rail = (
+        '<div class="mm-rail"><div class="mm-rail__label">Price</div>'
+        f'<div class="mm-price">{price:.5f}</div>'
+        '<div class="mm-rail__label">Trend</div>'
+        f'<div class="mm-trend {t_cls}">{t_arrow} {html.escape(str(trend))}</div>'
+        '<div class="mm-rail__label">Timeframes</div>'
+        f'{chips_html}'
+        '<div class="mm-rail__label">Status</div>'
+        f'<span class="mm-stage" style="color:{sc};background:{sbg};border:1px solid {sc}55;">'
+        f'{html.escape(str(stage_label))}</span>'
+        '<div class="mm-rail__label">Setup score</div>'
+        f'<div style="font-family:monospace;font-weight:700;color:#eef3fb;">{score} / {SCORE_MAX}</div>'
+        '<div class="mm-scorebar">'
+        f'<div class="mm-scorefill" style="width:{pct}%;"></div></div>'
+        f'<div class="mm-hb">{hb_html}</div></div>'
+    )
 
-        st.markdown(rail, unsafe_allow_html=True)
-
-    except Exception as _e:
-        _glitch("Status rail", _e)
+    st.markdown(rail, unsafe_allow_html=True)
 
 
 @st.fragment(run_every=10.0)
 def ledger_fragment():
-    try:
-        st.markdown('<div class="mm-ledger-head">Trades</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mm-ledger-head">Trades</div>', unsafe_allow_html=True)
 
-        history = state.get_trade_history()
+    history = state.get_trade_history()
 
-        if not history:
-            st.markdown(
-                '<div style="color:#6b7c97;font-size:0.82rem;padding:18px 0;text-align:center;">'
-                'No trades yet. MomentumMaster only acts when the trend agrees for your contract '
-                'length and the trigger candle confirms it.</div>',
-                unsafe_allow_html=True,
-            )
-            return
+    if not history:
+        st.markdown(
+            '<div style="color:#6b7c97;font-size:0.82rem;padding:18px 0;text-align:center;">'
+            'No trades yet. MomentumMaster only acts when the trend agrees for your contract '
+            'length and the trigger candle confirms it.</div>',
+            unsafe_allow_html=True,
+        )
+        return
 
-        records = []
+    records = []
 
-        for t in history[:50]:
-            pnl_str = f"+{t.pnl:.2f}" if t.pnl > 0 else f"{t.pnl:.2f}" if t.pnl < 0 else "0.00"
+    for t in history[:50]:
+        pnl_str = f"+{t.pnl:.2f}" if t.pnl > 0 else f"{t.pnl:.2f}" if t.pnl < 0 else "0.00"
 
-            records.append(
-                {
-                    "Time": t.timestamp,
-                    "Side": t.direction,
-                    "Stake": t.stake,
-                    "Entry": t.entry_price,
-                    "Result": t.status,
-                    "P&L": pnl_str,
-                    "Step": t.martingale_step,
-                }
-            )
-
-        df = pd.DataFrame(records)
-
-        def st_status(v):
-            return {
-                "WON": "color:#34d399;font-weight:700;",
-                "LOST": "color:#fb7185;font-weight:700;",
-                "OPEN": "color:#fbbf24;font-weight:600;",
-                "CANCELLED": "color:#6b7c97;",
-            }.get(v, "")
-
-        def st_pnl(v):
-            try:
-                n = float(str(v).replace("+", ""))
-                return "color:#34d399;font-weight:700;" if n > 0 else (
-                    "color:#fb7185;font-weight:700;" if n < 0 else ""
-                )
-            except Exception:
-                return ""
-
-        def st_dir(v):
-            return "color:#34d399;" if v == "BUY" else ("color:#fb7185;" if v == "SELL" else "")
-
-        styled = (
-            df.style
-            .map(st_status, subset=["Result"])
-            .map(st_pnl, subset=["P&L"])
-            .map(st_dir, subset=["Side"])
+        records.append(
+            {
+                "Time": t.timestamp,
+                "Side": t.direction,
+                "Stake": t.stake,
+                "Entry": t.entry_price,
+                "Result": t.status,
+                "P&L": pnl_str,
+                "Step": t.martingale_step,
+            }
         )
 
-        st.dataframe(styled, use_container_width=True, height=320, hide_index=True)
+    df = pd.DataFrame(records)
 
-    except Exception as _e:
-        _glitch("Trades ledger", _e)
+    st.dataframe(df, use_container_width=True, height=320, hide_index=True)
 
 
 @st.fragment(run_every=15.0)
 def journal_fragment():
-    try:
-        journal = get_journal()
+    journal = get_journal()
 
-        st.markdown(
-            '<div class="mm-ledger-head">Decision log · every trigger-candle review</div>',
-            unsafe_allow_html=True,
+    st.markdown(
+        '<div class="mm-ledger-head">Decision log · every trigger-candle review</div>',
+        unsafe_allow_html=True,
+    )
+
+    csv_bytes = journal.to_csv_bytes()
+
+    if csv_bytes:
+        st.download_button(
+            "Download decision log (CSV)",
+            data=csv_bytes,
+            file_name="momentummaster_journal.csv",
+            mime="text/csv",
+            use_container_width=True,
         )
 
-        csv_bytes = journal.to_csv_bytes()
+    rows = journal.read_rows()
 
-        if csv_bytes:
-            st.download_button(
-                "Download decision log (CSV)",
-                data=csv_bytes,
-                file_name="momentummaster_journal.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+    if not rows:
+        st.caption(
+            "Every trigger-candle review is recorded here — whether it traded or stood aside — "
+            "along with the result and the reason."
+        )
+        return
 
-        rows = journal.read_rows()
+    df = pd.DataFrame(rows).tail(40).iloc[::-1]
 
-        if not rows:
-            st.caption(
-                "Every trigger-candle review is recorded here — whether it traded or stood aside — "
-                "along with the result and the reason."
-            )
-            return
+    cols = [
+        "timestamp_utc",
+        "symbol",
+        "direction",
+        "trend",
+        "taken",
+        "score",
+        "threshold",
+        "rejection_reason",
+        "note",
+        "outcome",
+        "pnl",
+    ]
 
-        df = pd.DataFrame(rows).tail(40).iloc[::-1]
+    cols = [c for c in cols if c in df.columns]
 
-        cols = [
-            "timestamp_utc",
-            "symbol",
-            "direction",
-            "trend",
-            "taken",
-            "score",
-            "threshold",
-            "rejection_reason",
-            "note",
-            "outcome",
-            "pnl",
-        ]
-
-        cols = [c for c in cols if c in df.columns]
-
-        st.dataframe(df[cols], use_container_width=True, height=300, hide_index=True)
-
-    except Exception as _e:
-        _glitch("Decision log", _e)
+    st.dataframe(df[cols], use_container_width=True, height=300, hide_index=True)
 
 
 watchdog_fragment()
