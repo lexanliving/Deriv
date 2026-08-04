@@ -51,201 +51,201 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
 
 html,body,.stApp{
-    background-color:#070b14;
-    color:#c7d2e0;
-    font-family:'IBM Plex Sans',sans-serif;
+background-color:#070b14;
+color:#c7d2e0;
+font-family:'IBM Plex Sans',sans-serif;
 }
 
 .stApp{
-    background-image:
-        radial-gradient(1000px 520px at 4% -10%, rgba(16,185,129,0.10), transparent 62%),
-        radial-gradient(900px 480px at 102% 112%, rgba(56,132,255,0.10), transparent 60%),
-        radial-gradient(rgba(120,150,190,0.045) 1px, transparent 1px);
-    background-size:auto,auto,24px 24px;
-    background-attachment:fixed;
+background-image:
+radial-gradient(1000px 520px at 4% -10%, rgba(16,185,129,0.10), transparent 62%),
+radial-gradient(900px 480px at 102% 112%, rgba(56,132,255,0.10), transparent 60%),
+radial-gradient(rgba(120,150,190,0.045) 1px, transparent 1px);
+background-size:auto,auto,24px 24px;
+background-attachment:fixed;
 }
 
 [data-testid="stMainBlockContainer"]{
-    max-width:1500px;
-    padding-top:1.1rem;
+max-width:1500px;
+padding-top:1.1rem;
 }
 
 [data-testid="stSidebar"]{
-    background-color:#0a0f1c;
-    border-right:1px solid #18233a;
+background-color:#0a0f1c;
+border-right:1px solid #18233a;
 }
 
 .rl-topbar{
-    display:flex;
-    align-items:flex-end;
-    justify-content:space-between;
-    gap:18px;
-    padding:6px 4px 16px 4px;
-    position:relative;
-    overflow:hidden;
+display:flex;
+align-items:flex-end;
+justify-content:space-between;
+gap:18px;
+padding:6px 4px 16px 4px;
+position:relative;
+overflow:hidden;
 }
 
 .rl-topbar::after{
-    content:"";
-    position:absolute;
-    left:4px;
-    right:4px;
-    bottom:0;
-    height:2px;
-    background:linear-gradient(90deg,#10b981,#3884ff 42%,transparent 94%);
-    background-size:220% 100%;
-    animation:rl-scan 7s linear infinite;
-    border-radius:2px;
+content:"";
+position:absolute;
+left:4px;
+right:4px;
+bottom:0;
+height:2px;
+background:linear-gradient(90deg,#10b981,#3884ff 42%,transparent 94%);
+background-size:220% 100%;
+animation:rl-scan 7s linear infinite;
+border-radius:2px;
 }
 
 @keyframes rl-scan{
-    0%{background-position:130% 0;}
-    100%{background-position:-130% 0;}
+0%{background-position:130% 0;}
+100%{background-position:-130% 0;}
 }
 
 .rl-brand h1{
-    font-family:'Space Grotesk',sans-serif;
-    font-weight:700;
-    font-size:1.18rem;
-    letter-spacing:.14em;
-    text-transform:uppercase;
-    color:#eef3fb;
-    margin:0;
-    line-height:1;
+font-family:'Space Grotesk',sans-serif;
+font-weight:700;
+font-size:1.18rem;
+letter-spacing:.14em;
+text-transform:uppercase;
+color:#eef3fb;
+margin:0;
+line-height:1;
 }
 
 .rl-brand .sub{
-    font-family:'Space Grotesk',sans-serif;
-    font-size:.56rem;
-    font-weight:600;
-    letter-spacing:.24em;
-    text-transform:uppercase;
-    color:#4f6080;
-    margin-top:5px;
+font-family:'Space Grotesk',sans-serif;
+font-size:.56rem;
+font-weight:600;
+letter-spacing:.24em;
+text-transform:uppercase;
+color:#4f6080;
+margin-top:5px;
 }
 
 .rl-panel{
-    position:relative;
-    background:linear-gradient(160deg,#0c1322,#0a101d);
-    border:1px solid #18233a;
-    border-radius:15px;
-    padding:16px 18px;
-    overflow:hidden;
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
-    margin-bottom:14px;
+position:relative;
+background:linear-gradient(160deg,#0c1322,#0a101d);
+border:1px solid #18233a;
+border-radius:15px;
+padding:16px 18px;
+overflow:hidden;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+margin-bottom:14px;
 }
 
 .rl-panel::before{
-    content:"";
-    position:absolute;
-    top:0;
-    left:0;
-    right:0;
-    height:1px;
-    background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);
+content:"";
+position:absolute;
+top:0;
+left:0;
+right:0;
+height:1px;
+background:linear-gradient(90deg,transparent,rgba(120,160,220,.25),transparent);
 }
 
 .rl-h{
-    font-family:'Space Grotesk',sans-serif;
-    font-size:.62rem;
-    font-weight:700;
-    letter-spacing:.18em;
-    text-transform:uppercase;
-    color:#8294b0;
-    margin-bottom:10px;
+font-family:'Space Grotesk',sans-serif;
+font-size:.62rem;
+font-weight:700;
+letter-spacing:.18em;
+text-transform:uppercase;
+color:#8294b0;
+margin-bottom:10px;
 }
 
 .rl-kpis{
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    gap:13px;
-    margin:4px 0 16px 0;
+display:grid;
+grid-template-columns:repeat(4,1fr);
+gap:13px;
+margin:4px 0 16px 0;
 }
 
 @media(max-width:1100px){
-    .rl-kpis{
-        grid-template-columns:repeat(2,1fr);
-    }
+.rl-kpis{
+grid-template-columns:repeat(2,1fr);
+}
 }
 
 .rl-kpi{
-    position:relative;
-    background:linear-gradient(160deg,#0c1322,#0a101d);
-    border:1px solid #18233a;
-    border-radius:14px;
-    padding:14px 16px;
-    overflow:hidden;
+position:relative;
+background:linear-gradient(160deg,#0c1322,#0a101d);
+border:1px solid #18233a;
+border-radius:14px;
+padding:14px 16px;
+overflow:hidden;
 }
 
 .rl-kpi::after{
-    content:"";
-    position:absolute;
-    left:0;
-    top:0;
-    bottom:0;
-    width:3px;
-    background:var(--ac,#33507e);
+content:"";
+position:absolute;
+left:0;
+top:0;
+bottom:0;
+width:3px;
+background:var(--ac,#33507e);
 }
 
 .rl-kpi-l{
-    font-family:'Space Grotesk',sans-serif;
-    font-size:.58rem;
-    font-weight:600;
-    letter-spacing:.15em;
-    text-transform:uppercase;
-    color:#6b7c97;
+font-family:'Space Grotesk',sans-serif;
+font-size:.58rem;
+font-weight:600;
+letter-spacing:.15em;
+text-transform:uppercase;
+color:#6b7c97;
 }
 
 .rl-kpi-v{
-    font-family:'JetBrains Mono',monospace;
-    font-weight:700;
-    font-size:1.42rem;
-    color:#eef3fb;
-    margin-top:9px;
-    letter-spacing:-.02em;
-    font-variant-numeric:tabular-nums;
+font-family:'JetBrains Mono',monospace;
+font-weight:700;
+font-size:1.42rem;
+color:#eef3fb;
+margin-top:9px;
+letter-spacing:-.02em;
+font-variant-numeric:tabular-nums;
 }
 
 .rl-kpi-s{
-    font-family:'JetBrains Mono',monospace;
-    font-size:.66rem;
-    color:#6b7c97;
-    margin-top:4px;
+font-family:'JetBrains Mono',monospace;
+font-size:.66rem;
+color:#6b7c97;
+margin-top:4px;
 }
 
 .rl-list{
-    margin:0;
-    padding-left:18px;
-    line-height:1.55;
-    font-size:.82rem;
+margin:0;
+padding-left:18px;
+line-height:1.55;
+font-size:.82rem;
 }
 
 .rl-list li{
-    margin:6px 0;
+margin:6px 0;
 }
 
 .rl-glitch{
-    margin:14px 0;
-    padding:14px 16px;
-    border-radius:13px;
-    background:rgba(244,63,94,.07);
-    border:1px solid rgba(244,63,94,.28);
+margin:14px 0;
+padding:14px 16px;
+border-radius:13px;
+background:rgba(244,63,94,.07);
+border:1px solid rgba(244,63,94,.28);
 }
 
 .rl-glitch .t{
-    font-family:'Space Grotesk',sans-serif;
-    font-weight:600;
-    color:#fb7185;
-    font-size:.84rem;
-    letter-spacing:.04em;
+font-family:'Space Grotesk',sans-serif;
+font-weight:600;
+color:#fb7185;
+font-size:.84rem;
+letter-spacing:.04em;
 }
 
 .rl-glitch .s{
-    font-family:'JetBrains Mono',monospace;
-    font-size:.7rem;
-    color:#9fb0c9;
-    margin-top:6px;
-    line-height:1.5;
+font-family:'JetBrains Mono',monospace;
+font-size:.7rem;
+color:#9fb0c9;
+margin-top:6px;
+line-height:1.5;
 }
 
 .pos{color:#4ade80;}
@@ -253,11 +253,11 @@ html,body,.stApp{
 .mut{color:#6b7c97;}
 
 [data-testid="stDataFrame"]{
-    border:0;
+border:0;
 }
 
 #MainMenu,footer{
-    visibility:hidden;
+visibility:hidden;
 }
 </style>
 """,
@@ -276,6 +276,7 @@ def _tab_error(where: str, exc: Exception) -> None:
         f'The page stays usable. Details are in the expander.</div></div>',
         unsafe_allow_html=True,
     )
+
     with st.expander("Technical details"):
         st.exception(exc)
 
@@ -283,10 +284,12 @@ def _tab_error(where: str, exc: Exception) -> None:
 def _download_button(label: str, data: bytes, file_name: str, mime: str, key: str = None):
     """use_container_width -> width shim, guarded so older Streamlit cannot crash."""
     kwargs = {}
+
     if key:
         kwargs["key"] = key
 
     params = inspect.signature(st.download_button).parameters
+
     if "use_container_width" in params:
         kwargs["use_container_width"] = True
     elif "width" in params:
@@ -306,10 +309,12 @@ def _table(df: pd.DataFrame, height: int = None) -> None:
         return
 
     kwargs = {"hide_index": True}
+
     if height:
         kwargs["height"] = height
 
     params = inspect.signature(st.dataframe).parameters
+
     if "use_container_width" in params:
         kwargs["use_container_width"] = True
     elif "width" in params:
@@ -365,6 +370,7 @@ def _kpi(label: str, value: str, sub: str, accent: str) -> str:
 
 def _edges_df(edge_dict: dict) -> pd.DataFrame:
     rows = []
+
     for key, values in (edge_dict or {}).items():
         rows.append(
             {
@@ -375,18 +381,24 @@ def _edges_df(edge_dict: dict) -> pd.DataFrame:
                 "pnl": values.get("pnl", 0.0),
             }
         )
+
     df = pd.DataFrame(rows)
+
     if not df.empty:
         df = df.sort_values("pnl", ascending=False)
+
     return df
 
 
 def _select_columns(df: pd.DataFrame, columns: list) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
+
     present = [c for c in columns if c in df.columns]
+
     if present:
         return df[present]
+
     return df
 
 
@@ -397,12 +409,15 @@ def _select_columns(df: pd.DataFrame, columns: list) -> pd.DataFrame:
 @st.cache_data(ttl=5, show_spinner=False)
 def _journal_token():
     journal = get_journal()
+
     paths = [
         getattr(journal, "_live", ""),
         getattr(journal, "_archive", ""),
         SNAPSHOT_FILE,
     ]
+
     tokens = []
+
     for path in paths:
         try:
             if path:
@@ -412,6 +427,7 @@ def _journal_token():
                 tokens.append((path, 0, 0))
         except OSError:
             tokens.append((path, 0, 0))
+
     return tuple(tokens)
 
 
@@ -485,12 +501,14 @@ with tab_send:
             + _kpi("Closed P&L", net_str, f"{closed} closed trades", net_accent)
             + _kpi("Win rate", wr_str, f"{snapshots} snapshots recorded", wr_accent)
         )
+
         st.markdown(f'<div class="rl-kpis">{kpis}</div>', unsafe_allow_html=True)
 
         bundle_bytes = _load_bundle(token)
         postmortem_bytes = json.dumps(postmortem, indent=2, default=str).encode("utf-8")
 
         c1, c2 = st.columns(2)
+
         with c1:
             _download_button(
                 "Download learning bundle (zip)",
@@ -499,6 +517,7 @@ with tab_send:
                 "application/zip",
                 key="dl_bundle",
             )
+
         with c2:
             _download_button(
                 "Download postmortem.json",
@@ -510,6 +529,7 @@ with tab_send:
 
         gatekeepers = postmortem.get("gatekeeper_factors", []) or []
         top_gate = gatekeepers[0][0] if gatekeepers else "none yet"
+
         avoidable_count = len(postmortem.get("avoidable_losses", []) or [])
         fragile_count = len(postmortem.get("fragile_wins", []) or [])
 
@@ -576,6 +596,7 @@ with tab_backup:
         merged_bytes = export_merged_json_bytes(get_journal())
 
         c1, c2 = st.columns(2)
+
         with c1:
             _download_button(
                 "Download master archive CSV",
@@ -584,6 +605,7 @@ with tab_backup:
                 "text/csv",
                 key="dl_archive",
             )
+
         with c2:
             _download_button(
                 "Download merged JSON",
@@ -645,12 +667,14 @@ with tab_gate:
         st.divider()
 
         c1, c2 = st.columns(2)
+
         with c1:
             variant_name = st.selectbox(
                 "Weight variant",
                 options=list(WEIGHT_VARIANTS.keys()),
                 key="rl_variant",
             )
+
         with c2:
             threshold = st.selectbox(
                 "Threshold",
@@ -757,9 +781,9 @@ with tab_missed:
                     hovertemplate="%{x}<br>count <b>%{y}</b><extra></extra>",
                 )
             )
+
             fig.update_layout(**_dark_fig(300))
             _plotly_chart(fig)
-
             _table(gate_df, height=260)
         else:
             st.info("No gatekeeper pressure yet. Near-miss trending stand-asides will appear here.")
