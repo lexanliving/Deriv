@@ -20,6 +20,11 @@ from typing import Any, Dict, List, Optional
 
 from src.logger import get_logger
 
+try:
+    from config import SUPABASE_DEBUG
+except Exception:
+    SUPABASE_DEBUG = False
+
 logger = get_logger("supabase")
 
 try:
@@ -108,7 +113,11 @@ class SupabaseService:
 
         self.os_table = (_secret("SUPABASE_OS_TRADES_TABLE") or "trades").lower()
         self.os_id_col = (_secret("SUPABASE_OS_TRADE_ID_COLUMN") or "trade_id").lower()
-        self.write_os_row = _secret("SUPABASE_WRITE_OS_TRADE_ROW", "true").lower() in {"1", "true", "yes"}
+        self.write_os_row = _secret("SUPABASE_WRITE_OS_TRADE_ROW", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
 
         self.research_table = "deriv_trade_research"
         self.knowledge_table = "deriv_research_knowledge"
@@ -145,11 +154,25 @@ class SupabaseService:
 
         try:
             with urllib.request.urlopen(req, timeout=30, context=ssl.create_default_context()) as r:
-                return r.status, r.read().decode("utf-8", "replace")
+                status = r.status
+                raw = r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            status = e.code
+            raw = e.read().decode("utf-8", "replace")
         except Exception as e:
-            return 0, str(e)
+            status = 0
+            raw = str(e)
+
+        if SUPABASE_DEBUG:
+            logger.info(
+                "Supabase %s %s status=%s response=%.220s",
+                method,
+                table,
+                status,
+                raw,
+            )
+
+        return status, raw
 
     def ensure_schema(self) -> bool:
         if self._schema_ok:
@@ -172,13 +195,28 @@ class SupabaseService:
             except Exception as e:
                 logger.error("PG schema bootstrap failed: %s", e)
 
-        status, raw = self._request("GET", self.research_table, {"select": "trade_id", "limit": "1"})
+        status, raw = self._request(
+            "GET",
+            self.research_table,
+            {"select": "trade_id", "limit": "1"},
+        )
 
-        if self._ok(status):
+        # 200 means table exists and is readable.
+        # 401/403 usually means table exists but key/RLS policy is restrictive.
+        if self._ok(status) or status in (401, 403):
             self._schema_ok = True
+
+            if status in (401, 403):
+                logger.warning(
+                    "Supabase research table reachable but permission-restricted (%s). "
+                    "Writes may fail unless this key has insert/update access.",
+                    status,
+                )
+
             return True
 
         self.last_error = f"tables missing ({status} {raw[:150]})"
+
         logger.error(
             "Supabase tables missing. Add SUPABASE_DB_URL (auto-create) or run supabase/001_research_schema.sql once."
         )
@@ -192,19 +230,26 @@ class SupabaseService:
             "last_error": self.last_error,
         }
 
-    def _with_retry(self, fn, attempts=3, base=1.5):
+    def _with_retry(self, fn, attempts=3, base=1.5, retry_false=False):
         last = None
 
         for i in range(attempts):
             try:
                 with self._lock:
-                    return fn()
+                    result = fn()
+
+                if result is not False or not retry_false:
+                    return result
+
+                last = Exception(f"operation returned False: {self.last_error}")
             except Exception as exc:
                 last = exc
+
+            if i < attempts - 1:
                 time.sleep(base * (2**i))
 
         self.last_error = str(last)
-        return None
+        return False if retry_false else None
 
     def link_trade(self, trade_id, meta):
         if not (self.enabled and self.write_os_row):
@@ -230,6 +275,7 @@ class SupabaseService:
 
             if not self._ok(s):
                 self.last_error = f"link_trade {s} {r[:150]}"
+                logger.error("Supabase link_trade failed: %s", self.last_error)
 
             return self._ok(s)
 
@@ -269,10 +315,21 @@ class SupabaseService:
 
             if not self._ok(s):
                 self.last_error = f"upsert_research {s} {r[:150]}"
+                logger.error(
+                    "Supabase research upsert FAILED for trade %s: %s",
+                    rec.get("trade_id"),
+                    self.last_error,
+                )
+                return False
 
-            return self._ok(s)
+            logger.info(
+                "Supabase research upsert OK for trade %s.",
+                rec.get("trade_id"),
+            )
 
-        return bool(self._with_retry(op))
+            return True
+
+        return bool(self._with_retry(op, attempts=3, retry_false=True))
 
     def upsert_knowledge(self, rows) -> bool:
         if not rows:
@@ -292,6 +349,7 @@ class SupabaseService:
 
                 if not self._ok(s):
                     self.last_error = f"upsert_knowledge GET {s} {raw[:150]}"
+                    logger.error("Supabase knowledge GET failed: %s", self.last_error)
                     return False
 
                 existing = json.loads(raw) if raw else []
@@ -315,6 +373,7 @@ class SupabaseService:
 
                     if not self._ok(s2):
                         self.last_error = f"upsert_knowledge PATCH {s2} {raw2[:150]}"
+                        logger.error("Supabase knowledge PATCH failed: %s", self.last_error)
                         return False
                 else:
                     s2, raw2 = self._request(
@@ -334,11 +393,13 @@ class SupabaseService:
 
                     if not self._ok(s2):
                         self.last_error = f"upsert_knowledge POST {s2} {raw2[:150]}"
+                        logger.error("Supabase knowledge POST failed: %s", self.last_error)
                         return False
 
+            logger.info("Supabase knowledge upsert OK for %d row(s).", len(rows))
             return True
 
-        return bool(self._with_retry(op))
+        return bool(self._with_retry(op, attempts=3, retry_false=True))
 
     def upsert_venture_advice(self, a) -> bool:
         def op():
@@ -360,10 +421,13 @@ class SupabaseService:
 
             if not self._ok(s):
                 self.last_error = f"upsert_venture_advice {s} {r[:150]}"
+                logger.error("Supabase venture advice failed: %s", self.last_error)
+                return False
 
-            return self._ok(s)
+            logger.info("Supabase venture advice upsert OK.")
+            return True
 
-        return bool(self._with_retry(op, attempts=2))
+        return bool(self._with_retry(op, attempts=2, retry_false=True))
 
     def fetch_recent_research(self, limit=5):
         def op():
@@ -379,6 +443,7 @@ class SupabaseService:
 
             if not self._ok(s):
                 self.last_error = f"fetch_recent_research {s} {raw[:150]}"
+                logger.warning("Supabase fetch_recent_research failed: %s", self.last_error)
                 return []
 
             return [
@@ -407,6 +472,7 @@ class SupabaseService:
 
             if not self._ok(s):
                 self.last_error = f"fetch_knowledge {s} {raw[:150]}"
+                logger.warning("Supabase fetch_knowledge failed: %s", self.last_error)
                 return []
 
             return [
