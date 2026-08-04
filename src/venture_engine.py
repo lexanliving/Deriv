@@ -1,13 +1,13 @@
-"""src/venture_engine.py — per-trade entry council (real-time only).
+"""src/venture_engine.py — per-trade entry council (risk-taker sniper).
 
-Judges ONLY real-time market conditions + the live setup essentials. No past
-trades, no history, no knowledge base, no intuition. For each signal it returns
-{"approved": bool, "reason": str, "thinking_seconds": float}.
-  * Deterministic real-time check: short-term slope aligned with direction and
-    volatility not extreme.
-  * Optional AI council (brain_llm) may also decline, but must base its answer
-    ONLY on the provided real-time essentials; if the AI is slow/down it is
-    skipped (deterministic check decides) so entries are never stuck.
+Permissive by design: APPROVES by default and works in tight/low-vol conditions.
+It DECLINES ONLY clearly-disastrous real-time setups:
+  * strong counter-trend (short-term slope hard against the trade direction), or
+  * extreme volatility (price whipping, no tradable structure).
+Insufficient candles => default APPROVE (never blocks on missing data).
+The AI council is a second opinion instructed to be risk-tolerant; it may only
+add a decline when real-time data is present and conditions are clearly bad.
+If the AI is slow/down, the deterministic read decides (still permissive).
 On/off via set_venture_enabled (dashboard toggle).
 """
 from __future__ import annotations
@@ -17,6 +17,10 @@ logger = get_logger("venture")
 
 _enabled = True
 _singleton = None
+
+# Sniper thresholds: only these two conditions are "completely bad".
+COUNTER_SLOPE = 0.002   # ~0.2% adverse 5m slope over the last candles = strong counter-trend
+EXTREME_VOL = 0.008     # ~0.8% stdev per 5m candle = extreme whipsaw
 
 def set_venture_enabled(on: bool) -> None:
     global _enabled
@@ -48,40 +52,48 @@ class VentureEngine:
         slope = (e9[-1] - e9[-6]) / e9[-6] if e9[-6] else 0.0
         rets = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1]]
         vol = statistics.pstdev(rets) if len(rets) > 1 else 0.0
-        aligned = (slope > 0) if direction == "BUY" else (slope < 0)
-        vol_ok = vol <= 0.004
-        return {"slope": slope, "vol": vol, "aligned": aligned, "vol_ok": vol_ok}
+        counter_trend = (direction == "BUY" and slope < -COUNTER_SLOPE) or \
+                        (direction == "SELL" and slope > COUNTER_SLOPE)
+        extreme_vol = vol > EXTREME_VOL
+        bad = bool(counter_trend or extreme_vol)
+        return {"slope": slope, "vol": vol, "counter_trend": counter_trend,
+                "extreme_vol": extreme_vol, "bad": bad}
     def review(self, setup):
         if not _enabled:
             return {"approved": True, "reason": "council disabled", "thinking_seconds": 0.0}
         direction = setup.get("direction")
         rt = self._realtime(direction)
         if rt is None:
-            det_ok, det_reason = True, "insufficient candles; default approve"
+            det_ok, det_reason = True, "insufficient candles; risk-taker default approve"
         else:
-            det_ok = bool(rt["aligned"] and rt["vol_ok"])
+            det_ok = not rt["bad"]
             det_reason = (f"realtime slope={rt['slope']:.5f} vol={rt['vol']:.5f} "
-                          f"aligned={rt['aligned']} vol_ok={rt['vol_ok']}")
+                          f"counter_trend={rt['counter_trend']} extreme_vol={rt['extreme_vol']}")
         llm_ok = True; llm_reason = ""; think = 0.0
-        try:
-            from src import brain_llm
-            t0 = time.monotonic()
-            prompt = ("You are a 3-member trade-entry council (BULL, BEAR, RISK) for a Deriv binary-options "
-                      "trend bot. Decide ONLY from the REAL-TIME essentials below (no history, no intuition). "
-                      f"SETUP: {setup}. REALTIME: {rt}. "
-                      "Approve only if current market conditions support this entry. "
-                      "Answer ONLY JSON: {\"approve\":true|false,\"reason\":str}")
-            text = brain_llm.chat_with_chain([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=200)
-            think = time.monotonic() - t0
-            import re as _re
-            m = _re.search(r"\{.*\}", text or "", _re.DOTALL)
-            if m:
-                obj = json.loads(m.group(0))
-                if isinstance(obj, dict):
-                    llm_ok = bool(obj.get("approve", True))
-                    llm_reason = str(obj.get("reason", ""))
-        except Exception as exc:
-            logger.warning("Council AI unavailable/slow; deterministic decides: %s", exc)
+        # Only consult the AI when we have real-time data; never let it decline on
+        # missing data. It is instructed to be a risk-taker and decline only clearly
+        # bad conditions.
+        if rt is not None:
+            try:
+                from src import brain_llm
+                t0 = time.monotonic()
+                prompt = ("You are a 3-member risk-TOLERANT trade-entry council (BULL, BEAR, RISK) for a Deriv "
+                          "binary-options trend bot. You are a sniper: you take good-enough setups and decline ONLY "
+                          "clearly-disastrous ones (strong counter-trend or extreme whipsaw volatility). DEFAULT TO "
+                          "APPROVE. Base the decision ONLY on the REAL-TIME essentials below (no history, no intuition). "
+                          f"SETUP: {setup}. REALTIME: {rt}. "
+                          "Answer ONLY JSON: {\"approve\":true|false,\"reason\":str}")
+                text = brain_llm.chat_with_chain([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=200)
+                think = time.monotonic() - t0
+                import re as _re
+                m = _re.search(r"\{.*\}", text or "", _re.DOTALL)
+                if m:
+                    obj = json.loads(m.group(0))
+                    if isinstance(obj, dict):
+                        llm_ok = bool(obj.get("approve", True))
+                        llm_reason = str(obj.get("reason", ""))
+            except Exception as exc:
+                logger.warning("Council AI unavailable/slow; deterministic decides: %s", exc)
         approved = bool(det_ok and llm_ok)
         reason = det_reason + (f" | council: {llm_reason}" if llm_reason else "")
         logger.info("Council: %s (%s) [think=%.1fs]", "APPROVE" if approved else "DECLINE", reason, think)
