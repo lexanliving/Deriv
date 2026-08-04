@@ -1,4 +1,5 @@
 """src/journal.py — decision + execution log with a crash-proof archive."""
+
 import csv
 import os
 import threading
@@ -77,6 +78,7 @@ class TradeJournal:
         self._live = live_path
         self._archive = archive_path
         self._lock = threading.Lock()
+
         self._ensure_csv(self._live, COLUMNS)
         self._ensure_csv(self._archive, ARCHIVE_COLUMNS)
 
@@ -101,10 +103,12 @@ class TradeJournal:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow(header)
+
                 for r in old_rows:
                     w.writerow([r.get(c, "") for c in header])
 
             logger.info("Migrated journal header for %s.", os.path.basename(path))
+
         except Exception as exc:
             logger.warning("Journal header init/migrate failed for %s: %s", path, exc)
 
@@ -114,6 +118,7 @@ class TradeJournal:
         try:
             with self._lock:
                 self._ensure_csv(self._live, COLUMNS)
+
                 with open(self._live, "a", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(live_row)
         except Exception as exc:
@@ -122,6 +127,7 @@ class TradeJournal:
         try:
             with self._lock:
                 self._ensure_csv(self._archive, ARCHIVE_COLUMNS)
+
                 with open(self._archive, "a", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(["EVAL"] + live_row)
         except Exception as exc:
@@ -165,8 +171,8 @@ class TradeJournal:
                                             row[idx[col]] = val
 
                                     put("outcome", outcome)
-                                    put("pnl", f"{pnl:.2f}")
-                                    put("stake", f"{stake:.2f}")
+                                    put("pnl", f"{float(pnl or 0.0):.2f}")
+                                    put("stake", f"{float(stake or 0.0):.2f}")
                                     put("martingale_step", str(martingale_step))
                                     put("contract_id", str(contract_id) if contract_id else "")
                                     put("execution_mode", execution_mode)
@@ -174,19 +180,21 @@ class TradeJournal:
                                     put("note", note)
                                     put("mae", mae)
                                     put("mfe", mfe)
+
                                     changed = True
 
                             if changed:
                                 with open(self._live, "w", newline="", encoding="utf-8") as f:
                                     csv.writer(f).writerows(rows)
+
         except Exception as exc:
             logger.warning("Journal outcome write failed: %s", exc)
 
         odict = {
             "signal_id": signal_id,
             "outcome": outcome,
-            "pnl": f"{pnl:.2f}",
-            "stake": f"{stake:.2f}",
+            "pnl": f"{float(pnl or 0.0):.2f}",
+            "stake": f"{float(stake or 0.0):.2f}",
             "martingale_step": str(martingale_step),
             "contract_id": str(contract_id) if contract_id else "",
             "execution_mode": execution_mode,
@@ -199,6 +207,7 @@ class TradeJournal:
         try:
             with self._lock:
                 self._ensure_csv(self._archive, ARCHIVE_COLUMNS)
+
                 with open(self._archive, "a", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(["OUTCOME"] + [odict.get(c, "") for c in COLUMNS])
         except Exception as exc:
@@ -251,11 +260,13 @@ class TradeJournal:
                                     key = f"__noid_{len(order)}"
                                     evals[key] = d
                                     order.append(key)
+
                             elif kind == "OUTCOME":
                                 target = evals.get(sid) if sid else None
 
                                 if target is None:
                                     target = d
+
                                     if sid:
                                         evals[sid] = target
                                         order.append(sid)
@@ -276,6 +287,7 @@ class TradeJournal:
                         return list(csv.DictReader(f))
 
                 return []
+
         except Exception as exc:
             logger.warning("Archive read/merge failed: %s", exc)
             return []
