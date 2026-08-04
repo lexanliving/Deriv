@@ -149,6 +149,9 @@ class TradeJournal:
         if not signal_id:
             return
 
+        pnl_float = float(pnl or 0.0)
+        stake_float = float(stake or 0.0)
+
         try:
             with self._lock:
                 self._ensure_csv(self._live, COLUMNS)
@@ -171,8 +174,8 @@ class TradeJournal:
                                             row[idx[col]] = val
 
                                     put("outcome", outcome)
-                                    put("pnl", f"{float(pnl or 0.0):.2f}")
-                                    put("stake", f"{float(stake or 0.0):.2f}")
+                                    put("pnl", f"{pnl_float:.2f}")
+                                    put("stake", f"{stake_float:.2f}")
                                     put("martingale_step", str(martingale_step))
                                     put("contract_id", str(contract_id) if contract_id else "")
                                     put("execution_mode", execution_mode)
@@ -193,8 +196,8 @@ class TradeJournal:
         odict = {
             "signal_id": signal_id,
             "outcome": outcome,
-            "pnl": f"{float(pnl or 0.0):.2f}",
-            "stake": f"{float(stake or 0.0):.2f}",
+            "pnl": f"{pnl_float:.2f}",
+            "stake": f"{stake_float:.2f}",
             "martingale_step": str(martingale_step),
             "contract_id": str(contract_id) if contract_id else "",
             "execution_mode": execution_mode,
