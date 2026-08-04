@@ -1,17 +1,16 @@
-"""src/venture_engine.py — Council adapter with safe reason normalisation."""
+"""src/venture_engine.py — minimal safety guard only.
+
+This is intentionally weak. It does not give AI control over trading.
+It only blocks obviously invalid setups.
+"""
 
 from __future__ import annotations
 
 from src.logger import get_logger
 
-try:
-    from src.council import council as _council
-except Exception:
-    _council = None
-
 logger = get_logger("venture")
 
-_enabled = True
+_enabled = False
 _state = None
 
 
@@ -22,16 +21,6 @@ def set_venture_enabled(on: bool) -> None:
 
 def is_venture_enabled() -> bool:
     return _enabled
-
-
-def _with_reason(result):
-    reason = result.get("reason") or result.get("reasoning") or ""
-
-    if not reason:
-        reason = "; ".join(str(x) for x in result.get("reasons", []) if x)
-
-    result["reason"] = reason or "no reason returned"
-    return result
 
 
 class VentureEngine:
@@ -45,43 +34,63 @@ class VentureEngine:
                 "approved": True,
                 "outcome": "APPROVE",
                 "confidence": 100,
-                "reasons": ["council disabled"],
-                "reason": "council disabled",
-                "reasoning": "council disabled",
+                "reasons": ["guard disabled"],
+                "reason": "guard disabled",
+                "reasoning": "guard disabled",
                 "thinking_ms": 0.0,
                 "wait_seconds": 0.0,
             }
 
-        if _council is None:
+        direction = setup.get("direction")
+        entry_price = float(setup.get("entry_price") or 0.0)
+        duration = int(setup.get("duration") or 0)
+
+        if direction not in ("BUY", "SELL"):
             return {
-                "approved": True,
-                "outcome": "APPROVE",
+                "approved": False,
+                "outcome": "REJECT",
                 "confidence": 100,
-                "reasons": ["council unavailable"],
-                "reason": "council unavailable",
-                "reasoning": "council unavailable",
+                "reasons": ["invalid direction"],
+                "reason": "invalid direction",
+                "reasoning": "invalid direction",
                 "thinking_ms": 0.0,
                 "wait_seconds": 0.0,
             }
 
-        try:
-            result = _council.review(setup, _state)
-        except Exception as exc:
-            logger.exception("Council failed; using fallback approval.")
-
+        if entry_price <= 0:
             return {
-                "approved": True,
-                "outcome": "APPROVE",
-                "confidence": 0,
-                "reasons": [f"council error fallback: {exc}"],
-                "reason": f"council error fallback: {exc}",
-                "reasoning": f"council error fallback: {exc}",
+                "approved": False,
+                "outcome": "REJECT",
+                "confidence": 100,
+                "reasons": ["invalid entry price"],
+                "reason": "invalid entry price",
+                "reasoning": "invalid entry price",
                 "thinking_ms": 0.0,
                 "wait_seconds": 0.0,
             }
 
-        result = _with_reason(result)
-        return result
+        if duration <= 0:
+            return {
+                "approved": False,
+                "outcome": "REJECT",
+                "confidence": 100,
+                "reasons": ["invalid duration"],
+                "reason": "invalid duration",
+                "reasoning": "invalid duration",
+                "thinking_ms": 0.0,
+                "wait_seconds": 0.0,
+            }
+
+        return {
+            "approved": True,
+            "outcome": "APPROVE",
+            "confidence": 100,
+            "reasons": ["basic guard passed"],
+            "reason": "basic guard passed",
+            "reasoning": "basic guard passed",
+            "thinking_ms": 0.0,
+            "wait_seconds": 0.0,
+        }
 
 
 _singleton = None
