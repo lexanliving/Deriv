@@ -39,6 +39,7 @@ except Exception:
             "reason": "council unavailable",
             "reasoning": "council unavailable",
             "thinking_ms": 0.0,
+            "wait_seconds": 0.0,
         }
 
 logger = get_logger("trading_engine")
@@ -452,11 +453,15 @@ class TradingEngine:
 
         try:
             for tf, granularity in CANDLE_GRANULARITIES.items():
-                candles_by_tf[tf] = await self._client.get_candles(
-                    self.symbol,
-                    granularity,
-                    CANDLE_LOOKBACK,
-                )
+                try:
+                    candles_by_tf[tf] = await self._client.get_candles(
+                        self.symbol,
+                        granularity,
+                        CANDLE_LOOKBACK,
+                    )
+                except DerivAPIError as exc:
+                    logger.warning("Candle fetch failed for %s: %s", tf, exc)
+                    candles_by_tf[tf] = []
 
             now = time.time()
 
@@ -499,11 +504,9 @@ class TradingEngine:
 
             self.state.set_status(f"{self.symbol_display} · trend {trend} · {stage}")
 
-        except DerivAPIError as e:
-            logger.warning("Candle refresh failed: %s", e)
-            self.state.set_status("Candle refresh paused — using last data.")
         except Exception as e:
             logger.exception("Unexpected error during candle refresh: %s", e)
+            self.state.set_status("Candle refresh paused — using last data.")
 
     def _contract_duration_seconds(self):
         unit = self.contract_duration_unit.lower()
@@ -538,25 +541,35 @@ class TradingEngine:
 
         sstate = self.state.get_strategy_state()
 
-        council = review_entry(
-            {
-                "direction": signal,
-                "symbol": self.symbol,
-                "entry_price": entry_price,
-                "duration": self.contract_duration,
-                "score": sstate.get("last_signal_score"),
-                "trend": sstate.get("trend_direction"),
-                "mtf_bias": sstate.get("mtf_bias"),
-                "mtf_agreement": sstate.get("mtf_agreement"),
+        try:
+            council = review_entry(
+                {
+                    "direction": signal,
+                    "symbol": self.symbol,
+                    "entry_price": entry_price,
+                    "duration": self.contract_duration,
+                    "score": sstate.get("last_signal_score"),
+                    "trend": sstate.get("trend_direction"),
+                    "mtf_bias": sstate.get("mtf_bias"),
+                    "mtf_agreement": sstate.get("mtf_agreement"),
+                }
+            )
+        except Exception as exc:
+            logger.exception("Council failed; allowing trade to continue.")
+            council = {
+                "approved": True,
+                "reason": f"council error fallback: {exc}",
+                "reasoning": f"council error fallback: {exc}",
+                "wait_seconds": 0.0,
             }
-        )
 
-        if not council.get("approved"):
-            reason_text = council.get("reason") or council.get("reasoning") or ""
+        approved = bool(council.get("approved"))
 
-            if not reason_text:
-                reason_text = "; ".join(str(x) for x in council.get("reasons", []) if x)
+        reason_text = council.get("reason") or council.get("reasoning") or ""
+        if not reason_text:
+            reason_text = "; ".join(str(x) for x in council.get("reasons", []) if x)
 
+        if not approved:
             reason = f"venture council declined: {reason_text or 'no reason returned'}"
 
             self.state.set_status(reason)
@@ -575,6 +588,40 @@ class TradingEngine:
 
             self._trade_in_progress = False
             return
+
+        wait_seconds = float(council.get("wait_seconds", 0.0) or 0.0)
+
+        if wait_seconds > 0:
+            self.state.set_status(f"Council approved — deliberating {wait_seconds:.1f}s before quote…")
+            deadline = time.time() + wait_seconds
+
+            while time.time() < deadline:
+                if self.state.stop_requested:
+                    reason = "stop requested during council deliberation"
+
+                    self.state.set_status(reason)
+                    self._strategy.on_signal_skipped()
+
+                    self._journal.record_outcome(
+                        signal_id,
+                        "SKIPPED",
+                        0.0,
+                        0.0,
+                        None,
+                        self.execution_mode,
+                        martingale_step,
+                        note=reason,
+                    )
+
+                    self._trade_in_progress = False
+                    return
+
+                await asyncio.sleep(0.1)
+
+            entry_price = self.state.current_price or entry_price
+            self._active_entry_price = entry_price
+            self._active_worst = entry_price
+            self._active_best = entry_price
 
         contract_type = CONTRACT_TYPE_BUY if signal == "BUY" else CONTRACT_TYPE_SELL
         trade_id = str(uuid.uuid4())[:8]
