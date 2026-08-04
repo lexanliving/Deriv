@@ -19,6 +19,20 @@ def _streamlit_secret(name: str) -> str:
         return ""
 
 
+def _streamlit_secret_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+
+    if raw is None or str(raw).strip() == "":
+        raw = _streamlit_secret(name)
+
+    return str(raw if raw not in (None, "") else default).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 DERIV_APP_ID = os.getenv("DERIV_APP_ID") or _streamlit_secret("DERIV_APP_ID") or ""
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN") or _streamlit_secret("DERIV_API_TOKEN") or ""
 DERIV_WS_URL = ""
@@ -124,6 +138,29 @@ TICK_BUFFER_SIZE = 500
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 LOG_FILE = os.path.join(LOG_DIR, "deriv_bot.log")
 LOG_LEVEL = "INFO"
+
+# ---------------------------------------------------------------------------
+# Council upgrades
+# ---------------------------------------------------------------------------
+
+# The council must take at least this much time before an approved entry
+# is allowed to continue to quote/buy.
+COUNCIL_MIN_THINK_SECONDS = 3.0
+
+# Upper bound so the council cannot stall execution for too long.
+COUNCIL_MAX_THINK_SECONDS = 8.0
+
+# Projection gate:
+# the council must believe the move has enough continuation strength
+# for the selected duration.
+COUNCIL_PROJECTION_MIN = 0.52
+
+# Wrong-from-start protection.
+COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.45
+COUNCIL_WRONG_START_MIN_BODY = 0.30
+
+# Supabase diagnostics.
+SUPABASE_DEBUG = _streamlit_secret_bool("SUPABASE_DEBUG", False)
 
 
 def _patch_streamlit_width_kwargs() -> None:
