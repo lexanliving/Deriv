@@ -9,18 +9,18 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 
-from config import LOG_DIR
-
 try:
     from config import (
         COUNCIL_MAX_THINK_SECONDS,
         COUNCIL_MIN_THINK_SECONDS,
         COUNCIL_PROJECTION_MIN,
+        LOG_DIR,
     )
 except Exception:
     COUNCIL_MIN_THINK_SECONDS = 3.0
     COUNCIL_MAX_THINK_SECONDS = 8.0
-    COUNCIL_PROJECTION_MIN = 0.45
+    COUNCIL_PROJECTION_MIN = 0.35
+    LOG_DIR = os.path.join(os.getcwd(), "logs")
 
 from . import analysis, scorers
 from .indicators import clamp
@@ -263,13 +263,13 @@ def review(setup, state):
         ("projection", proj_reason),
     ]
 
-    clean = snap["chop"] < 45 and snap["efficiency"] > 0.35
-    noisy = snap["chop"] > 60 or snap["vol_ratio_regime"] > 1.5
+    clean = snap.get("chop", 50.0) < 45 and snap.get("efficiency", 0.0) > 0.35
+    noisy = snap.get("chop", 50.0) > 60 or snap.get("vol_ratio_regime", 1.0) > 1.5
 
-    approve_thr = int(clamp(58 - (5 if clean else 0) + (5 if noisy else 0), 48, 68))
+    approve_thr = int(clamp(55 - (4 if clean else 0) + (4 if noisy else 0), 45, 65))
 
     if persistence < COUNCIL_PROJECTION_MIN + 0.06:
-        approve_thr = int(clamp(approve_thr + 4, 48, 72))
+        approve_thr = int(clamp(approve_thr + 3, 45, 68))
 
     reject_thr = approve_thr - 15
 
