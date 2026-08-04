@@ -1,15 +1,22 @@
-"""src/venture_engine.py — thin adapter exposing the Council to the engine."""
+"""src/venture_engine.py — thin adapter exposing the Council to the engine.
+
+This version also:
+- normalises the council reason for the trading engine
+- applies the council's deliberate thinking pause before execution continues
+"""
 
 from __future__ import annotations
 
-from src.logger import get_logger
+import time
 
-logger = get_logger("venture")
+from src.logger import get_logger
 
 try:
     from src.council import council as _council
 except Exception:
     _council = None
+
+logger = get_logger("venture")
 
 _enabled = True
 _state = None
@@ -24,6 +31,52 @@ def is_venture_enabled() -> bool:
     return _enabled
 
 
+def _with_reason(result):
+    reason = result.get("reason") or result.get("reasoning") or ""
+
+    if not reason:
+        reason = "; ".join(str(x) for x in result.get("reasons", []) if x)
+
+    result["reason"] = reason or "no reason returned"
+    return result
+
+
+def _deliberate(result):
+    wait = float(result.get("wait_seconds", 0.0) or 0.0)
+
+    if wait <= 0:
+        return result
+
+    if _state is not None:
+        try:
+            _state.set_status(f"Council deliberating {wait:.1f}s before execution…")
+        except Exception:
+            pass
+
+    deadline = time.time() + wait
+
+    while time.time() < deadline:
+        if _state is not None and getattr(_state, "stop_requested", False):
+            result.update({
+                "approved": False,
+                "outcome": "REJECT",
+                "reason": "stop requested during council deliberation",
+                "reasoning": "stop requested during council deliberation",
+                "wait_seconds": 0.0,
+            })
+            return result
+
+        time.sleep(0.1)
+
+    if _state is not None:
+        try:
+            _state.set_status(result.get("reasoning") or "Council decision complete.")
+        except Exception:
+            pass
+
+    return result
+
+
 class VentureEngine:
     def attach(self, state):
         global _state
@@ -36,8 +89,10 @@ class VentureEngine:
                 "outcome": "APPROVE",
                 "confidence": 100,
                 "reasons": ["council disabled"],
+                "reason": "council disabled",
                 "reasoning": "council disabled",
                 "thinking_ms": 0.0,
+                "wait_seconds": 0.0,
             }
 
         if _council is None:
@@ -46,11 +101,17 @@ class VentureEngine:
                 "outcome": "APPROVE",
                 "confidence": 100,
                 "reasons": ["council unavailable"],
+                "reason": "council unavailable",
                 "reasoning": "council unavailable",
                 "thinking_ms": 0.0,
+                "wait_seconds": 0.0,
             }
 
-        return _council.review(setup, _state)
+        result = _council.review(setup, _state)
+        result = _with_reason(result)
+        result = _deliberate(result)
+
+        return result
 
 
 _singleton = None
