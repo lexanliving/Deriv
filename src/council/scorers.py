@@ -1,10 +1,9 @@
 """Re-valued scorers + core-quality floors + coherence + duration-fit vetoes.
 
-New valuation: trend_structure and momentum carry the weight (they drive edge);
-volatility/pullback/candle/sr are confirmatory. MACD/RSI live inside momentum
-only (no double counting). Hard rules now include core floors, coherence, and
-duration-fit so "25 points with stupid alignment" or "too slow for this
-duration" are vetoed even if the total score is high.
+This version adds:
+- wrong-from-start protection
+- projection gate for duration/strength fit
+- stricter trigger-quality checks
 """
 
 from __future__ import annotations
@@ -12,6 +11,17 @@ from __future__ import annotations
 import math
 
 from . import indicators as ind
+
+try:
+    from config import (
+        COUNCIL_PROJECTION_MIN,
+        COUNCIL_WRONG_START_MIN_BODY,
+        COUNCIL_WRONG_START_MIN_CLOSE_POSITION,
+    )
+except Exception:
+    COUNCIL_PROJECTION_MIN = 0.52
+    COUNCIL_WRONG_START_MIN_BODY = 0.30
+    COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.45
 
 EXTREME_VOL = 0.008
 COUNTER_SLOPE = 0.002
@@ -29,13 +39,13 @@ def _expected_move(s, duration):
 
 
 def _atr_abs(s):
-    return s["atr"] * (s["closes"][-1] if s["closes"] else 1.0)
+    return s.get("atr_abs", 0.0) or (s["atr"] * (s["closes"][-1] if s["closes"] else 1.0))
 
 
 def duration_advice(s, duration):
     """Return (ok, reason, recommended_duration). Veto if market too slow."""
     em = _expected_move(s, duration)
-    needed = 0.6 * _atr_abs(s)
+    needed = 0.40 * _atr_abs(s)
 
     if em < needed and s["vol_short"] > 0:
         rec = clamp_dur(5 * (needed / s["vol_short"]) ** 2)
@@ -44,24 +54,153 @@ def duration_advice(s, duration):
     return True, f"duration fit ok (exp={em:.5f} >= need={needed:.5f})", int(duration)
 
 
+def projection_gate(s, duration):
+    """
+    Project whether the current move has enough strength and trend persistence
+    to remain favourable through the selected duration.
+
+    This is deliberately conservative. It is not a promise. It is a veto against
+    weak, late, choppy, or incoherent entries.
+    """
+    em = _expected_move(s, duration)
+    need = 0.35 * _atr_abs(s)
+
+    vol_short = max(s.get("vol_short", 0.0), 1e-9)
+
+    trend_power = abs(s.get("slope_slow", 0.0)) / vol_short
+    trend_power_norm = ind.clamp(trend_power / 2.0)
+
+    chop_penalty = ind.clamp((s.get("chop", 50.0) - 45.0) / 30.0)
+    session_score = 1.0 if s.get("session", 1.0) >= 0.9 else 0.6
+
+    persistence = ind.clamp(
+        0.34 * trend_power_norm
+        + 0.26 * s.get("structure", 0.5)
+        + 0.24 * s.get("efficiency", 0.0)
+        + 0.16 * session_score
+        - 0.22 * chop_penalty
+    )
+
+    ok = em >= need and persistence >= COUNCIL_PROJECTION_MIN
+
+    reason = (
+        f"projection {duration}m exp={em:.5f} need={need:.5f} "
+        f"persistence={persistence:.2f} min={COUNCIL_PROJECTION_MIN:.2f}"
+    )
+
+    if ok:
+        strength_margin = (
+            min(1.0, max(0.0, (em / need - 1.0) * 1.5))
+            + min(1.0, max(0.0, (persistence - COUNCIL_PROJECTION_MIN) / 0.18))
+        )
+
+        # Stronger projections wait less. Marginal projections wait more.
+        wait = max(0.0, 6.5 - strength_margin * 2.5)
+    else:
+        wait = 0.0
+
+    return ok, reason, persistence, wait
+
+
 def hard_rules(snap):
     out = []
     d = snap["direction"]
+    closes = snap.get("closes", [])
 
-    if not snap["closes"] or snap["closes"][-1] <= 0:
+    if not closes or closes[-1] <= 0:
         out.append(("data_integrity", "non-positive price"))
+        return out
 
-    if snap["vol_long"] > 0 and snap["vol_short"] > 3.0 * snap["vol_long"] and snap["vol_short"] > 0.004:
+    vol_long = snap.get("vol_long", 0.0)
+    vol_short = snap.get("vol_short", 0.0)
+
+    if vol_long > 0 and vol_short > 3.0 * vol_long and vol_short > 0.004:
         out.append((
             "extreme_whipsaw",
-            f"vol_short={snap['vol_short']:.5f} >> vol_long={snap['vol_long']:.5f}",
+            f"vol_short={vol_short:.5f} >> vol_long={vol_long:.5f}",
         ))
 
-    adverse = (-snap["slope_fast"]) if d == "BUY" else snap["slope_fast"]
-    vol_adj = max(snap["vol_short"], 1e-6)
+    adverse = (-snap.get("slope_fast", 0.0)) if d == "BUY" else snap.get("slope_fast", 0.0)
+    vol_adj = max(vol_short, 1e-6)
 
     if adverse > 4.0 * vol_adj and adverse > 0.003:
-        out.append(("violent_counter_trend", f"adverse slope={snap['slope_fast']:.5f}"))
+        out.append(("violent_counter_trend", f"adverse slope={snap.get('slope_fast', 0.0):.5f}"))
+
+    body = snap.get("body_ratio", 0.0)
+    cp = snap.get("close_position", 0.5)
+    e_fast = snap.get("e_fast") or []
+    last_close = closes[-1]
+
+    min_cp = COUNCIL_WRONG_START_MIN_CLOSE_POSITION
+
+    if d == "BUY":
+        if cp < min_cp:
+            out.append((
+                "weak_close_for_buy",
+                f"close_position={cp:.2f} < {min_cp:.2f}",
+            ))
+
+        if e_fast and last_close <= e_fast[-1]:
+            out.append((
+                "close_not_above_fast_ema",
+                f"close={last_close:.5f} <= ema_fast={e_fast[-1]:.5f}",
+            ))
+
+        if snap.get("rsi", 50.0) > 88.0:
+            out.append((
+                "overextended_buy",
+                f"rsi={snap.get('rsi', 0.0):.1f} > 88",
+            ))
+
+        recent = snap.get("recent_ret_3", 0.0)
+        if recent < -0.0012 and adverse > 2.0 * vol_adj:
+            out.append((
+                "counter_momentum_buy",
+                f"recent_ret_3={recent:.5f} while slope is adverse",
+            ))
+    else:
+        if cp > 1.0 - min_cp:
+            out.append((
+                "weak_close_for_sell",
+                f"close_position={cp:.2f} > {1.0 - min_cp:.2f}",
+            ))
+
+        if e_fast and last_close >= e_fast[-1]:
+            out.append((
+                "close_not_below_fast_ema",
+                f"close={last_close:.5f} >= ema_fast={e_fast[-1]:.5f}",
+            ))
+
+        if snap.get("rsi", 50.0) < 12.0:
+            out.append((
+                "overextended_sell",
+                f"rsi={snap.get('rsi', 0.0):.1f} < 12",
+            ))
+
+        recent = snap.get("recent_ret_3", 0.0)
+        if recent > 0.0012 and adverse > 2.0 * vol_adj:
+            out.append((
+                "counter_momentum_sell",
+                f"recent_ret_3={recent:.5f} while slope is adverse",
+            ))
+
+    if body < COUNCIL_WRONG_START_MIN_BODY:
+        out.append((
+            "weak_trigger_body",
+            f"body_ratio={body:.2f} < {COUNCIL_WRONG_START_MIN_BODY:.2f}",
+        ))
+
+    if snap.get("candle_quality", 0.0) < 0.18:
+        out.append((
+            "poor_candle_quality",
+            f"candle_quality={snap.get('candle_quality', 0.0):.2f} < 0.18",
+        ))
+
+    if snap.get("efficiency", 0.0) < 0.10 and snap.get("chop", 50.0) > 62.0:
+        out.append((
+            "inefficient_chop",
+            f"efficiency={snap.get('efficiency', 0.0):.2f} with chop={snap.get('chop', 0.0):.1f}",
+        ))
 
     return out
 
@@ -74,7 +213,6 @@ def core_floors(snap):
 
     ts, _ = s_trend_structure(snap)
     mo, _ = s_momentum(snap)
-    st, _ = s_sr(snap)
 
     if ts < 0.45:
         out.append(("core_trend_floor", f"trend_structure={ts:.2f} < 0.45 (weak core)"))
