@@ -1,4 +1,5 @@
 """src/api_client.py — Deriv Options API client (PAT -> account OTP WebSocket)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +19,13 @@ from src.logger import get_logger
 logger = get_logger("api_client")
 
 OPTIONS_API_BASE = "https://api.derivws.com/trading/v1/options"
-PROPOSAL_RETRYABLE = {"TIMEOUT", "CONNECTION_LOST", "NETWORK_ERROR", "NOT_CONNECTED", "INVALID_RESPONSE"}
+PROPOSAL_RETRYABLE = {
+    "TIMEOUT",
+    "CONNECTION_LOST",
+    "NETWORK_ERROR",
+    "NOT_CONNECTED",
+    "INVALID_RESPONSE",
+}
 
 
 class DerivAPIError(Exception):
@@ -40,13 +47,16 @@ class DerivAPIClient:
         self.api_token = api_token.strip()
         self.app_id = app_id.strip()
         self.account_id = account_id.strip()
+
         self._ws: Optional[ClientConnection] = None
         self._pending_requests: Dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
         self._ping_task: Optional[asyncio.Task] = None
+
         self._tick_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._tick_callback_tasks: Set[asyncio.Task] = set()
         self._tick_subscription_id: Optional[str] = None
+
         self._req_id = 0
         self._connected = False
         self.last_error = ""
@@ -57,7 +67,10 @@ class DerivAPIClient:
         identifier = app_id.strip()
 
         if not token or not identifier:
-            raise DerivAPIError("DERIV_API_TOKEN and DERIV_APP_ID must both be set.", "MISSING_CREDENTIALS")
+            raise DerivAPIError(
+                "DERIV_API_TOKEN and DERIV_APP_ID must both be set.",
+                "MISSING_CREDENTIALS",
+            )
 
         return {
             "Authorization": f"Bearer {token}",
@@ -74,7 +87,11 @@ class DerivAPIClient:
 
             error = body.get("error")
             if isinstance(error, dict):
-                return str(error.get("message") or error.get("error_description") or "Deriv rejected the request.")
+                return str(
+                    error.get("message")
+                    or error.get("error_description")
+                    or "Deriv rejected the request."
+                )
 
             if isinstance(error, str) and error:
                 return error
@@ -99,7 +116,7 @@ class DerivAPIClient:
         return fallback
 
     @classmethod
-    async def _rest_request(cls, method, url, api_token, app_id) -> tuple:
+    async def _rest_request(cls, method: str, url: str, api_token: str, app_id: str):
         headers = cls._headers(api_token, app_id)
 
         def decode(raw: str) -> Any:
@@ -111,7 +128,7 @@ class DerivAPIClient:
             except json.JSONDecodeError:
                 return {"error": {"message": "Deriv returned a non-JSON response."}}
 
-        def send() -> tuple:
+        def send():
             request = Request(url, method=method, headers=headers)
 
             try:
@@ -131,17 +148,27 @@ class DerivAPIClient:
 
     @classmethod
     async def get_accounts(cls, api_token: str, app_id: str) -> List[Dict[str, Any]]:
-        status, payload = await cls._rest_request("GET", f"{OPTIONS_API_BASE}/accounts", api_token, app_id)
+        status, payload = await cls._rest_request(
+            "GET",
+            f"{OPTIONS_API_BASE}/accounts",
+            api_token,
+            app_id,
+        )
 
         if not 200 <= status < 300:
-            raise DerivAPIError(cls._error_message(payload), cls._error_code(payload, f"HTTP_{status}"))
+            raise DerivAPIError(
+                cls._error_message(payload),
+                cls._error_code(payload, f"HTTP_{status}"),
+            )
 
         accounts = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(accounts, list):
-            raise DerivAPIError("Deriv returned an unexpected accounts response.", "INVALID_ACCOUNTS_RESPONSE")
+            raise DerivAPIError(
+                "Deriv returned an unexpected accounts response.",
+                "INVALID_ACCOUNTS_RESPONSE",
+            )
 
         active = []
-
         for account in accounts:
             if not isinstance(account, dict):
                 continue
@@ -160,22 +187,36 @@ class DerivAPIClient:
         accounts = await self.get_accounts(self.api_token, self.app_id)
 
         if not any(str(a.get("account_id")) == self.account_id for a in accounts):
-            raise DerivAPIError("The selected Deriv account is inactive or unavailable to this PAT.", "ACCOUNT_NOT_AVAILABLE")
+            raise DerivAPIError(
+                "The selected Deriv account is inactive or unavailable to this PAT.",
+                "ACCOUNT_NOT_AVAILABLE",
+            )
 
         return True
 
     async def _websocket_url(self) -> str:
         endpoint = f"{OPTIONS_API_BASE}/accounts/{self.account_id}/otp"
-        status, payload = await self._rest_request("POST", endpoint, self.api_token, self.app_id)
+        status, payload = await self._rest_request(
+            "POST",
+            endpoint,
+            self.api_token,
+            self.app_id,
+        )
 
         if not 200 <= status < 300:
-            raise DerivAPIError(self._error_message(payload), self._error_code(payload, f"HTTP_{status}"))
+            raise DerivAPIError(
+                self._error_message(payload),
+                self._error_code(payload, f"HTTP_{status}"),
+            )
 
         data = payload.get("data") if isinstance(payload, dict) else None
         url = data.get("url") if isinstance(data, dict) else None
 
         if not isinstance(url, str) or not url.startswith("wss://"):
-            raise DerivAPIError("Deriv did not return a valid account WebSocket URL.", "INVALID_OTP_RESPONSE")
+            raise DerivAPIError(
+                "Deriv did not return a valid account WebSocket URL.",
+                "INVALID_OTP_RESPONSE",
+            )
 
         return url
 
@@ -195,15 +236,22 @@ class DerivAPIClient:
                 ping_timeout=10,
                 open_timeout=20,
                 close_timeout=10,
-                max_size=2 ** 20,
+                max_size=2**20,
             )
 
             self._connected = True
-            self._listener_task = asyncio.create_task(self._message_listener(), name="deriv-message-listener")
-            self._ping_task = asyncio.create_task(self._ping_loop(), name="deriv-api-ping")
+            self._listener_task = asyncio.create_task(
+                self._message_listener(),
+                name="deriv-message-listener",
+            )
+            self._ping_task = asyncio.create_task(
+                self._ping_loop(),
+                name="deriv-api-ping",
+            )
 
             logger.info("Connected to Deriv for account %s.", self.account_id)
             return True
+
         except (DerivAPIError, WebSocketException, OSError, asyncio.TimeoutError) as exc:
             self.last_error = str(exc)
             logger.warning("Deriv connection failed: %s", exc)
@@ -325,9 +373,9 @@ class DerivAPIClient:
 
                 if message.get("msg_type") == "tick":
                     tick = message.get("tick")
-
                     if isinstance(tick, dict):
                         self._dispatch_tick(tick)
+
         except asyncio.CancelledError:
             raise
         except (ConnectionClosed, WebSocketException, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
@@ -351,7 +399,14 @@ class DerivAPIClient:
                 self._connected = False
                 self._fail_all_pending(DerivAPIError("Deriv connection lost.", "CONNECTION_LOST"))
 
-    async def _send_request(self, payload: Dict[str, Any], timeout: float = REQUEST_TIMEOUT) -> Dict[str, Any]:
+    async def _send_request(
+        self,
+        payload: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if timeout is None:
+            timeout = self.REQUEST_TIMEOUT
+
         if not self._connected or self._ws is None:
             raise DerivAPIError("Not connected to Deriv.", "NOT_CONNECTED")
 
@@ -373,10 +428,14 @@ class DerivAPIClient:
                 raise DerivAPIError("Deriv returned an invalid response envelope.", "INVALID_RESPONSE")
 
             return response
+
         except (ConnectionClosed, WebSocketException, OSError) as exc:
             self._pending_requests.pop(request_id, None)
             self._connected = False
-            raise DerivAPIError("Deriv connection lost while sending the request.", "CONNECTION_LOST") from exc
+            raise DerivAPIError(
+                "Deriv connection lost while sending the request.",
+                "CONNECTION_LOST",
+            ) from exc
         except asyncio.TimeoutError as exc:
             self._pending_requests.pop(request_id, None)
             raise DerivAPIError("Deriv did not answer in time.", "TIMEOUT") from exc
@@ -385,22 +444,31 @@ class DerivAPIClient:
             raise DerivAPIError("The Deriv request could not be encoded.", "INVALID_REQUEST") from exc
 
     @staticmethod
-    def _require_object(response, key, required_fields: tuple = ()) -> Dict[str, Any]:
+    def _require_object(response: Dict[str, Any], key: str, required_fields: tuple = ()) -> Dict[str, Any]:
         value = response.get(key)
 
         if not isinstance(value, dict):
-            raise DerivAPIError(f"Deriv response did not include a valid '{key}' object.", "INVALID_RESPONSE")
+            raise DerivAPIError(
+                f"Deriv response did not include a valid '{key}' object.",
+                "INVALID_RESPONSE",
+            )
 
         missing = [f for f in required_fields if f not in value]
         if missing:
-            raise DerivAPIError(f"Deriv '{key}' response is missing: {', '.join(missing)}.", "INVALID_RESPONSE")
+            raise DerivAPIError(
+                f"Deriv '{key}' response is missing: {', '.join(missing)}.",
+                "INVALID_RESPONSE",
+            )
 
         return value
 
     @staticmethod
     def _require_number(value: Any, field: str) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise DerivAPIError(f"Deriv returned an invalid numeric '{field}' value.", "INVALID_RESPONSE")
+            raise DerivAPIError(
+                f"Deriv returned an invalid numeric '{field}' value.",
+                "INVALID_RESPONSE",
+            )
 
         return float(value)
 
@@ -409,7 +477,10 @@ class DerivAPIClient:
         symbols = response.get("active_symbols")
 
         if not isinstance(symbols, list):
-            raise DerivAPIError("Deriv returned an invalid active_symbols response.", "INVALID_RESPONSE")
+            raise DerivAPIError(
+                "Deriv returned an invalid active_symbols response.",
+                "INVALID_RESPONSE",
+            )
 
         return [s for s in symbols if isinstance(s, dict)]
 
@@ -422,7 +493,10 @@ class DerivAPIClient:
             subscription_id = subscription.get("id")
 
             if not isinstance(subscription_id, str) or not subscription_id:
-                raise DerivAPIError("Deriv returned an invalid tick subscription ID.", "INVALID_RESPONSE")
+                raise DerivAPIError(
+                    "Deriv returned an invalid tick subscription ID.",
+                    "INVALID_RESPONSE",
+                )
 
             self._tick_subscription_id = subscription_id
             return response
@@ -441,19 +515,28 @@ class DerivAPIClient:
             except DerivAPIError as exc:
                 logger.debug("Tick unsubscribe could not be confirmed: %s", exc)
 
-    async def get_candles(self, symbol: str, granularity: int, count: int = CANDLE_LOOKBACK) -> List[Dict[str, Any]]:
-        response = await self._send_request({
-            "ticks_history": symbol,
-            "style": "candles",
-            "granularity": granularity,
-            "count": count,
-            "end": "latest",
-        })
+    async def get_candles(
+        self,
+        symbol: str,
+        granularity: int,
+        count: int = CANDLE_LOOKBACK,
+    ) -> List[Dict[str, Any]]:
+        response = await self._send_request(
+            {
+                "ticks_history": symbol,
+                "style": "candles",
+                "granularity": granularity,
+                "count": count,
+                "end": "latest",
+            }
+        )
 
         candles = response.get("candles")
-
         if not isinstance(candles, list):
-            raise DerivAPIError("Deriv returned an invalid candle-history response.", "INVALID_RESPONSE")
+            raise DerivAPIError(
+                "Deriv returned an invalid candle-history response.",
+                "INVALID_RESPONSE",
+            )
 
         return [c for c in candles if isinstance(c, dict)]
 
@@ -487,10 +570,17 @@ class DerivAPIClient:
             try:
                 if not self.connected:
                     if not await self.connect():
-                        raise DerivAPIError("Could not reconnect before the proposal request.", "NOT_CONNECTED")
+                        raise DerivAPIError(
+                            "Could not reconnect before the proposal request.",
+                            "NOT_CONNECTED",
+                        )
 
                 response = await self._send_request(payload)
-                proposal = self._require_object(response, "proposal", ("id", "ask_price", "payout", "spot", "spot_time"))
+                proposal = self._require_object(
+                    response,
+                    "proposal",
+                    ("id", "ask_price", "payout", "spot", "spot_time"),
+                )
 
                 proposal_id = proposal.get("id")
                 if not isinstance(proposal_id, str) or not proposal_id:
@@ -500,6 +590,7 @@ class DerivAPIClient:
                 self._require_number(proposal.get("payout"), "proposal.payout")
 
                 return proposal
+
             except DerivAPIError as exc:
                 last_exc = exc
 
@@ -521,7 +612,10 @@ class DerivAPIClient:
 
         contract_id = buy.get("contract_id")
         if isinstance(contract_id, bool) or not isinstance(contract_id, int):
-            raise DerivAPIError("Deriv returned an invalid contract ID in the buy receipt.", "INVALID_RESPONSE")
+            raise DerivAPIError(
+                "Deriv returned an invalid contract ID in the buy receipt.",
+                "INVALID_RESPONSE",
+            )
 
         self._require_number(buy.get("buy_price"), "buy.buy_price")
         self._require_number(buy.get("payout"), "buy.payout")
@@ -532,14 +626,20 @@ class DerivAPIClient:
         if isinstance(contract_id, bool) or not isinstance(contract_id, int):
             raise DerivAPIError("A numeric contract ID is required.", "INVALID_REQUEST")
 
-        response = await self._send_request({"proposal_open_contract": 1, "contract_id": contract_id})
+        response = await self._send_request(
+            {
+                "proposal_open_contract": 1,
+                "contract_id": contract_id,
+            }
+        )
+
         return self._require_object(response, "proposal_open_contract", ("contract_id",))
 
     async def get_portfolio(self) -> List[Dict[str, Any]]:
         response = await self._send_request({"portfolio": 1})
         portfolio = self._require_object(response, "portfolio", ("contracts",))
-
         contracts = portfolio.get("contracts")
+
         if not isinstance(contracts, list):
             raise DerivAPIError("Deriv returned an invalid portfolio response.", "INVALID_RESPONSE")
 
