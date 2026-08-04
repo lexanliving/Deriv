@@ -1,6 +1,4 @@
-"""Council with core-quality floors, coherence, duration-fit vetoes,
-wrong-from-start protection, projection gating, and deliberate thinking time.
-"""
+"""Council with wrong-from-start protection, projection gating, and deliberation time."""
 
 from __future__ import annotations
 
@@ -22,7 +20,7 @@ try:
 except Exception:
     COUNCIL_MIN_THINK_SECONDS = 3.0
     COUNCIL_MAX_THINK_SECONDS = 8.0
-    COUNCIL_PROJECTION_MIN = 0.52
+    COUNCIL_PROJECTION_MIN = 0.45
 
 from . import analysis, scorers
 from .indicators import clamp
@@ -205,7 +203,13 @@ def review(setup, state):
 
         return out
 
-    proj_ok, proj_reason, persistence, proj_wait = scorers.projection_gate(snap, duration)
+    try:
+        proj_ok, proj_reason, persistence, proj_wait = scorers.projection_gate(snap, duration)
+    except Exception as exc:
+        proj_ok = True
+        proj_reason = f"projection error fallback: {exc}"
+        persistence = 0.5
+        proj_wait = 0.0
 
     if not proj_ok:
         out = _finish(
@@ -248,7 +252,6 @@ def review(setup, state):
 
     confidence = int(round(clamp(acc) * 100))
 
-    # Projection-aware confidence adjustment.
     if persistence < COUNCIL_PROJECTION_MIN + 0.08:
         confidence = max(0, confidence - 4)
     elif persistence > 0.72:
@@ -265,7 +268,6 @@ def review(setup, state):
 
     approve_thr = int(clamp(58 - (5 if clean else 0) + (5 if noisy else 0), 48, 68))
 
-    # Marginal projection requires a higher confidence bar.
     if persistence < COUNCIL_PROJECTION_MIN + 0.06:
         approve_thr = int(clamp(approve_thr + 4, 48, 72))
 
