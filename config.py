@@ -72,10 +72,6 @@ CANDLE_REFRESH_SECONDS = 30
 ENTRY_TIMEFRAME = "15m"
 DEFAULT_ENTRY_TIMEFRAME = "15m"
 
-# Duration-aware trigger candle:
-# 1m and 2m contracts use the 5m trigger.
-# 5m/15m use 5m.
-# 30m/60m use 15m.
 ENTRY_TIMEFRAME_BY_DURATION = {
     1: "5m",
     2: "5m",
@@ -140,24 +136,22 @@ LOG_FILE = os.path.join(LOG_DIR, "deriv_bot.log")
 LOG_LEVEL = "INFO"
 
 # ---------------------------------------------------------------------------
-# Council upgrades
+# Council settings
 # ---------------------------------------------------------------------------
 
-# The council must take at least this much time before an approved entry
-# is allowed to continue to quote/buy.
+# Council must deliberate at least this long before an approved entry continues.
 COUNCIL_MIN_THINK_SECONDS = 3.0
 
-# Upper bound so the council cannot stall execution for too long.
+# Upper bound so council cannot stall execution forever.
 COUNCIL_MAX_THINK_SECONDS = 8.0
 
-# Projection gate:
-# the council must believe the move has enough continuation strength
-# for the selected duration.
-COUNCIL_PROJECTION_MIN = 0.52
+# Projection gate minimum persistence score.
+# 0.45 is strict but not trade-killing.
+COUNCIL_PROJECTION_MIN = 0.45
 
 # Wrong-from-start protection.
-COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.45
-COUNCIL_WRONG_START_MIN_BODY = 0.30
+COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.42
+COUNCIL_WRONG_START_MIN_BODY = 0.28
 
 # Supabase diagnostics.
 SUPABASE_DEBUG = _streamlit_secret_bool("SUPABASE_DEBUG", False)
