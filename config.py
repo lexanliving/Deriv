@@ -68,7 +68,10 @@ ENTRY_TIMEFRAME_BY_DURATION = {
 }
 
 TREND_TIMEFRAMES = ["30m", "1h"]
-MAX_TRADES_PER_DAY = 10
+
+# Unlimited trades per day.
+# 0 means no daily cap.
+MAX_TRADES_PER_DAY = 0
 
 ENTRY_SCORE_THRESHOLD = 20
 MTF_MIN_AGREEMENT = 2
@@ -120,24 +123,6 @@ TICK_BUFFER_SIZE = 500
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 LOG_FILE = os.path.join(LOG_DIR, "deriv_bot.log")
 LOG_LEVEL = "INFO"
-
-# ---------------------------------------------------------------------------
-# Council settings
-# ---------------------------------------------------------------------------
-
-COUNCIL_MIN_THINK_SECONDS = 3.0
-COUNCIL_MAX_THINK_SECONDS = 8.0
-
-# Lowered so the council does not choke all trades.
-COUNCIL_PROJECTION_MIN = 0.35
-
-# Wrong-from-start protection, but not overly restrictive.
-COUNCIL_WRONG_START_MIN_CLOSE_POSITION = 0.35
-COUNCIL_WRONG_START_MIN_BODY = 0.20
-
-SUPABASE_DEBUG = str(
-    os.getenv("SUPABASE_DEBUG") or _streamlit_secret("SUPABASE_DEBUG") or ""
-).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _patch_streamlit_width_kwargs() -> None:
