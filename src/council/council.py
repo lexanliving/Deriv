@@ -1,8 +1,5 @@
-"""Council with core-quality floors, coherence, and duration-fit vetoes.
-
-Rejects 'high score but stupid alignment' and 'too slow for this duration'
-trades even when the 25-point total is high. Returns recommended_duration so
-you can see the better hold period. Deterministic, millisecond-scale.
+"""Council with core-quality floors, coherence, duration-fit vetoes,
+wrong-from-start protection, projection gating, and deliberate thinking time.
 """
 
 from __future__ import annotations
@@ -15,6 +12,17 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from config import LOG_DIR
+
+try:
+    from config import (
+        COUNCIL_MAX_THINK_SECONDS,
+        COUNCIL_MIN_THINK_SECONDS,
+        COUNCIL_PROJECTION_MIN,
+    )
+except Exception:
+    COUNCIL_MIN_THINK_SECONDS = 3.0
+    COUNCIL_MAX_THINK_SECONDS = 8.0
+    COUNCIL_PROJECTION_MIN = 0.52
 
 from . import analysis, scorers
 from .indicators import clamp
@@ -30,6 +38,7 @@ _CAL = {
     "rejected": 0,
     "hard": Counter(),
     "core": Counter(),
+    "projection": 0,
     "low_conf": 0,
     "factor_sum": Counter(),
     "factor_n": Counter(),
@@ -48,6 +57,9 @@ def _record_cal(entry):
 
         for cr in entry.get("core", []):
             _CAL["core"][cr] += 1
+
+        if entry.get("projection_reject"):
+            _CAL["projection"] += 1
 
         if entry.get("low_conf"):
             _CAL["low_conf"] += 1
@@ -75,6 +87,7 @@ def get_calibration():
             "approval_rate": round((_CAL["approved"] + _CAL["caution"]) / rev * 100, 1),
             "hard_rejects": dict(_CAL["hard"]),
             "core_rejects": dict(_CAL["core"]),
+            "projection_rejects": _CAL["projection"],
             "low_confidence": _CAL["low_conf"],
             "factor_avg": {
                 k: round(_CAL["factor_sum"][k] / max(1, _CAL["factor_n"][k]), 2)
@@ -107,6 +120,7 @@ def review(setup, state):
             [],
             duration,
             t0,
+            0.0,
         )
 
         out.update({"symbol": symbol, "direction": direction, "ts": now_iso})
@@ -115,6 +129,7 @@ def review(setup, state):
             **out,
             "hard": [],
             "core": [],
+            "projection_reject": False,
             "low_conf": False,
             "factors": [],
         })
@@ -144,6 +159,7 @@ def review(setup, state):
             [],
             duration,
             t0,
+            0.0,
         )
 
         out.update({"symbol": symbol, "direction": direction, "ts": now_iso})
@@ -152,6 +168,7 @@ def review(setup, state):
             **out,
             "hard": [h[0] for h in hard],
             "core": [],
+            "projection_reject": False,
             "low_conf": False,
             "factors": [],
         })
@@ -172,6 +189,7 @@ def review(setup, state):
             [],
             rec_dur,
             t0,
+            0.0,
         )
 
         out.update({"symbol": symbol, "direction": direction, "ts": now_iso})
@@ -180,6 +198,37 @@ def review(setup, state):
             **out,
             "hard": [],
             "core": [c[0] for c in core],
+            "projection_reject": False,
+            "low_conf": False,
+            "factors": [],
+        })
+
+        return out
+
+    proj_ok, proj_reason, persistence, proj_wait = scorers.projection_gate(snap, duration)
+
+    if not proj_ok:
+        out = _finish(
+            False,
+            "REJECT",
+            12,
+            [f"PROJECTION {proj_reason}"],
+            [],
+            55,
+            40,
+            [],
+            rec_dur,
+            t0,
+            0.0,
+        )
+
+        out.update({"symbol": symbol, "direction": direction, "ts": now_iso})
+
+        _record_cal({
+            **out,
+            "hard": [],
+            "core": [],
+            "projection_reject": True,
             "low_conf": False,
             "factors": [],
         })
@@ -199,13 +248,27 @@ def review(setup, state):
 
     confidence = int(round(clamp(acc) * 100))
 
-    info = scorers.informational(snap) + [("recommended_duration", f"{rec_dur}m")]
-    reasons += [f"[info] {n}={v}" for n, v in info]
+    # Projection-aware confidence adjustment.
+    if persistence < COUNCIL_PROJECTION_MIN + 0.08:
+        confidence = max(0, confidence - 4)
+    elif persistence > 0.72:
+        confidence = min(100, confidence + 3)
+
+    info = scorers.informational(snap) + [
+        ("recommended_duration", f"{rec_dur}m"),
+        ("projection_persistence", f"{persistence:.2f}"),
+        ("projection", proj_reason),
+    ]
 
     clean = snap["chop"] < 45 and snap["efficiency"] > 0.35
     noisy = snap["chop"] > 60 or snap["vol_ratio_regime"] > 1.5
 
     approve_thr = int(clamp(58 - (5 if clean else 0) + (5 if noisy else 0), 48, 68))
+
+    # Marginal projection requires a higher confidence bar.
+    if persistence < COUNCIL_PROJECTION_MIN + 0.06:
+        approve_thr = int(clamp(approve_thr + 4, 48, 72))
+
     reject_thr = approve_thr - 15
 
     outcome = (
@@ -216,6 +279,23 @@ def review(setup, state):
 
     approved = outcome != "REJECT"
     weakest = sorted(factors, key=lambda kv: kv[1])[:2]
+
+    wait_seconds = 0.0
+
+    if approved:
+        wait_seconds = max(COUNCIL_MIN_THINK_SECONDS, float(proj_wait or 0.0))
+
+        if outcome == "CAUTION":
+            wait_seconds += 1.5
+
+        wait_seconds = clamp(
+            wait_seconds,
+            COUNCIL_MIN_THINK_SECONDS,
+            COUNCIL_MAX_THINK_SECONDS,
+        )
+
+    info.append(("wait_seconds", f"{wait_seconds:.1f}"))
+    reasons += [f"[info] {n}={v}" for n, v in info]
 
     out = _finish(
         approved,
@@ -228,6 +308,7 @@ def review(setup, state):
         weakest,
         rec_dur,
         t0,
+        wait_seconds,
     )
 
     out.update({"symbol": symbol, "direction": direction, "ts": now_iso})
@@ -236,6 +317,7 @@ def review(setup, state):
         **out,
         "hard": [],
         "core": [],
+        "projection_reject": False,
         "low_conf": outcome == "REJECT",
         "factors": factors,
     })
@@ -243,7 +325,19 @@ def review(setup, state):
     return out
 
 
-def _finish(approved, outcome, confidence, reasons, info, approve_thr, reject_thr, weakest, rec_dur, t0):
+def _finish(
+    approved,
+    outcome,
+    confidence,
+    reasons,
+    info,
+    approve_thr,
+    reject_thr,
+    weakest,
+    rec_dur,
+    t0,
+    wait_seconds=0.0,
+):
     return {
         "approved": approved,
         "outcome": outcome,
@@ -256,4 +350,5 @@ def _finish(approved, outcome, confidence, reasons, info, approve_thr, reject_th
         "weakest": weakest,
         "recommended_duration": rec_dur,
         "thinking_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "wait_seconds": float(wait_seconds or 0.0),
     }
