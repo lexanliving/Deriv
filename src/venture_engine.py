@@ -1,13 +1,6 @@
-"""src/venture_engine.py — thin adapter exposing the Council to the engine.
-
-This version also:
-- normalises the council reason for the trading engine
-- applies the council's deliberate thinking pause before execution continues
-"""
+"""src/venture_engine.py — Council adapter with safe reason normalisation."""
 
 from __future__ import annotations
-
-import time
 
 from src.logger import get_logger
 
@@ -41,42 +34,6 @@ def _with_reason(result):
     return result
 
 
-def _deliberate(result):
-    wait = float(result.get("wait_seconds", 0.0) or 0.0)
-
-    if wait <= 0:
-        return result
-
-    if _state is not None:
-        try:
-            _state.set_status(f"Council deliberating {wait:.1f}s before execution…")
-        except Exception:
-            pass
-
-    deadline = time.time() + wait
-
-    while time.time() < deadline:
-        if _state is not None and getattr(_state, "stop_requested", False):
-            result.update({
-                "approved": False,
-                "outcome": "REJECT",
-                "reason": "stop requested during council deliberation",
-                "reasoning": "stop requested during council deliberation",
-                "wait_seconds": 0.0,
-            })
-            return result
-
-        time.sleep(0.1)
-
-    if _state is not None:
-        try:
-            _state.set_status(result.get("reasoning") or "Council decision complete.")
-        except Exception:
-            pass
-
-    return result
-
-
 class VentureEngine:
     def attach(self, state):
         global _state
@@ -107,10 +64,23 @@ class VentureEngine:
                 "wait_seconds": 0.0,
             }
 
-        result = _council.review(setup, _state)
-        result = _with_reason(result)
-        result = _deliberate(result)
+        try:
+            result = _council.review(setup, _state)
+        except Exception as exc:
+            logger.exception("Council failed; using fallback approval.")
 
+            return {
+                "approved": True,
+                "outcome": "APPROVE",
+                "confidence": 0,
+                "reasons": [f"council error fallback: {exc}"],
+                "reason": f"council error fallback: {exc}",
+                "reasoning": f"council error fallback: {exc}",
+                "thinking_ms": 0.0,
+                "wait_seconds": 0.0,
+            }
+
+        result = _with_reason(result)
         return result
 
 
