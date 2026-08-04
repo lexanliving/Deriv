@@ -1,5 +1,4 @@
 """src/logger.py — non-blocking logging via a background listener thread."""
-
 import atexit
 import logging
 import os
