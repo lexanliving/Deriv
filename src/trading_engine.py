@@ -3,6 +3,10 @@
 Pure rule-based execution. The 25-point MomentumMaster TF confluence engine is
 the ONLY decision-maker. No AI touches the trade path.
 
+Contract lengths: whole minutes use duration_unit "m"; anything under a minute
+(15s-50s) uses duration_unit "s". Second contracts are handed to the strategy
+as fractional minutes so they run the exact 1-minute setup.
+
 Settled trades (WON / LOST / UNKNOWN) are mirrored to the Supabase `trades`
 table by a fire-and-forget background writer that can never block, delay, or
 cancel an order. If Supabase is down or unconfigured, the bot trades exactly
@@ -134,9 +138,16 @@ class TradingEngine:
         self.contract_duration_unit = str(contract_duration_unit or "m").lower()
         preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, STRATEGY_SENSITIVITY_PRESETS[DEFAULT_STRATEGY_SENSITIVITY])
         self._client: Optional[DerivAPIClient] = None
+        # Second contracts (unit "s") are passed to the strategy as fractional
+        # minutes so they run the exact 1-minute setup (SHORT regime, 5m trigger).
+        self._duration_minutes_for_strategy = (
+            self.contract_duration / 60.0
+            if self.contract_duration_unit == "s"
+            else float(self.contract_duration)
+        )
         self._strategy = StrategyEngine(
             entry_score_threshold=preset.get("entry_score_threshold", ENTRY_SCORE_THRESHOLD),
-            contract_duration_minutes=self.contract_duration,
+            contract_duration_minutes=self._duration_minutes_for_strategy,
             entry_adx_floor=preset.get("entry_adx_floor", ADX_MIN_TREND))
         self._journal = get_journal()
         self._supabase_writer = _SupabaseTradeWriter()
@@ -419,6 +430,8 @@ class TradingEngine:
 
     def _contract_duration_seconds(self):
         unit = self.contract_duration_unit.lower()
+        if unit == "s":
+            return max(5.0, float(self.contract_duration))
         if unit == "t":
             return max(5.0, float(self.contract_duration))
         if unit == "m":
