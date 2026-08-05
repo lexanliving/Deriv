@@ -1,9 +1,21 @@
-"""src/trading_engine.py — candle-trend engine for CALL/PUT (UP/DOWN)."""
+"""src/trading_engine.py — candle-trend engine for CALL/PUT (UP/DOWN).
+
+Pure rule-based execution. The 25-point MomentumMaster TF confluence engine is
+the ONLY decision-maker. No AI touches the trade path.
+
+Settled trades (WON / LOST / UNKNOWN) are mirrored to the Supabase `trades`
+table by a fire-and-forget background writer that can never block, delay, or
+cancel an order. If Supabase is down or unconfigured, the bot trades exactly
+as before.
+"""
+
 import asyncio
+import queue
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from config import (
     ADX_MIN_TREND, CANDLE_GRANULARITIES, CANDLE_LOOKBACK, CANDLE_REFRESH_SECONDS,
@@ -18,17 +30,13 @@ from src.logger import get_logger
 from src.state_manager import StateManager, TradeRecord
 from src.strategy import StrategyEngine
 
-try:
-    from src.venture_engine import get_venture_advice
-except Exception:
-    def get_venture_advice() -> Dict[str, Any]:
-        return {"verdict": "NEUTRAL", "risk_multiplier": 1.0}
-
 logger = get_logger("trading_engine")
 
 INITIAL_WARMUP_COOLDOWN_SECONDS = 30.0
+
 _DEMO_ACCOUNT_TYPES = {"DEMO", "VIRTUAL", "PRACTICE", "VIRTUAL_ACCOUNT"}
 _REAL_ACCOUNT_TYPES = {"REAL", "LIVE", "REAL_MONEY"}
+
 
 def normalize_account_type(account_type: str) -> str:
     normalized = " ".join(str(account_type or "").strip().upper().replace("-", " ").split())
@@ -38,6 +46,7 @@ def normalize_account_type(account_type: str) -> str:
         return "REAL"
     return normalized or "UNKNOWN"
 
+
 def resolve_execution_mode(account_type: str, real_execution_confirmed: bool) -> str:
     normalized_type = normalize_account_type(account_type)
     if normalized_type == "DEMO":
@@ -46,13 +55,71 @@ def resolve_execution_mode(account_type: str, real_execution_confirmed: bool) ->
         return "REAL"
     return "BLOCKED"
 
+
+class _SupabaseTradeWriter:
+    """Background, fire-and-forget writer for the Supabase `trades` table.
+
+    Deliberately isolated: it runs on its own daemon thread, swallows every
+    error, and can never influence proposal, buy, monitoring, or the async
+    loop. If Supabase is down or unconfigured the bot trades exactly as before.
+    """
+
+    def __init__(self):
+        self._queue: "queue.Queue" = queue.Queue(maxsize=500)
+        self._thread: Optional[threading.Thread] = None
+
+    def enqueue(self, trade_id: str, meta: Dict[str, Any]) -> None:
+        try:
+            self._queue.put_nowait((trade_id, meta))
+            self._ensure_thread()
+        except Exception:
+            logger.debug("Supabase enqueue skipped (queue full or writer error).", exc_info=True)
+
+    def flush(self, timeout: float = 6.0) -> None:
+        deadline = time.time() + timeout
+        try:
+            while not self._queue.empty() and time.time() < deadline:
+                time.sleep(0.1)
+        except Exception:
+            pass
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True, name="SupabaseTradeWriter")
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            from src.supabase_service import get_supabase
+            supabase = get_supabase()
+        except Exception as exc:
+            logger.debug("Supabase service unavailable: %s", exc)
+            return
+        if not supabase.enabled:
+            logger.info("Supabase not configured — trade mirroring disabled.")
+            return
+        supabase.ensure_schema()
+        while True:
+            try:
+                trade_id, meta = self._queue.get(timeout=30.0)
+            except queue.Empty:
+                return  # idle shutdown; enqueue() restarts the thread when needed
+            try:
+                supabase.link_trade(trade_id, meta)
+            except Exception as exc:
+                logger.warning("Supabase trade write failed for %s: %s", trade_id, exc)
+
+
 class TradingEngine:
     def __init__(self, api_token, app_id, account_id, account_currency, state, initial_stake,
                  max_martingale_steps, symbol=SYMBOL, symbol_display=SYMBOL_DISPLAY,
                  contract_duration=CONTRACT_DURATION, contract_duration_unit=CONTRACT_DURATION_UNIT,
                  strategy_sensitivity=DEFAULT_STRATEGY_SENSITIVITY, account_type="UNKNOWN",
                  real_execution_confirmed=False, martingale_multiplier=MARTINGALE_MULTIPLIER):
-        self.api_token = api_token.strip(); self.app_id = app_id.strip(); self.account_id = account_id.strip()
+        self.api_token = api_token.strip()
+        self.app_id = app_id.strip()
+        self.account_id = account_id.strip()
         self.account_currency = (account_currency or CURRENCY).upper()
         self.account_type = normalize_account_type(account_type)
         self.real_execution_confirmed = bool(real_execution_confirmed)
@@ -72,6 +139,7 @@ class TradingEngine:
             contract_duration_minutes=self.contract_duration,
             entry_adx_floor=preset.get("entry_adx_floor", ADX_MIN_TREND))
         self._journal = get_journal()
+        self._supabase_writer = _SupabaseTradeWriter()
         self._signal_monotonic = 0.0
         self._last_candle_refresh = 0.0
         self._active_contract_id: Optional[int] = None
@@ -84,18 +152,38 @@ class TradingEngine:
         self._last_strategy_state_version = 0
         self._daily_trade_count = 0
         self._daily_date = datetime.now(timezone.utc).date()
+
+    # ------------------------------------------------------------------ utils
     def _mae_mfe(self, signal):
-        e, w, b = self._active_entry_price, self._active_worst, self._active_best
-        if e is None or w is None or b is None:
+        entry, worst, best = self._active_entry_price, self._active_worst, self._active_best
+        if entry is None or worst is None or best is None:
             return ("", "")
         try:
             if signal == "BUY":
-                mae, mfe = max(0.0, e - w), max(0.0, b - e)
+                mae, mfe = max(0.0, entry - worst), max(0.0, best - entry)
             else:
-                mae, mfe = max(0.0, b - e), max(0.0, e - w)
+                mae, mfe = max(0.0, best - entry), max(0.0, entry - worst)
             return (f"{mae:.5f}", f"{mfe:.5f}")
         except Exception:
             return ("", "")
+
+    def _push_trade_to_supabase(self, trade_id, direction, stake, opened_at, outcome, pnl, contract_id=None):
+        """Never raises. Settlement row only — the writer thread does the rest."""
+        try:
+            self._supabase_writer.enqueue(trade_id, {
+                "symbol": self.symbol,
+                "direction": direction,
+                "stake": stake,
+                "opened_at": opened_at,
+                "closed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "outcome": outcome,
+                "pnl": pnl,
+                "contract_id": contract_id,
+            })
+        except Exception:
+            logger.debug("Supabase enqueue skipped.", exc_info=True)
+
+    # ------------------------------------------------------------------- run
     async def _validate_symbol(self):
         try:
             active_symbols = await self._client.get_active_symbols()
@@ -103,13 +191,13 @@ class TradingEngine:
             logger.warning("Symbol catalogue unavailable (%s); letting Deriv confirm.", exc)
             self.state.set_status(f"Checking {self.symbol} with Deriv…")
             return True
-        all_syms = sorted({str(i.get("symbol", "")) for i in active_symbols if i.get("symbol")})
+        all_syms = sorted({str(item.get("symbol", "")) for item in active_symbols if item.get("symbol")})
         if not all_syms:
             logger.warning("Empty symbol catalogue; proceeding with %s.", self.symbol)
             self.state.set_status(f"Subscribing to {self.symbol} — Deriv will confirm.")
             return True
         if self.symbol in all_syms:
-            match = next((i for i in active_symbols if str(i.get("symbol", "")) == self.symbol), None)
+            match = next((item for item in active_symbols if str(item.get("symbol", "")) == self.symbol), None)
             if match is not None and bool(match.get("is_trading_suspended", False)):
                 logger.warning("Symbol %s reports suspended; proceeding anyway.", self.symbol)
                 self.state.set_status(f"{self.symbol} may be paused — Deriv will confirm.")
@@ -119,27 +207,37 @@ class TradingEngine:
         logger.warning("Symbol %s not listed (%d returned). Proceeding.", self.symbol, len(all_syms))
         self.state.set_status(f"{self.symbol} isn't in the catalogue Deriv returned; subscribing anyway.")
         return True
+
     async def run(self):
-        logger.info("Engine start | market=%s mode=%s type=%s dur=%d%s", self.symbol, self.execution_mode, self.account_type, self.contract_duration, self.contract_duration_unit)
-        self.state.set_execution_context(account_id=self.account_id, account_type=self.account_type, currency=self.account_currency, execution_mode=self.execution_mode)
+        logger.info("Engine start | market=%s mode=%s type=%s dur=%d%s",
+                    self.symbol, self.execution_mode, self.account_type,
+                    self.contract_duration, self.contract_duration_unit)
+        self.state.set_execution_context(account_id=self.account_id, account_type=self.account_type,
+                                         currency=self.account_currency, execution_mode=self.execution_mode)
         if self.execution_mode == "BLOCKED":
             self.state.set_error("Trading is paused: type LIVE on a real account to enable orders, or use a demo account.")
             self.state.set_status("Monitoring only — no orders will be sent.")
         else:
             self.state.set_status(f"Connecting to Deriv ({self.execution_mode.lower()})…")
+
         self._client = DerivAPIClient(self.api_token, self.app_id, self.account_id)
         connected = await self._client.connect()
         if not connected:
             detail = self._client.last_error if self._client else ""
             msg = f"Failed to connect to Deriv API. {detail or 'Check your App ID, PAT scopes, and internet connection.'}"
-            logger.error(msg); self.state.set_error(msg); self.state.set_status("Connection failed."); self.state.set_running(False)
+            logger.error(msg)
+            self.state.set_error(msg)
+            self.state.set_status("Connection failed.")
+            self.state.set_running(False)
             return
+
         await self._validate_symbol()
         self.state.set_status("Connected. Fetching initial candle data…")
         await self._refresh_candles()
         self._engine_ready_monotonic = time.monotonic()
         self._last_strategy_state_version = self._strategy.state_version
         self.state.set_status(f"Live on {self.symbol_display}. First trade possible in {INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s.")
+
         try:
             await self._client.subscribe_ticks(self.symbol, self._on_tick)
             logger.info("Tick stream active for %s.", self.symbol)
@@ -153,7 +251,8 @@ class TradingEngine:
                 if self._trade_in_progress:
                     busy_sid = self._strategy.consume_signal()
                     if busy_sid:
-                        self._journal.record_outcome(busy_sid, "SKIPPED", 0.0, 0.0, None, self.execution_mode, 0, note="a trade was already open in this tab")
+                        self._journal.record_outcome(busy_sid, "SKIPPED", 0.0, 0.0, None, self.execution_mode, 0,
+                                                     note="a trade was already open in this tab")
                     continue
                 signal = self._strategy.consume_signal()
                 if signal in ("BUY", "SELL"):
@@ -171,26 +270,29 @@ class TradingEngine:
                         logger.info("Signal %s seen but not executed: %s", signal, gate_reason)
                         self.state.set_status(f"{signal} setup seen — standing by ({gate_reason})")
                         self._strategy.on_signal_skipped()
-                        self._journal.record_outcome(signal_id, "SKIPPED", 0.0, 0.0, None, self.execution_mode, 0, note=gate_reason)
-        except DerivAPIError as e:
-            logger.error("API error in main loop: %s", e); self.state.set_error(str(e))
-        except Exception as e:
-            logger.exception("Unexpected error in main loop: %s", e); self.state.set_error(f"Unexpected error: {e}")
+                        self._journal.record_outcome(signal_id, "SKIPPED", 0.0, 0.0, None, self.execution_mode, 0,
+                                                     note=gate_reason)
+        except DerivAPIError as exc:
+            logger.error("API error in main loop: %s", exc)
+            self.state.set_error(str(exc))
+        except Exception as exc:
+            logger.exception("Unexpected error in main loop: %s", exc)
+            self.state.set_error(f"Unexpected error: {exc}")
         finally:
             await self._shutdown()
+
     def _roll_daily_trade_count(self):
         today = datetime.now(timezone.utc).date()
         if today != self._daily_date:
             self._daily_date = today
             self._daily_trade_count = 0
+
     def _gate_allows(self, now_mono):
+        """Deterministic gates only. No AI anywhere in this list."""
         if self._engine_ready_monotonic == 0.0:
             return False, "starting up"
         if self._daily_trade_count >= MAX_TRADES_PER_DAY:
             return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
-        advice = get_venture_advice()
-        if str(advice.get("verdict")) == "POOR":
-            return False, f"venture advisor: POOR — {str(advice.get('reasoning', ''))[:60]}"
         warmup_remaining = INITIAL_WARMUP_COOLDOWN_SECONDS - (now_mono - self._engine_ready_monotonic)
         if warmup_remaining > 0:
             return False, f"warming up, {warmup_remaining:.0f}s left"
@@ -198,6 +300,8 @@ class TradingEngine:
         if cooldown_remaining > 0:
             return False, f"cooling down, {cooldown_remaining:.0f}s left"
         return True, "ready"
+
+    # ------------------------------------------------------------- connection
     async def _reconnect(self, max_attempts=5):
         async with self._reconnect_lock:
             if self._client.connected:
@@ -218,10 +322,11 @@ class TradingEngine:
                         return True
                 except DerivAPIError as exc:
                     logger.warning("Reconnect %d failed: %s", attempt, exc)
-                if attempt < max_attempts:
-                    await asyncio.sleep(min(2 ** attempt, 15))
+                    if attempt < max_attempts:
+                        await asyncio.sleep(min(2 ** attempt, 15))
             self.state.set_error("Could not reconnect to Deriv after repeated attempts.")
             return False
+
     async def _shutdown(self):
         logger.info("Engine shutting down…")
         if self._trade_in_progress:
@@ -235,12 +340,16 @@ class TradingEngine:
         if self._client:
             await self._client.unsubscribe_ticks()
             await self._client.disconnect()
+        self._supabase_writer.flush(timeout=6.0)
         self.state.set_running(False)
         self.state.set_status("Stopped.")
         logger.info("Engine stopped.")
+
+    # ------------------------------------------------------------------ ticks
     async def _on_tick(self, tick_data):
         try:
-            price = float(tick_data.get("quote", 0)); epoch = float(tick_data.get("epoch", time.time()))
+            price = float(tick_data.get("quote", 0))
+            epoch = float(tick_data.get("epoch", time.time()))
             if price == 0:
                 return
             self._strategy.process_tick(price)
@@ -250,8 +359,9 @@ class TradingEngine:
                     self._active_worst = price
                 if self._active_best is None or price > self._active_best:
                     self._active_best = price
-        except Exception as e:
-            logger.exception("Error processing tick: %s", e)
+        except Exception as exc:
+            logger.exception("Error processing tick: %s", exc)
+
     def _push_tick_and_strategy_state(self, price, epoch):
         current_version = self._strategy.state_version
         if current_version != self._last_strategy_state_version:
@@ -268,6 +378,8 @@ class TradingEngine:
                 last_signal_score_breakdown=strategy_state["last_signal_score_breakdown"])
         else:
             self.state.update_tick(price, epoch)
+
+    # ---------------------------------------------------------------- candles
     async def _refresh_candles(self):
         self.state.set_status("Refreshing candle data…")
         candles_by_tf = {}
@@ -299,10 +411,12 @@ class TradingEngine:
             trend = strategy_state.get("trend_direction") or "no trend"
             stage = strategy_state.get("pattern_stage") or "IDLE"
             self.state.set_status(f"{self.symbol_display} · trend {trend} · {stage}")
-        except DerivAPIError as e:
-            logger.warning("Candle refresh failed: %s", e); self.state.set_status("Candle refresh paused — using last data.")
-        except Exception as e:
-            logger.exception("Unexpected error during candle refresh: %s", e)
+        except DerivAPIError as exc:
+            logger.warning("Candle refresh failed: %s", exc)
+            self.state.set_status("Candle refresh paused — using last data.")
+        except Exception as exc:
+            logger.exception("Unexpected error during candle refresh: %s", exc)
+
     def _contract_duration_seconds(self):
         unit = self.contract_duration_unit.lower()
         if unit == "t":
@@ -314,6 +428,8 @@ class TradingEngine:
         if unit == "d":
             return float(self.contract_duration) * 86400.0
         return 1800.0
+
+    # -------------------------------------------------------------- execution
     async def _execute_trade(self, signal, entry_price, signal_id=None):
         if self._trade_in_progress:
             logger.warning("Trade already in progress. Skipping signal.")
@@ -325,31 +441,35 @@ class TradingEngine:
         martingale_state = self.state.get_martingale_state()
         stake = martingale_state["stake"]
         martingale_step = martingale_state["step"]
-        mult = max(0.0, min(1.0, float(get_venture_advice().get("risk_multiplier", 1.0) or 1.0)))
-        stake = round(stake * mult, 2)
-        if stake < 0.35:
-            reason = "Venture advisor scaled stake below minimum — standing down."
-            self.state.set_status(reason)
-            self._journal.record_outcome(signal_id, "SKIPPED", 0.0, 0.0, None, self.execution_mode, martingale_step, note=reason)
-            self._trade_in_progress = False
-            return
         contract_type = CONTRACT_TYPE_BUY if signal == "BUY" else CONTRACT_TYPE_SELL
         trade_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        logger.info("Handling %s | %s | %s | stake=%s | %d%s | step=%s | id=%s", signal, self.symbol, self.execution_mode, stake, self.contract_duration, self.contract_duration_unit, martingale_step, trade_id)
+        logger.info("Handling %s | %s | %s | stake=%s | %d%s | step=%s | id=%s",
+                    signal, self.symbol, self.execution_mode, stake,
+                    self.contract_duration, self.contract_duration_unit, martingale_step, trade_id)
         try:
             if self.execution_mode == "BLOCKED":
-                reason = "Order blocked: select a recognised DEMO account, or type LIVE exactly to enable orders on a REAL account. No proposal or buy request was sent."
-                self.state.add_trade(TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp, status="CANCELLED", martingale_step=martingale_step, execution_mode="BLOCKED", account_type=self.account_type, error_message=reason))
+                reason = ("Order blocked: select a recognised DEMO account, or type LIVE exactly to enable orders "
+                          "on a REAL account. No proposal or buy request was sent.")
+                self.state.add_trade(TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal,
+                                                 stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp,
+                                                 status="CANCELLED", martingale_step=martingale_step,
+                                                 execution_mode="BLOCKED", account_type=self.account_type,
+                                                 error_message=reason))
                 self._strategy.on_trade_executed()
                 self.state.set_error(reason)
                 self.state.set_status(f"Signal: {signal}. Order blocked by safety gate.")
                 self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, "BLOCKED", martingale_step, note=reason)
                 return
-            trade_record = TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake, barrier="-", entry_price=entry_price, timestamp=timestamp, status="OPEN", martingale_step=martingale_step, execution_mode=self.execution_mode, account_type=self.account_type)
+
+            trade_record = TradeRecord(trade_id=trade_id, signal_id=signal_id or "", direction=signal, stake=stake,
+                                       barrier="-", entry_price=entry_price, timestamp=timestamp, status="OPEN",
+                                       martingale_step=martingale_step, execution_mode=self.execution_mode,
+                                       account_type=self.account_type)
             self.state.add_trade(trade_record)
             self._strategy.on_trade_executed()
             self.state.clear_error()
+
             execution_stage = "quote request"
             if not self._client.connected:
                 if not await self._reconnect():
@@ -357,12 +477,17 @@ class TradingEngine:
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Order cancelled: connection unavailable.")
-                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                                                 martingale_step, note=reason)
                     return
             try:
-                self.state.set_status(f"{self.execution_mode} order: preparing {signal} (stake {stake:.2f} {self.account_currency}, {self.contract_duration}{self.contract_duration_unit})…")
+                self.state.set_status(f"{self.execution_mode} order: preparing {signal} (stake {stake:.2f} "
+                                      f"{self.account_currency}, {self.contract_duration}{self.contract_duration_unit})…")
                 self.state.update_trade_pacing()
-                proposal = await self._client.get_proposal(symbol=self.symbol, contract_type=contract_type, stake=stake, duration=self.contract_duration, duration_unit=self.contract_duration_unit, barrier=None, currency=self.account_currency)
+                proposal = await self._client.get_proposal(symbol=self.symbol, contract_type=contract_type, stake=stake,
+                                                           duration=self.contract_duration,
+                                                           duration_unit=self.contract_duration_unit, barrier=None,
+                                                           currency=self.account_currency)
                 proposal_id = proposal.get("id")
                 if not isinstance(proposal_id, str) or not proposal_id:
                     raise DerivAPIError("Deriv did not return a valid quote ID.", "INVALID_RESPONSE")
@@ -374,17 +499,22 @@ class TradingEngine:
                     raise DerivAPIError("Deriv returned a non-positive quote price.", "INVALID_RESPONSE")
                 if self.state.stop_requested:
                     raise DerivAPIError("Stop was requested before the buy; no order was submitted.", "STOP_REQUESTED")
+
                 execution_stage = "buy request"
                 self.state.set_status(f"Quote received. Submitting {self.execution_mode.lower()} buy request…")
                 try:
                     buy_response = await self._client.buy_contract(proposal_id=proposal_id, price=ask_price)
                 except DerivAPIError as buy_exc:
                     if buy_exc.code in ("TIMEOUT", "CONNECTION_LOST", "INVALID_RESPONSE"):
-                        buy_response = await self._reconcile_after_buy_timeout(stake=stake, contract_type=contract_type, signal_time=time.time())
+                        buy_response = await self._reconcile_after_buy_timeout(stake=stake, contract_type=contract_type,
+                                                                               signal_time=time.time())
                         if buy_response is None:
-                            raise DerivAPIError("The buy request may have reached Deriv, but no receipt or matching open contract could be confirmed. Check the Deriv statement before restarting.", "AMBIGUOUS_BUY") from buy_exc
+                            raise DerivAPIError("The buy request may have reached Deriv, but no receipt or matching "
+                                                "open contract could be confirmed. Check the Deriv statement before "
+                                                "restarting.", "AMBIGUOUS_BUY") from buy_exc
                     else:
                         raise
+
                 contract_id = buy_response.get("contract_id")
                 buy_price = float(buy_response.get("buy_price", stake))
                 payout = float(buy_response.get("payout", 0))
@@ -394,17 +524,22 @@ class TradingEngine:
                 trade_record.contract_id = contract_id
                 self._daily_trade_count += 1
                 fill_latency = time.monotonic() - self._signal_monotonic if self._signal_monotonic > 0 else -1.0
-                logger.info("Filled %s | %s | price=%s | payout=%s | id=%s | %.3fs", contract_id, self.symbol, buy_price, payout, trade_id, fill_latency)
+                logger.info("Filled %s | %s | price=%s | payout=%s | id=%s | %.3fs",
+                            contract_id, self.symbol, buy_price, payout, trade_id, fill_latency)
                 self.state.set_status(f"{self.execution_mode} contract {contract_id} active · awaiting result")
+
                 outcome, pnl = await self._monitor_contract(contract_id, buy_price, payout)
                 mae_s, mfe_s = self._mae_mfe(signal)
                 if outcome == "UNKNOWN":
-                    reason = f"Contract {contract_id} was bought but settlement was not confirmed. Check the Deriv statement; the stake plan was not changed."
+                    reason = (f"Contract {contract_id} was bought but settlement was not confirmed. Check the Deriv "
+                              f"statement; the stake plan was not changed.")
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: unresolved contract outcome.")
                     self.state.request_stop()
-                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id,
+                                                 self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._push_trade_to_supabase(trade_id, signal, stake, timestamp, "UNKNOWN", 0.0, contract_id)
                 else:
                     self.state.update_trade_outcome(trade_id, outcome, pnl)
                     if outcome == "WON":
@@ -413,30 +548,41 @@ class TradingEngine:
                     else:
                         self.state.on_trade_loss(self.martingale_multiplier, self.max_martingale_steps)
                         new_stake = self.state.get_martingale_state()["stake"]
-                        self.state.set_status(f"Trade LOST. Next stake: {new_stake:.2f} (Step {self.state.get_martingale_state()['step']})")
-                    self._journal.record_outcome(signal_id, outcome, pnl, stake, self._active_contract_id, self.execution_mode, martingale_step, note="", mae=mae_s, mfe=mfe_s)
-            except DerivAPIError as e:
+                        self.state.set_status(f"Trade LOST. Next stake: {new_stake:.2f} "
+                                              f"(Step {self.state.get_martingale_state()['step']})")
+                    self._journal.record_outcome(signal_id, outcome, pnl, stake, self._active_contract_id,
+                                                 self.execution_mode, martingale_step, note="", mae=mae_s, mfe=mfe_s)
+                    self._push_trade_to_supabase(trade_id, signal, stake, timestamp, outcome, pnl, contract_id)
+
+            except DerivAPIError as exc:
                 mae_s, mfe_s = self._mae_mfe(signal)
-                if e.code == "AMBIGUOUS_BUY":
-                    reason = e.message
+                if exc.code == "AMBIGUOUS_BUY":
+                    reason = exc.message
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: a buy outcome is ambiguous. Check the Deriv statement.")
                     self.state.request_stop()
-                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id,
+                                                 self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._push_trade_to_supabase(trade_id, signal, stake, timestamp, "UNKNOWN", 0.0, self._active_contract_id)
                 elif self._active_contract_id is not None:
-                    reason = f"Contract {self._active_contract_id} was bought, but monitoring failed: {e.message} ({e.code}). Check the Deriv statement; the stake plan was not changed."
+                    reason = (f"Contract {self._active_contract_id} was bought, but monitoring failed: {exc.message} "
+                              f"({exc.code}). Check the Deriv statement; the stake plan was not changed.")
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: a purchased contract outcome is unresolved.")
                     self.state.request_stop()
-                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id,
+                                                 self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._push_trade_to_supabase(trade_id, signal, stake, timestamp, "UNKNOWN", 0.0, self._active_contract_id)
                 else:
-                    reason = f"Deriv rejected the {execution_stage}: {e.message} ({e.code})."
+                    reason = f"Deriv rejected the {execution_stage}: {exc.message} ({exc.code})."
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self.state.set_error(reason)
-                    self.state.set_status(f"Order cancelled during {execution_stage}: {e.message}")
-                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                    self.state.set_status(f"Order cancelled during {execution_stage}: {exc.message}")
+                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                                                 martingale_step, note=reason)
+
             except asyncio.CancelledError:
                 mae_s, mfe_s = self._mae_mfe(signal)
                 if self._active_contract_id is not None:
@@ -444,36 +590,46 @@ class TradingEngine:
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.request_stop()
-                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id,
+                                                 self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._push_trade_to_supabase(trade_id, signal, stake, timestamp, "UNKNOWN", 0.0, self._active_contract_id)
                 else:
                     reason = "Order attempt stopped before any contract was confirmed."
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
-                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                                                 martingale_step, note=reason)
                 raise
-            except Exception as e:
+
+            except Exception as exc:
                 mae_s, mfe_s = self._mae_mfe(signal)
                 if self._active_contract_id is not None:
-                    reason = f"Unexpected monitoring failure for contract {self._active_contract_id}: {e}. Check the Deriv statement."
+                    reason = f"Unexpected monitoring failure for contract {self._active_contract_id}: {exc}. Check the Deriv statement."
                     self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status("Trading stopped: a purchased contract outcome is unresolved.")
                     self.state.request_stop()
-                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id,
+                                                 self.execution_mode, martingale_step, note=reason, mae=mae_s, mfe=mfe_s)
+                    self._push_trade_to_supabase(trade_id, signal, stake, timestamp, "UNKNOWN", 0.0, self._active_contract_id)
                 else:
-                    reason = f"Unexpected failure during the {execution_stage}: {e}"
+                    reason = f"Unexpected failure during the {execution_stage}: {exc}"
                     self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                     self.state.set_error(reason)
                     self.state.set_status(f"Order cancelled during {execution_stage}; see error details.")
-                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
+                    self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode,
+                                                 martingale_step, note=reason)
         finally:
             self._active_contract_id = None
             self._active_entry_price = None
             self._active_worst = None
             self._active_best = None
             self._trade_in_progress = False
+
+    # ------------------------------------------------------------ reconciliation
     async def _reconcile_after_buy_timeout(self, stake, contract_type, signal_time):
         logger.warning("Buy receipt not confirmed. Checking the portfolio for a matching untracked fill.")
-        known_ids = {str(trade.contract_id) for trade in self.state.get_trade_history() if getattr(trade, "contract_id", None) is not None}
+        known_ids = {str(trade.contract_id) for trade in self.state.get_trade_history()
+                     if getattr(trade, "contract_id", None) is not None}
         for attempt in range(1, 4):
             if attempt > 1:
                 await asyncio.sleep(1.0)
@@ -497,7 +653,9 @@ class TradingEngine:
                 if contract.get("contract_type") != contract_type:
                     continue
                 try:
-                    buy_price = float(contract["buy_price"]); purchase_time = float(contract["purchase_time"]); payout = float(contract.get("payout", 0.0))
+                    buy_price = float(contract["buy_price"])
+                    purchase_time = float(contract["purchase_time"])
+                    payout = float(contract.get("payout", 0.0))
                 except (KeyError, TypeError, ValueError):
                     continue
                 if abs(buy_price - stake) > max(0.01, stake * 0.05):
@@ -513,6 +671,8 @@ class TradingEngine:
                 return None
         logger.error("No unique matching contract found. Trading must stay stopped until the statement is checked.")
         return None
+
+    # --------------------------------------------------------------- monitoring
     async def _monitor_contract(self, contract_id, buy_price, payout):
         duration_seconds = self._contract_duration_seconds()
         poll_interval = 1.0 if duration_seconds <= 120 else (5.0 if duration_seconds <= 600 else 15.0)
@@ -526,7 +686,8 @@ class TradingEngine:
                     continue
             try:
                 status = await self._client.get_open_contract_status(contract_id)
-                is_expired = bool(status.get("is_expired", 0)); is_sold = bool(status.get("is_sold", 0))
+                is_expired = bool(status.get("is_expired", 0))
+                is_sold = bool(status.get("is_sold", 0))
                 status_name = str(status.get("status", "")).lower()
                 if is_expired or is_sold or status_name in {"won", "lost", "sold"}:
                     sell_price = float(status.get("sell_price", 0) or 0)
@@ -537,8 +698,10 @@ class TradingEngine:
                     return "LOST", round(profit, 2)
                 await asyncio.sleep(poll_interval)
             except DerivAPIError as exc:
-                logger.warning("Poll error %s: %s", contract_id, exc); await asyncio.sleep(poll_interval * 2)
+                logger.warning("Poll error %s: %s", contract_id, exc)
+                await asyncio.sleep(poll_interval * 2)
             except (TypeError, ValueError) as exc:
-                logger.warning("Bad settlement numbers %s: %s", contract_id, exc); await asyncio.sleep(poll_interval * 2)
+                logger.warning("Bad settlement numbers %s: %s", contract_id, exc)
+                await asyncio.sleep(poll_interval * 2)
         logger.warning("Monitoring timed out for %s.", contract_id)
         return "UNKNOWN", 0.0
