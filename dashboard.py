@@ -1,7 +1,7 @@
 """dashboard.py — MomentumMaster TF terminal (original professional theme).
 
-Pure rule-based terminal. The AI research/venture attachments were removed —
-the 25-point confluence engine is the only decision-maker.
+Pure rule-based terminal. Contract lengths include Deriv-native second
+durations (15s-50s), which run the exact 1-minute setup (5m trigger).
 """
 
 import asyncio
@@ -28,11 +28,11 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    AVAILABLE_MARKETS, CONTRACT_DURATION, CONTRACT_DURATION_UNIT,
-    DEFAULT_ENTRY_TIMEFRAME, DEFAULT_INITIAL_STAKE, DEFAULT_MARKET_DISPLAY,
-    DEFAULT_MAX_MARTINGALE_STEPS, DEFAULT_STRATEGY_SENSITIVITY, DERIV_APP_ID,
-    DERIV_API_TOKEN, ENTRY_TIMEFRAME_BY_DURATION, MARTINGALE_MULTIPLIER, SCORE_MAX,
-    STRATEGY_SENSITIVITY_PRESETS,
+    AVAILABLE_MARKETS, CONTRACT_DURATION, CONTRACT_DURATION_OPTIONS_SECONDS,
+    CONTRACT_DURATION_UNIT, DEFAULT_ENTRY_TIMEFRAME, DEFAULT_INITIAL_STAKE,
+    DEFAULT_MARKET_DISPLAY, DEFAULT_MAX_MARTINGALE_STEPS, DEFAULT_STRATEGY_SENSITIVITY,
+    DERIV_APP_ID, DERIV_API_TOKEN, ENTRY_TIMEFRAME_BY_DURATION, MARTINGALE_MULTIPLIER,
+    SCORE_MAX, STRATEGY_SENSITIVITY_PRESETS,
 )
 from src.api_client import DerivAPIClient, DerivAPIError
 from src.journal import get_journal
@@ -46,6 +46,10 @@ configured_pat = DERIV_API_TOKEN.strip()
 
 _STAGE_LABEL = {"IDLE": "Scanning", "TREND": "Trend set", "SIGNAL": "Setup armed", "PULLBACK": "Pullback", "MOMENTUM": "Momentum"}
 _MODE_LABEL = {"DEMO": "Demo", "REAL": "Live", "BLOCKED": "Paused", "UNCONFIGURED": "No account", "SIGNAL_ONLY": "Preview"}
+
+
+def _fmt_duration_option(secs: int) -> str:
+    return f"{secs}s" if secs < 60 else f"{secs // 60}m"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -198,12 +202,17 @@ def _launch_engine(config, reset_state):
         if history and history[0].status == "OPEN":
             state.update_trade_outcome(history[0].trade_id, "UNKNOWN", 0.0,
                                        "The engine restarted while this contract was open — check the Deriv statement.")
+        dur_s = int(config["duration_seconds"])
+        if dur_s < 60:
+            contract_duration, duration_unit = dur_s, "s"
+        else:
+            contract_duration, duration_unit = dur_s // 60, "m"
         engine = TradingEngine(
             api_token=config["api_token"], app_id=config["app_id"], account_id=config["account_id"],
             account_currency=config["account_currency"], state=state, initial_stake=config["initial_stake"],
             max_martingale_steps=config["max_steps"], symbol=config["symbol"],
-            symbol_display=config["symbol_display"], contract_duration=config["duration_minutes"],
-            contract_duration_unit="m", strategy_sensitivity=config["strategy_sensitivity"],
+            symbol_display=config["symbol_display"], contract_duration=contract_duration,
+            contract_duration_unit=duration_unit, strategy_sensitivity=config["strategy_sensitivity"],
             account_type=config["account_type"], real_execution_confirmed=config["real_execution_confirmed"],
             martingale_multiplier=config["martingale_multiplier"])
         if not reset_state:
@@ -264,7 +273,7 @@ def watchdog_fragment():
 
 def start_bot(api_token, app_id, account_id, account_currency, account_type, real_execution_confirmed,
               initial_stake, max_steps, strategy_sensitivity, martingale_multiplier, symbol, symbol_display,
-              duration_minutes):
+              duration_seconds):
     if st.session_state.engine_thread and st.session_state.engine_thread.is_alive():
         return
     config = {"api_token": api_token, "app_id": app_id, "account_id": account_id,
@@ -272,7 +281,7 @@ def start_bot(api_token, app_id, account_id, account_currency, account_type, rea
               "real_execution_confirmed": real_execution_confirmed, "initial_stake": initial_stake,
               "max_steps": max_steps, "strategy_sensitivity": strategy_sensitivity,
               "martingale_multiplier": martingale_multiplier, "symbol": symbol,
-              "symbol_display": symbol_display, "duration_minutes": duration_minutes}
+              "symbol_display": symbol_display, "duration_seconds": int(duration_seconds)}
     st.session_state.engine_config = config
     st.session_state.should_run = True
     st.session_state.auto_restart_count = 0
@@ -346,10 +355,18 @@ with st.sidebar:
 
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Contract</div>", unsafe_allow_html=True)
-    default_duration = CONTRACT_DURATION if CONTRACT_DURATION_UNIT == "m" else 30
-    duration_minutes = st.select_slider("Length (minutes)", options=[1, 2, 5, 15, 30, 60], value=default_duration, disabled=state.is_running)
-    entry_tf = ENTRY_TIMEFRAME_BY_DURATION.get(int(duration_minutes), DEFAULT_ENTRY_TIMEFRAME)
-    st.caption("Up to 10 trades a day.")
+    default_duration_seconds = CONTRACT_DURATION * 60 if CONTRACT_DURATION_UNIT == "m" else int(CONTRACT_DURATION)
+    duration_options = list(CONTRACT_DURATION_OPTIONS_SECONDS)
+    if default_duration_seconds not in duration_options:
+        duration_options = sorted(duration_options + [default_duration_seconds])
+    duration_seconds = st.select_slider("Length", options=duration_options, value=default_duration_seconds,
+                                        disabled=state.is_running, format_func=_fmt_duration_option)
+    if duration_seconds < 60:
+        entry_tf = "5m"  # second contracts trade the exact 1-minute setup
+    else:
+        entry_tf = ENTRY_TIMEFRAME_BY_DURATION.get(duration_seconds // 60, "5m" if duration_seconds <= 900 else "15m")
+    st.caption("Up to 10 trades a day. Second lengths are Deriv-native and use the 1-minute setup (5m trigger) — "
+               "mainly available on synthetic indices; on markets that don't offer them Deriv rejects the quote safely.")
 
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Account safety</div>", unsafe_allow_html=True)
@@ -384,11 +401,11 @@ with st.sidebar:
     _sens_val = DEFAULT_STRATEGY_SENSITIVITY if DEFAULT_STRATEGY_SENSITIVITY in _sens_opts else _sens_opts[0]
     strategy_sensitivity = st.select_slider("How strict", options=_sens_opts, value=_sens_val, disabled=state.is_running)
     preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, {}) or {}
-    if duration_minutes <= 2:
+    if duration_seconds <= 120:
         regime_note = "scalp → 5m trigger; trend must agree; power candles get the express lane"
-    elif duration_minutes <= 15:
+    elif duration_seconds <= 900:
         regime_note = "short → 5m trigger; 5m must trend & decisive body"
-    elif duration_minutes <= 30:
+    elif duration_seconds <= 1800:
         regime_note = "medium → 15m trigger; 30m + 1h must agree"
     else:
         regime_note = "long → 15m trigger; 30m + 1h agree, 1h ADX & MACD confirm"
@@ -410,14 +427,14 @@ with st.sidebar:
                       real_execution_confirmed=real_execution_confirmed, initial_stake=initial_stake,
                       max_steps=max_martingale_steps, strategy_sensitivity=strategy_sensitivity,
                       martingale_multiplier=martingale_multiplier, symbol=selected_symbol,
-                      symbol_display=market_display, duration_minutes=duration_minutes)
+                      symbol_display=market_display, duration_seconds=duration_seconds)
             st.rerun()
     if stop_pressed:
         stop_bot()
         st.rerun()
 
     st.divider()
-    st.caption(f"Market {market_display} · {selected_symbol}\n\nContract Call / Put · {duration_minutes}m\n\nTrend {entry_tf} trigger, confirmed by 30m + 1h")
+    st.caption(f"Market {market_display} · {selected_symbol}\n\nContract Call / Put · {_fmt_duration_option(duration_seconds)}\n\nTrend {entry_tf} trigger, confirmed by 30m + 1h")
 
 try:
     active_ctx = state.get_execution_context()
