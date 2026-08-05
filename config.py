@@ -1,4 +1,5 @@
 """config.py — MomentumMaster TF configuration."""
+
 import os
 
 try:
@@ -43,7 +44,6 @@ DEFAULT_MARKET_DISPLAY = "Gold (XAU/USD)"
 SYMBOL = AVAILABLE_MARKETS[DEFAULT_MARKET_DISPLAY]
 SYMBOL_DISPLAY = DEFAULT_MARKET_DISPLAY
 
-# 1m and 2m contracts now use the same 5m trigger logic as 5m contracts.
 CANDLE_GRANULARITIES = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 CANDLE_LOOKBACK = 80
 CANDLE_REFRESH_SECONDS = 30
@@ -52,14 +52,14 @@ ENTRY_TIMEFRAME = "15m"
 DEFAULT_ENTRY_TIMEFRAME = "15m"
 
 # Duration-aware trigger candle:
-# 1m and 2m contracts now use the 5m trigger (same logic as 5m contracts).
-# 5m/15m use 5m.
-# 30m/60m use 15m.
+#   1m/2m/5m/15m contracts -> 5m trigger
+#   30m/60m contracts      -> 15m trigger
+# Second contracts (15s-50s) are deliberately NOT listed here: the strategy
+# maps any sub-minute duration onto the 1-minute rule (5m trigger, SHORT regime).
 ENTRY_TIMEFRAME_BY_DURATION = {1: "5m", 2: "5m", 5: "5m", 15: "5m", 30: "15m", 60: "15m"}
 
 TREND_TIMEFRAMES = ["30m", "1h"]
 MAX_TRADES_PER_DAY = 10
-
 ENTRY_SCORE_THRESHOLD = 20
 MTF_MIN_AGREEMENT = 2
 SCORE_MAX = 25
@@ -77,7 +77,6 @@ REGIME_VOL_BAND = {
     "MEDIUM": (0.00008, 0.06),
     "LONG": (0.00006, 0.08),
 }
-
 REGIME_EXHAUSTION_ATR = {"SHORT": 3.25, "MEDIUM": 2.75, "LONG": 2.25}
 REGIME_TRIGGER_BODY_MIN = 0.35
 REGIME_SHORT_5M_ADX_FLOOR = 15
@@ -89,18 +88,22 @@ CONTRACT_DURATION = 30
 CONTRACT_DURATION_UNIT = "m"
 CURRENCY = "USD"
 
+# Contract lengths offered in the terminal, expressed in seconds (Deriv-native).
+# Anything under 60 is sent with duration_unit "s"; the rest as whole minutes.
+SECOND_DURATIONS = [15, 20, 25, 30, 40, 45, 50]
+MINUTE_DURATIONS = [1, 2, 5, 15, 30, 60]
+CONTRACT_DURATION_OPTIONS_SECONDS = SECOND_DURATIONS + [m * 60 for m in MINUTE_DURATIONS]
+
 STRATEGY_SENSITIVITY_PRESETS = {
     "Conservative": {"entry_score_threshold": 20, "entry_adx_floor": 18},
     "Balanced": {"entry_score_threshold": 16, "entry_adx_floor": 15},
     "Aggressive": {"entry_score_threshold": 13, "entry_adx_floor": 12},
 }
-
 DEFAULT_STRATEGY_SENSITIVITY = "Conservative"
 
 MARTINGALE_MULTIPLIER = 2.5
 DEFAULT_INITIAL_STAKE = 1.0
 DEFAULT_MAX_MARTINGALE_STEPS = 3
-
 TICK_BUFFER_SIZE = 500
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
