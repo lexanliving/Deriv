@@ -1,4 +1,9 @@
-"""dashboard.py — MomentumMaster TF terminal (original professional theme)."""
+"""dashboard.py — MomentumMaster TF terminal (original professional theme).
+
+Pure rule-based terminal. The AI research/venture attachments were removed —
+the 25-point confluence engine is the only decision-maker.
+"""
+
 import asyncio
 import html
 import os
@@ -10,7 +15,15 @@ from datetime import datetime, timezone
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit.runtime.scriptrunner import add_script_run_ctx
+
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+except ImportError:
+    try:
+        from streamlit.runtime.scriptrunner_utils import add_script_run_ctx
+    except ImportError:
+        def add_script_run_ctx(thread, ctx=None):
+            return thread
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,9 +46,11 @@ configured_pat = DERIV_API_TOKEN.strip()
 _STAGE_LABEL = {"IDLE": "Scanning", "TREND": "Trend set", "SIGNAL": "Setup armed", "PULLBACK": "Pullback", "MOMENTUM": "Momentum"}
 _MODE_LABEL = {"DEMO": "Demo", "REAL": "Live", "BLOCKED": "Paused", "UNCONFIGURED": "No account", "SIGNAL_ONLY": "Preview"}
 
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_accounts(app_id: str, token: str):
     return asyncio.run(DerivAPIClient.get_accounts(token, app_id))
+
 
 st.markdown(
     """
@@ -125,12 +140,6 @@ if "last_auto_restart" not in st.session_state:
 
 state: StateManager = st.session_state.state_manager
 
-# Attach the background AI-research + venture pipeline (never touches the order path).
-try:
-    from src.research_engine import get_research_engine
-    get_research_engine().attach(state)
-except Exception:
-    pass
 
 def _glitch(where, exc):
     st.markdown(
@@ -141,6 +150,7 @@ def _glitch(where, exc):
     )
     with st.expander("Technical details"):
         st.exception(exc)
+
 
 def _run_engine_in_thread(engine, loop):
     asyncio.set_event_loop(loop)
@@ -160,9 +170,11 @@ def _run_engine_in_thread(engine, loop):
         except Exception:
             pass
 
+
 RESTART_COOLDOWN_SECONDS = 20.0
 MAX_AUTO_RESTARTS = 5
 HEALTHY_WINDOW_SECONDS = 120.0
+
 
 def _today_filled_trade_count(state_obj):
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -174,16 +186,17 @@ def _today_filled_trade_count(state_obj):
             count += 1
     return count
 
+
 def _launch_engine(config, reset_state):
     try:
         if reset_state:
             state.reset_for_new_session(config["initial_stake"])
         else:
             state.clear_error()
-            history = state.get_trade_history()
-            if history and history[0].status == "OPEN":
-                state.update_trade_outcome(history[0].trade_id, "UNKNOWN", 0.0,
-                    "The engine restarted while this contract was open — check the Deriv statement.")
+        history = state.get_trade_history()
+        if history and history[0].status == "OPEN":
+            state.update_trade_outcome(history[0].trade_id, "UNKNOWN", 0.0,
+                                       "The engine restarted while this contract was open — check the Deriv statement.")
         engine = TradingEngine(
             api_token=config["api_token"], app_id=config["app_id"], account_id=config["account_id"],
             account_currency=config["account_currency"], state=state, initial_stake=config["initial_stake"],
@@ -212,6 +225,7 @@ def _launch_engine(config, reset_state):
     thread.start()
     st.session_state.engine_thread = thread
     return True
+
 
 @st.fragment(run_every=2.0)
 def watchdog_fragment():
@@ -246,8 +260,10 @@ def watchdog_fragment():
     if not _launch_engine(config, reset_state=False):
         st.session_state.should_run = False
 
+
 def start_bot(api_token, app_id, account_id, account_currency, account_type, real_execution_confirmed,
-              initial_stake, max_steps, strategy_sensitivity, martingale_multiplier, symbol, symbol_display, duration_minutes):
+              initial_stake, max_steps, strategy_sensitivity, martingale_multiplier, symbol, symbol_display,
+              duration_minutes):
     if st.session_state.engine_thread and st.session_state.engine_thread.is_alive():
         return
     config = {"api_token": api_token, "app_id": app_id, "account_id": account_id,
@@ -263,13 +279,16 @@ def start_bot(api_token, app_id, account_id, account_currency, account_type, rea
     if not _launch_engine(config, reset_state=True):
         st.session_state.should_run = False
 
+
 def stop_bot():
     st.session_state.should_run = False
     state.request_stop()
     state.set_status("Stopping…")
 
+
 with st.sidebar:
     st.markdown("<div style='font-family:Space Grotesk;font-size:0.74rem;color:#6b7c97;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;margin-bottom:14px;'>Setup</div>", unsafe_allow_html=True)
+
     accounts = []
     account_load_error = ""
     if not DERIV_APP_ID or not configured_pat:
@@ -281,12 +300,14 @@ with st.sidebar:
             account_load_error = f"Could not verify the access token: {exc.message}"
         except Exception:
             account_load_error = "Account check failed — confirm the App ID, token, and connection."
+
     account_id = ""
     account_currency = "USD"
     selected_account = None
     selected_account_type = "UNKNOWN"
     real_execution_confirmed = False
     execution_mode = "UNCONFIGURED"
+
     if account_load_error:
         st.error(account_load_error)
     elif not accounts:
@@ -301,15 +322,16 @@ with st.sidebar:
             if _acct_val not in _acct_opts:
                 _acct_val = _acct_opts[0]
             account_id = st.selectbox("Account", options=_acct_opts, index=_acct_opts.index(_acct_val),
-                key="dash_account_pick", disabled=state.is_running,
-                format_func=lambda v: (f"{normalize_account_type(account_map[v].get('account_type', 'unknown'))} · "
-                    f"{v} · {account_map[v].get('currency', 'USD')} {float(account_map[v].get('balance', 0)):,.2f}"))
+                                      key="dash_account_pick", disabled=state.is_running,
+                                      format_func=lambda v: (f"{normalize_account_type(account_map[v].get('account_type', 'unknown'))} · "
+                                                             f"{v} · {account_map[v].get('currency', 'USD')} {float(account_map[v].get('balance', 0)):,.2f}"))
             selected_account = account_map.get(account_id)
             if selected_account:
                 selected_account_type = normalize_account_type(selected_account.get("account_type", "unknown"))
                 account_currency = str(selected_account.get("currency", "USD")).upper()
-            st.success("Connected")
-            st.metric("Balance", f"{account_currency} {float(selected_account.get('balance', 0)):,.2f}")
+                st.success("Connected")
+                st.metric("Balance", f"{account_currency} {float(selected_account.get('balance', 0)):,.2f}")
+
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Market</div>", unsafe_allow_html=True)
     market_options = list(AVAILABLE_MARKETS.keys())
@@ -320,12 +342,14 @@ with st.sidebar:
     market_display = st.selectbox("Market", options=market_options, index=market_index, disabled=state.is_running)
     selected_symbol = AVAILABLE_MARKETS.get(market_display, next(iter(AVAILABLE_MARKETS.values()), ""))
     st.caption("Up = Call · Down = Put. Direction only — no barriers.")
+
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Contract</div>", unsafe_allow_html=True)
     default_duration = CONTRACT_DURATION if CONTRACT_DURATION_UNIT == "m" else 30
     duration_minutes = st.select_slider("Length (minutes)", options=[1, 2, 5, 15, 30, 60], value=default_duration, disabled=state.is_running)
     entry_tf = ENTRY_TIMEFRAME_BY_DURATION.get(int(duration_minutes), DEFAULT_ENTRY_TIMEFRAME)
     st.caption("Up to 10 trades a day.")
+
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Account safety</div>", unsafe_allow_html=True)
     if selected_account:
@@ -341,6 +365,7 @@ with st.sidebar:
         else:
             st.error("Unknown account type — orders are blocked.")
         execution_mode = resolve_execution_mode(selected_account_type, real_execution_confirmed)
+
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Stake</div>", unsafe_allow_html=True)
     initial_stake = st.number_input("Starting stake", min_value=0.35, max_value=10000.0, value=float(DEFAULT_INITIAL_STAKE), step=0.5, format="%.2f", disabled=state.is_running)
@@ -351,6 +376,7 @@ with st.sidebar:
         stakes.append(round(stakes[-1] * martingale_multiplier, 2))
     ccy_tag = f" {account_currency}" if selected_account else ""
     st.caption(f"Steps: {' → '.join(f'{s:.2f}' for s in stakes)} · max exposure {sum(stakes):.2f}{ccy_tag}")
+
     st.divider()
     st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Selectivity</div>", unsafe_allow_html=True)
     _sens_opts = list(STRATEGY_SENSITIVITY_PRESETS.keys()) or ["Conservative"]
@@ -358,7 +384,7 @@ with st.sidebar:
     strategy_sensitivity = st.select_slider("How strict", options=_sens_opts, value=_sens_val, disabled=state.is_running)
     preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, {}) or {}
     if duration_minutes <= 2:
-        regime_note = "scalp → 1m trigger; 5m must trend; power candles get the express lane"
+        regime_note = "scalp → 5m trigger; trend must agree; power candles get the express lane"
     elif duration_minutes <= 15:
         regime_note = "short → 5m trigger; 5m must trend & decisive body"
     elif duration_minutes <= 30:
@@ -366,23 +392,14 @@ with st.sidebar:
     else:
         regime_note = "long → 15m trigger; 30m + 1h agree, 1h ADX & MACD confirm"
     st.caption(f"Needs {preset.get('entry_score_threshold', SCORE_MAX)}/{SCORE_MAX} · {entry_tf} ADX ≥ {preset.get('entry_adx_floor', 15)} · {regime_note}")
+
     st.divider()
-    st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Venture governor</div>", unsafe_allow_html=True)
-    venture_on = st.toggle(
-        "Venture control (AI risk governor)",
-        value=st.session_state.get("venture_on", True),
-        key="venture_on",
-        help="ON = the AI panel can scale stake / block trades it judges POOR (only once enough trade history exists). OFF = purely advisory, never blocks.")
-    try:
-        from src.venture_engine import set_venture_enabled
-        set_venture_enabled(bool(venture_on))
-    except Exception:
-        pass
     col_start, col_stop = st.columns(2)
     with col_start:
         start_pressed = st.button("Start", type="primary", use_container_width=True, disabled=state.is_running)
     with col_stop:
         stop_pressed = st.button("Stop", type="secondary", use_container_width=True, disabled=not state.is_running)
+
     if start_pressed:
         if not selected_account:
             st.error("Choose a Deriv account first.")
@@ -397,24 +414,32 @@ with st.sidebar:
     if stop_pressed:
         stop_bot()
         st.rerun()
+
     st.divider()
-    st.caption(f"Market  {market_display} · {selected_symbol}\n\nContract  Call / Put · {duration_minutes}m\n\nTrend  {entry_tf} trigger, confirmed by 30m + 1h")
+    st.caption(f"Market {market_display} · {selected_symbol}\n\nContract Call / Put · {duration_minutes}m\n\nTrend {entry_tf} trigger, confirmed by 30m + 1h")
 
 try:
     active_ctx = state.get_execution_context()
     if state.is_running:
-        display_account_id = active_ctx.get("account_id", ""); display_account_type = active_ctx.get("account_type", "UNKNOWN")
-        display_currency = active_ctx.get("currency", "USD"); display_mode = active_ctx.get("execution_mode", "UNCONFIGURED")
+        display_account_id = active_ctx.get("account_id", "")
+        display_account_type = active_ctx.get("account_type", "UNKNOWN")
+        display_currency = active_ctx.get("currency", "USD")
+        display_mode = active_ctx.get("execution_mode", "UNCONFIGURED")
     elif selected_account:
-        display_account_id = account_id; display_account_type = selected_account_type
-        display_currency = account_currency; display_mode = execution_mode
+        display_account_id = account_id
+        display_account_type = selected_account_type
+        display_currency = account_currency
+        display_mode = execution_mode
     else:
-        display_account_id = ""; display_account_type = "UNKNOWN"; display_currency = account_currency; display_mode = "UNCONFIGURED"
+        display_account_id = ""
+        display_account_type = "UNKNOWN"
+        display_currency = account_currency
+        display_mode = "UNCONFIGURED"
     mode_line = _MODE_LABEL.get(display_mode, "Paused")
     acct_id_short = html.escape(display_account_id[:8]) if display_account_id else "—"
     st.markdown(
         f'<div class="mm-header"><div>'
-        f'<div class="mm-logo">Momentum <span class="mm-dot">·</span>Master '
+        f'<div class="mm-logo">Momentum<span class="mm-dot">·</span>Master '
         f'<span style="color:#6b7c97;font-weight:500;font-size:0.8rem;letter-spacing:0.1em;">TF</span></div>'
         f'<div class="mm-eyebrow">Multi-timeframe trend system</div>'
         f'<div class="mm-sub">{html.escape(str(market_display))} · {html.escape(str(selected_symbol))}</div>'
@@ -425,6 +450,7 @@ try:
     )
 except Exception as _e:
     _glitch("Header", _e)
+
 
 @st.fragment(run_every=2.0)
 def status_fragment():
@@ -441,12 +467,14 @@ def status_fragment():
     except Exception as _e:
         _glitch("Status", _e)
 
-def _kpi(label, value, sub=" ", accent="#33507e", val_color="#eef3fb", hero=False):
+
+def _kpi(label, value, sub="", accent="#33507e", val_color="#eef3fb", hero=False):
     cls = "mm-kpi mm-kpi-hero" if hero else "mm-kpi"
     return (f'<div class="{cls}" style="--accent:{accent};--val:{val_color};">'
             f'<div class="mm-kpi__label">{html.escape(label)}</div>'
             f'<div class="mm-kpi__value">{html.escape(value)}</div>'
             f'<div class="mm-kpi__sub">{html.escape(sub)}</div></div>')
+
 
 @st.fragment(run_every=2.0)
 def metrics_fragment():
@@ -477,12 +505,15 @@ def metrics_fragment():
     except Exception as _e:
         _glitch("Metrics", _e)
 
+
 def _chart_layout(height):
     return dict(paper_bgcolor="#0a1120", plot_bgcolor="#0a1120",
-        font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
-        xaxis=dict(gridcolor="#16223c", tickcolor="#16223c", rangeslider_visible=False, tickfont=dict(size=9), showspikes=True, spikecolor="#33507e", spikethickness=1),
-        yaxis=dict(gridcolor="#16223c", tickcolor="#16223c", side="right", tickfont=dict(size=9), tickformat=".5f"),
-        margin=dict(l=8, r=8, t=8, b=8), height=height, showlegend=False, dragmode="pan")
+                font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
+                xaxis=dict(gridcolor="#16223c", tickcolor="#16223c", rangeslider_visible=False, tickfont=dict(size=9),
+                           showspikes=True, spikecolor="#33507e", spikethickness=1),
+                yaxis=dict(gridcolor="#16223c", tickcolor="#16223c", side="right", tickfont=dict(size=9), tickformat=".5f"),
+                margin=dict(l=8, r=8, t=8, b=8), height=height, showlegend=False, dragmode="pan")
+
 
 @st.fragment(run_every=5.0)
 def chart_fragment():
@@ -491,9 +522,12 @@ def chart_fragment():
         if candles:
             dfc = candles[-120:]
             times = pd.to_datetime([c.get("epoch") for c in dfc], unit="s", utc=True)
-            o = [float(c.get("open")) for c in dfc]; h = [float(c.get("high")) for c in dfc]
-            l = [float(c.get("low")) for c in dfc]; cl = [float(c.get("close")) for c in dfc]
-            last = cl[-1]; first = cl[0]
+            o = [float(c.get("open")) for c in dfc]
+            h = [float(c.get("high")) for c in dfc]
+            l = [float(c.get("low")) for c in dfc]
+            cl = [float(c.get("close")) for c in dfc]
+            last = cl[-1]
+            first = cl[0]
             chg = last - first
             chg_pct = (chg / first * 100) if first else 0.0
             chg_cls = "pos" if chg >= 0 else "neg"
@@ -504,13 +538,15 @@ def chart_fragment():
                 f'<span class="{chg_cls}" style="font-family:JetBrains Mono,monospace;font-size:.8rem;font-weight:600">{chg:+.5f} ({chg_pct:+.2f}%)</span></div>',
                 unsafe_allow_html=True)
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=times, y=cl, mode="lines", line=dict(color="rgba(127,176,255,0.35)", width=1), showlegend=False, hoverinfo="skip"))
-            fig.add_trace(go.Candlestick(x=times, open=o, high=h, low=l, close=cl, name=" ",
-                increasing_line_color="#34d399", increasing_fillcolor="#34d399",
-                decreasing_line_color="#fb7185", decreasing_fillcolor="#fb7185", whiskerwidth=0.5,
-                hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>L %{low:.5f}  C %{close:.5f}<extra></extra>"))
-            fig.add_trace(go.Scatter(x=[times.iloc[-1] if hasattr(times, "iloc") else times[-1]], y=[last], mode="markers",
-                marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)), showlegend=False, hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=times, y=cl, mode="lines", line=dict(color="rgba(127,176,255,0.35)", width=1),
+                                     showlegend=False, hoverinfo="skip"))
+            fig.add_trace(go.Candlestick(x=times, open=o, high=h, low=l, close=cl, name="",
+                                         increasing_line_color="#34d399", increasing_fillcolor="#34d399",
+                                         decreasing_line_color="#fb7185", decreasing_fillcolor="#fb7185", whiskerwidth=0.5,
+                                         hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>L %{low:.5f}  C %{close:.5f}<extra></extra>"))
+            fig.add_trace(go.Scatter(x=[times[-1]], y=[last], mode="markers",
+                                     marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)),
+                                     showlegend=False, hoverinfo="skip"))
             fig.add_hline(y=last, line=dict(color="#34d399", width=1, dash="dot"), opacity=0.45)
             fig.update_layout(**_chart_layout(360))
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
@@ -520,16 +556,19 @@ def chart_fragment():
                 st.info("Waiting for market data — the 5m chart fills in within ~30s of connecting.")
                 return
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=list(range(len(ticks))), y=ticks, mode="lines", line=dict(color="#3884ff", width=1.6), hovertemplate="price %{y:.5f}<extra></extra>"))
-            fig.add_trace(go.Scatter(x=[len(ticks) - 1], y=[ticks[-1]], mode="markers", marker=dict(color="#10b981", size=9, line=dict(color="#06281f", width=1)), hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=list(range(len(ticks))), y=ticks, mode="lines",
+                                     line=dict(color="#3884ff", width=1.6), hovertemplate="price %{y:.5f}<extra></extra>"))
+            fig.add_trace(go.Scatter(x=[len(ticks) - 1], y=[ticks[-1]], mode="markers",
+                                     marker=dict(color="#10b981", size=9, line=dict(color="#06281f", width=1)), hoverinfo="skip"))
             fig.update_layout(paper_bgcolor="#0a1120", plot_bgcolor="#0a1120",
-                font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
-                xaxis=dict(gridcolor="#16223c", showticklabels=False, zeroline=False),
-                yaxis=dict(gridcolor="#16223c", zeroline=False, side="right", tickformat=".5f"),
-                margin=dict(l=8, r=8, t=8, b=8), height=360, showlegend=False)
+                              font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
+                              xaxis=dict(gridcolor="#16223c", showticklabels=False, zeroline=False),
+                              yaxis=dict(gridcolor="#16223c", zeroline=False, side="right", tickformat=".5f"),
+                              margin=dict(l=8, r=8, t=8, b=8), height=360, showlegend=False)
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     except Exception as _e:
         _glitch("5m chart", _e)
+
 
 @st.fragment(run_every=2.0)
 def state_panel_fragment():
@@ -549,7 +588,8 @@ def state_panel_fragment():
                 chips.append(f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>')
         chips_html = f'<div class="mm-chips">{" ".join(chips)}</div>' if chips else ""
         stage = s.get("pattern_stage", "IDLE")
-        stage_colors = {"IDLE": ("#5b6b85", "#10182b"), "TREND": ("#a78bfa", "#1a1430"), "PULLBACK": ("#fbbf24", "#241c08"), "MOMENTUM": ("#3884ff", "#0c1730"), "SIGNAL": ("#34d399", "#08241a")}
+        stage_colors = {"IDLE": ("#5b6b85", "#10182b"), "TREND": ("#a78bfa", "#1a1430"), "PULLBACK": ("#fbbf24", "#241c08"),
+                        "MOMENTUM": ("#3884ff", "#0c1730"), "SIGNAL": ("#34d399", "#08241a")}
         sc, sbg = stage_colors.get(stage, ("#5b6b85", "#10182b"))
         stage_label = _STAGE_LABEL.get(stage, stage)
         score = int(s.get("last_signal_score", 0))
@@ -584,6 +624,7 @@ def state_panel_fragment():
     except Exception as _e:
         _glitch("Status rail", _e)
 
+
 @st.fragment(run_every=10.0)
 def ledger_fragment():
     try:
@@ -595,22 +636,29 @@ def ledger_fragment():
         records = []
         for t in history[:50]:
             pnl_str = f"+{t.pnl:.2f}" if t.pnl > 0 else f"{t.pnl:.2f}" if t.pnl < 0 else "0.00"
-            records.append({"Time": t.timestamp, "Side": t.direction, "Stake": t.stake, "Entry": t.entry_price, "Result": t.status, "P&L": pnl_str, "Step": t.martingale_step})
+            records.append({"Time": t.timestamp, "Side": t.direction, "Stake": t.stake, "Entry": t.entry_price,
+                            "Result": t.status, "P&L": pnl_str, "Step": t.martingale_step})
         df = pd.DataFrame(records)
+
         def st_status(v):
-            return {"WON": "color:#34d399;font-weight:700;", "LOST": "color:#fb7185;font-weight:700;", "OPEN": "color:#fbbf24;font-weight:600;", "CANCELLED": "color:#6b7c97;"}.get(v, "")
+            return {"WON": "color:#34d399;font-weight:700;", "LOST": "color:#fb7185;font-weight:700;",
+                    "OPEN": "color:#fbbf24;font-weight:600;", "CANCELLED": "color:#6b7c97;"}.get(v, "")
+
         def st_pnl(v):
             try:
                 n = float(str(v).replace("+", ""))
                 return "color:#34d399;font-weight:700;" if n > 0 else ("color:#fb7185;font-weight:700;" if n < 0 else "")
             except Exception:
                 return ""
+
         def st_dir(v):
             return "color:#34d399;" if v == "BUY" else ("color:#fb7185;" if v == "SELL" else "")
+
         styled = (df.style.map(st_status, subset=["Result"]).map(st_pnl, subset=["P&L"]).map(st_dir, subset=["Side"]))
         st.dataframe(styled, use_container_width=True, height=320, hide_index=True)
     except Exception as _e:
         _glitch("Trades ledger", _e)
+
 
 @st.fragment(run_every=15.0)
 def journal_fragment():
@@ -619,21 +667,25 @@ def journal_fragment():
         st.markdown('<div class="mm-ledger-head">Decision log · every trigger-candle review</div>', unsafe_allow_html=True)
         csv_bytes = journal.to_csv_bytes()
         if csv_bytes:
-            st.download_button("Download decision log (CSV)", data=csv_bytes, file_name="momentummaster_journal.csv", mime="text/csv", use_container_width=True)
+            st.download_button("Download decision log (CSV)", data=csv_bytes, file_name="momentummaster_journal.csv",
+                               mime="text/csv", use_container_width=True)
         rows = journal.read_rows()
         if not rows:
             st.caption("Every trigger-candle review is recorded here — whether it traded or stood aside — along with the result and the reason.")
             return
         df = pd.DataFrame(rows).tail(40).iloc[::-1]
-        cols = ["timestamp_utc", "symbol", "direction", "trend", "taken", "score", "threshold", "rejection_reason", "note", "outcome", "pnl"]
+        cols = ["timestamp_utc", "symbol", "direction", "trend", "taken", "score", "threshold", "rejection_reason",
+                "note", "outcome", "pnl"]
         cols = [c for c in cols if c in df.columns]
         st.dataframe(df[cols], use_container_width=True, height=300, hide_index=True)
     except Exception as _e:
         _glitch("Decision log", _e)
 
+
 watchdog_fragment()
 status_fragment()
 metrics_fragment()
+
 col_chart, col_rail = st.columns([3, 1], gap="medium")
 with col_chart:
     chart_fragment()
