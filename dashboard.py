@@ -36,6 +36,7 @@ from config import (
 )
 from src.api_client import DerivAPIClient, DerivAPIError
 from src.journal import get_journal
+from src.persistence import export_archive_csv_bytes, export_merged_json_bytes, import_journal
 from src.state_manager import StateManager
 from src.trading_engine import TradingEngine, normalize_account_type, resolve_execution_mode
 
@@ -682,6 +683,50 @@ def journal_fragment():
         _glitch("Decision log", _e)
 
 
+@st.fragment(run_every=30.0)
+def backup_fragment():
+    try:
+        journal = get_journal()
+        with st.expander("💾 Backup & restore — protect the journal against reboots", expanded=False):
+            st.caption(
+                "Streamlit Cloud reboots wipe the local log files. Download a backup after a session "
+                "(or before a reboot), then import the same file here to restore everything. "
+                "The merge is idempotent — importing the same file twice adds nothing, so it is always safe.")
+            b1, b2 = st.columns(2)
+            with b1:
+                st.download_button("Download backup (CSV)", data=export_archive_csv_bytes(journal),
+                                   file_name="momentummaster_backup.csv", mime="text/csv",
+                                   use_container_width=True, key="bk_dl_csv")
+            with b2:
+                st.download_button("Download backup (JSON)", data=export_merged_json_bytes(journal),
+                                   file_name="momentummaster_backup.json", mime="application/json",
+                                   use_container_width=True, key="bk_dl_json")
+            up = st.file_uploader("Import a downloaded backup file", type=["csv", "json"], key="bk_file")
+            if up is not None:
+                if st.button("Restore backup now", type="primary", use_container_width=True, key="bk_go"):
+                    try:
+                        st.session_state["bk_result"] = import_journal(journal, up.read(), up.name)
+                    except Exception as exc:
+                        st.session_state["bk_result"] = {"error": str(exc)}
+                    st.cache_data.clear()
+                    st.rerun()
+            res = st.session_state.get("bk_result")
+            if res:
+                if "error" in res:
+                    st.error("Restore failed: " + str(res["error"]))
+                else:
+                    added = int(res.get("eval_added", 0)) + int(res.get("outcome_added", 0))
+                    skipped = int(res.get("skipped", 0))
+                    errors = int(res.get("errors", 0))
+                    if added == 0:
+                        st.info(f"Already up to date — {skipped} rows were already present.")
+                    else:
+                        st.success(f"Restored {added} rows ({res.get('eval_added', 0)} reviews, "
+                                   f"{res.get('outcome_added', 0)} outcomes) · {skipped} already present · {errors} errors.")
+    except Exception as _e:
+        _glitch("Backup & restore", _e)
+
+
 watchdog_fragment()
 status_fragment()
 metrics_fragment()
@@ -691,5 +736,6 @@ with col_chart:
     chart_fragment()
     ledger_fragment()
     journal_fragment()
+    backup_fragment()
 with col_rail:
     state_panel_fragment()
