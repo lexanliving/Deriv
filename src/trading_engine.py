@@ -2,7 +2,8 @@
 
 The engine is intentionally separate from the candle strategy. It consumes raw
 quotes, asks the strategy for a digit signal, requests a live proposal, and
-only buys after the quote and execution gates pass.
+only buys after the digit, account, operational, and proposal-validity gates pass.
+Proposal payout is logged for audit; estimated edge is not an execution gate.
 """
 
 from __future__ import annotations
@@ -68,12 +69,10 @@ class TradingEngine:
         real_execution_confirmed: bool = False,
         martingale_multiplier: float = MARTINGALE_MULTIPLIER,
         quote_precision: int = 2,
-        min_over6_share: float = 0.35,
+        min_over6_share: float = 0.31,
         lower_tick_max: int = 6,
         review_interval_seconds: float = 60.0,
-        require_quote_edge: bool = True,
-        min_quote_edge: float = 0.02,
-        max_session_loss: float = 0.0,
+        take_profit_target: float = 0.0,
         digit_windows: Optional[Dict[str, int]] = None,
         **_: Any,
     ) -> None:
@@ -97,9 +96,7 @@ class TradingEngine:
         self.min_over6_share = float(min_over6_share)
         self.lower_tick_max = int(lower_tick_max)
         self.review_interval_seconds = float(review_interval_seconds)
-        self.require_quote_edge = bool(require_quote_edge)
-        self.min_quote_edge = float(min_quote_edge)
-        self.max_session_loss = max(0.0, float(max_session_loss))
+        self.take_profit_target = max(0.0, float(take_profit_target))
         self._client: Optional[DerivAPIClient] = None
         self._strategy = DigitStrategyEngine(
             contract_duration_ticks=self.contract_duration,
@@ -160,10 +157,11 @@ class TradingEngine:
             return False, "starting up"
         if self._daily_trade_count >= MAX_TRADES_PER_DAY:
             return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
-        if self.max_session_loss > 0:
-            pnl = float(self.state.get_performance_stats().get("total_pnl", 0.0))
-            if pnl <= -self.max_session_loss:
-                return False, f"session loss stop reached ({pnl:.2f})"
+        if self.take_profit_target > 0:
+            pnl = float(self.state.get_performance_stats().get("session_pnl", 0.0))
+            if pnl >= self.take_profit_target:
+                self.state.request_stop()
+                return False, f"session take-profit reached ({pnl:.2f} / {self.take_profit_target:.2f})"
         warmup = INITIAL_WARMUP_COOLDOWN_SECONDS - (now_mono - self._engine_ready_monotonic)
         if warmup > 0:
             return False, f"warming up, {warmup:.0f}s left"
@@ -200,8 +198,6 @@ class TradingEngine:
         reason: str = "",
         ask_price: Any = "",
         payout: Any = "",
-        break_even: Any = "",
-        quote_edge: Any = "",
     ) -> None:
         if not entry_record:
             return
@@ -213,8 +209,6 @@ class TradingEngine:
         record["note"] = record.get("note", "") or ""
         record["quote_ask"] = ask_price
         record["quote_payout"] = payout
-        record["quote_break_even"] = break_even
-        record["quote_edge"] = quote_edge
         self._journal.record_evaluation(record)
 
     # --------------------------------------------------------------- lifecycle
@@ -269,10 +263,11 @@ class TradingEngine:
         await self._validate_symbol()
         await self._seed_history()
         self._engine_ready_monotonic = time.monotonic()
+        target_text = f" · take-profit {self.take_profit_target:.2f}" if self.take_profit_target > 0 else ""
         self.state.set_status(
-            f"Live digit review on {self.symbol_display}. Reviewing every minute; first entry possible in "
-            f"{INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s."
-        )
+                f"Live digit review on {self.symbol_display}. Reviewing every minute; first entry possible in "
+                f"{INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s{target_text}."
+            )
 
         try:
             await self._client.subscribe_ticks(self.symbol, self._on_tick)
@@ -288,8 +283,8 @@ class TradingEngine:
                     fast = (review.get("p_over6_fast") or 0) * 100
                     medium = (review.get("p_over6_medium") or 0) * 100
                     self.state.set_status(
-                        f"Digit review · 7–9 {fast:.1f}% fast / {medium:.1f}% medium · "
-                        f"{review.get('rejection_reason') or 'armed for lower-tick confirmation'}"
+                        f"Digit review · 7–9 {fast:.1f}% fast / {medium:.1f}% medium; "
+                        f"per-digit comparison active · {review.get('rejection_reason') or 'armed for lower-tick confirmation'}"
                     )
 
                 self._push_strategy_state()
@@ -443,22 +438,11 @@ class TradingEngine:
             if not proposal_id or ask_price <= 0 or payout <= 0:
                 raise DerivAPIError("Deriv returned an invalid digit proposal.", "INVALID_RESPONSE")
 
-            metrics = (entry_record or {})
-            estimates = [metrics.get("p_over6_fast"), metrics.get("p_over6_medium"), metrics.get("p_over6_slow")]
-            estimates = [float(x) for x in estimates if x not in (None, "")]
-            estimated_probability = min(estimates) if estimates else 0.0
-            break_even = ask_price / payout
-            quote_edge = estimated_probability - break_even
-            if self.require_quote_edge and quote_edge < self.min_quote_edge:
-                reason = (f"quote edge {quote_edge:.2%} below required {self.min_quote_edge:.2%} "
-                          f"(estimated p={estimated_probability:.2%}, break-even={break_even:.2%})")
-                self._record_entry_decision(entry_record, False, reason, ask_price, payout, break_even, quote_edge)
-                self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
-                self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
-                self.state.set_status(f"Over 6 quote rejected — {reason}")
-                return
-
-            self._record_entry_decision(entry_record, True, "", ask_price, payout, break_even, quote_edge)
+            # The proposal is required for the actual stake/price, but the
+            # previous estimated-edge heuristic is intentionally not a gate.
+            # The digit condition itself controls qualification; ask and payout
+            # remain in the journal for audit and settlement reconciliation.
+            self._record_entry_decision(entry_record, True, "", ask_price, payout)
             if self.state.stop_requested:
                 raise DerivAPIError("Stop requested before buy; no order was submitted.", "STOP_REQUESTED")
             self.state.set_status(f"Buying Over 6 for {self.contract_duration} tick(s) at {ask_price:.2f}…")
@@ -517,6 +501,7 @@ class TradingEngine:
         finally:
             self._active_contract_id = None
             self._trade_in_progress = False
+            self._strategy.on_trade_finished(allow_rearm=not self.state.stop_requested)
 
     async def _monitor_contract(self, contract_id: int, buy_price: float, payout: float) -> tuple[str, float]:
         expected = self._contract_duration_seconds()
