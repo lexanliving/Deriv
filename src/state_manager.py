@@ -40,7 +40,7 @@ class StateManager:
         "strategy_mode": "_strategy_mode", "digit_barrier": "_digit_barrier",
         "digit_precision": "_digit_precision", "last_digit": "_last_digit",
         "digit_counts": "_digit_counts", "digit_windows": "_digit_windows",
-        "digit_armed": "_digit_armed", "digit_lower_confirmed": "_digit_lower_confirmed",
+        "digit_armed": "_digit_armed", "digit_condition_valid": "_digit_condition_valid", "digit_lower_confirmed": "_digit_lower_confirmed",
         "digit_lower_confirmation": "_digit_lower_confirmation", "digit_last_rejection": "_digit_last_rejection",
         "digit_contract_duration_ticks": "_digit_contract_duration_ticks",
     }
@@ -72,6 +72,7 @@ class StateManager:
         self._digit_counts: Dict[str, int] = {}
         self._digit_windows: Dict[str, Any] = {}
         self._digit_armed = False
+        self._digit_condition_valid = False
         self._digit_lower_confirmed = False
         self._digit_lower_confirmation = None
         self._digit_last_rejection = ""
@@ -138,7 +139,8 @@ class StateManager:
                     "strategy_mode": self._strategy_mode, "digit_barrier": self._digit_barrier,
                     "digit_precision": self._digit_precision, "last_digit": self._last_digit,
                     "digit_counts": dict(self._digit_counts), "digit_windows": dict(self._digit_windows),
-                    "digit_armed": self._digit_armed, "digit_lower_confirmed": self._digit_lower_confirmed,
+                    "digit_armed": self._digit_armed, "digit_condition_valid": self._digit_condition_valid,
+                    "digit_lower_confirmed": self._digit_lower_confirmed,
                     "digit_lower_confirmation": self._digit_lower_confirmation,
                     "digit_last_rejection": self._digit_last_rejection,
                     "digit_contract_duration_ticks": self._digit_contract_duration_ticks}
@@ -278,7 +280,7 @@ class StateManager:
             self._last_signal_score = 0; self._last_signal_score_breakdown = {}
             self._strategy_mode = "CANDLE"; self._digit_barrier = 6; self._digit_precision = 2
             self._last_digit = None; self._digit_counts = {}; self._digit_windows = {}
-            self._digit_armed = False; self._digit_lower_confirmed = False
+            self._digit_armed = False; self._digit_condition_valid = False; self._digit_lower_confirmed = False
             self._digit_lower_confirmation = None; self._digit_last_rejection = ""
             self._digit_contract_duration_ticks = 0
             self._current_martingale_step = 0
