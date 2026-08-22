@@ -17,9 +17,9 @@ A review arms the Over 6 setup when all of the following are true:
 | Minimum 7–9 share | At least 31% by default in the fast and medium windows. The dashboard shows this as `31%`, not `0.31`. |
 | User comparison | The average 7–9 digit frequency (`7–9 share ÷ 3`) is greater than the average 1–6 digit frequency (`1–6 share ÷ 6`) in the fast and medium windows. |
 | Slow support | The 200-tick window has at least 30% 7–9 and the average 7–9 digit frequency exceeds the average 1–6 digit frequency there. |
-| Review cadence | One evaluation per minute bucket. Each qualifying review resets the lower-confirmation sequence and establishes the new boundary at that minute bucket. |
-| Lower confirmation | The review tick and any delayed/pre-review tick do not count. Only ticks with an epoch strictly greater than the review boundary count toward the configured number of consecutive digits from 0 through 6; the default remains one lower digit. A 7–9 digit after the boundary resets the sequence. |
-| Entry tick | The final required lower digit itself queues the Over 6 entry immediately; there is no extra higher-digit gap. For `N=3`, a review at `38:00` requires eligible lower ticks at `38:01`, `38:02`, and `38:03`, with entry triggered on `38:03`. |
+| Review cadence | One evaluation per minute bucket. Each qualifying review resets the lower-confirmation sequence and establishes the boundary at the actual timestamp when that review executes. |
+| Lower confirmation | The review tick, any tick already received before the review callback, and any tick from an unreviewed new minute do not count. Only ticks with an epoch strictly greater than the actual review boundary count toward the configured number of consecutive digits from 0 through 6; the default remains one lower digit. A 7–9 digit after the boundary resets the sequence. |
+| Entry tick | The final required lower digit itself queues the Over 6 entry immediately; there is no extra higher-digit gap. For `N=3`, a review executing at `38:00` requires eligible lower ticks at `38:01`, `38:02`, and `38:03`, with entry triggered on `38:03`. A signal left pending from the preceding review window is discarded at the new boundary rather than executed at `:00`. |
 
 The default contract request is `DIGITOVER` with barrier `6`, duration `1` tick. The user can select `2` ticks. A two-tick contract settles on the last digit of its final expiry tick; it does not provide two separate chances.
 
