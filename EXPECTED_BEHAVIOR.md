@@ -17,13 +17,13 @@ A review arms the Over 6 setup when all of the following are true:
 | Minimum 7–9 share | At least 31% by default in the fast and medium windows. The dashboard shows this as `31%`, not `0.31`. |
 | User comparison | The average 7–9 digit frequency (`7–9 share ÷ 3`) is greater than the average 1–6 digit frequency (`1–6 share ÷ 6`) in the fast and medium windows. |
 | Slow support | The 200-tick window has at least 30% 7–9 and the average 7–9 digit frequency exceeds the average 1–6 digit frequency there. |
-| Review cadence | One evaluation per minute bucket. |
-| Lower confirmation | After arming, the configured number of consecutive digits from 0 through 6 must print; the default remains one lower digit. A 7–9 digit resets the sequence. |
-| Entry tick | The final required lower digit itself queues the Over 6 entry immediately; there is no extra higher-digit gap. |
+| Review cadence | One evaluation per minute bucket. Each qualifying review resets the lower-confirmation sequence and establishes the new boundary at that minute bucket. |
+| Lower confirmation | The review tick and any delayed/pre-review tick do not count. Only ticks with an epoch strictly greater than the review boundary count toward the configured number of consecutive digits from 0 through 6; the default remains one lower digit. A 7–9 digit after the boundary resets the sequence. |
+| Entry tick | The final required lower digit itself queues the Over 6 entry immediately; there is no extra higher-digit gap. For `N=3`, a review at `38:00` requires eligible lower ticks at `38:01`, `38:02`, and `38:03`, with entry triggered on `38:03`. |
 
 The default contract request is `DIGITOVER` with barrier `6`, duration `1` tick. The user can select `2` ticks. A two-tick contract settles on the last digit of its final expiry tick; it does not provide two separate chances.
 
-The qualifying direction is Over 6. If the percentages do not qualify, it waits. Under 6 remains represented in the diagnostics and comparison logic but is not forced as a counter-trade. The lower digits are only an entry-timing trigger; they do not replace the 7–9 concentration condition. The final required lower digit is both the confirmation and the entry trigger. After a signal is consumed, the strategy is reserved for that execution and cannot queue another signal until the trade result is finalized. After a contract finishes, it re-arms for a new confirmation sequence only when the last minute-reviewed condition is still valid. A later invalid review disarms it.
+The qualifying direction is Over 6. If the percentages do not qualify, it waits. Under 6 remains represented in the diagnostics and comparison logic but is not forced as a counter-trade. The lower digits are only an entry-timing trigger; they do not replace the 7–9 concentration condition. The final required lower digit is both the confirmation and the entry trigger. After a signal is consumed, the strategy is reserved for that execution and cannot queue another signal until the trade result is finalized. After a contract finishes, it re-arms for a new confirmation sequence only when the last minute-reviewed condition is still valid; the repeat sequence starts strictly after the post-settlement boundary, so prior ticks cannot satisfy it. A later invalid review disarms it.
 
 ## Quote and order sequence
 
@@ -43,12 +43,12 @@ If a buy receipt or contract settlement cannot be confirmed, the position is cla
 
 ## Journaling
 
-Every minute review is recorded, including stand-asides. Digit records include the selected index, strategy mode, barrier, tick duration, quote precision, exact rolling counts, combined 7–9 and 1–6 percentages, per-digit average percentages, group and per-digit dominance, required and observed lower-confirmation count, lower confirmation digit, entry digit, proposal ask/payout, and rejection reason. Shared reservation rejections identify duplicate, cooldown, daily-cap, or unresolved-settlement protection.
+Every minute review is recorded, including stand-asides. Digit records include the selected index, strategy mode, barrier, tick duration, quote precision, exact rolling counts, combined 7–9 and 1–6 percentages, per-digit average percentages, group and per-digit dominance, review timestamp and boundary epoch, required and observed lower-confirmation count, lower confirmation digit, entry digit, confirmation tick epoch, proposal ask/payout, and rejection reason. Shared reservation rejections identify duplicate, cooldown, daily-cap, or unresolved-settlement protection.
 
 Settled trades merge their outcome, P&L, stake, recovery step, contract ID, and execution mode into the corresponding signal row. The append-only archive remains the master record for backup and historical review.
 
 ## Validation status
 
-The delivered source has been statically compiled, the digit state machine has been tested for minute cadence, lower-tick confirmation, repeated entry while the condition remains valid, disarming below the threshold, quote precision, and no-arm behavior, the fake-client integration path has been tested for `DIGITOVER`, tick duration, proposal validation, buying, settlement, and 1.10 recovery sizing, the journal merge has been tested, shared coordination has been tested for same-market exclusivity, same-minute attempt blocking, cooldown, recovery stake, and daily-cap sharing, and the Streamlit health endpoint has responded successfully in headless mode.
+The delivered source has been statically compiled, the digit state machine has been tested for minute cadence, strict post-review boundary timing, N=1/2/3 lower-tick confirmation, cross-review sequence reset, higher-digit reset, repeated entry while the condition remains valid, disarming below the threshold, quote precision, and no-arm behavior, the fake-client integration path has been tested for `DIGITOVER`, tick duration, proposal validation, buying, settlement, and 1.10 recovery sizing, the journal merge has been tested, shared coordination has been tested for same-market exclusivity, same-minute attempt blocking, cooldown, recovery stake, and daily-cap sharing, and the Streamlit health endpoint has responded successfully in headless mode.
 
 This guide describes the implemented behavior; it is not a promise of profitability. The first real-world run should use a demo account, fixed stake, and a sufficiently long journal sample before enabling recovery sizing or real orders. The positive take-profit is an entry stop, not a guarantee that every open contract will settle profitably.
