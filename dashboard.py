@@ -549,7 +549,7 @@ def journal_fragment():
         "timestamp_utc", "symbol", "direction", "taken", "rejection_reason", "score",
         "p_over6_fast", "p_over6_medium", "p_over6_slow", "p_over6_avg_fast", "p_over6_avg_medium", "p_over6_avg_slow",
         "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow", "lower_confirmation_digit",
-        "entry_digit", "quote_ask", "quote_payout", "outcome", "pnl",
+        "lower_confirmation_required", "lower_confirmation_count", "entry_digit", "quote_ask", "quote_payout", "outcome", "pnl",
     ]
     cols = [col for col in preferred if col in df.columns]
     st.dataframe(df[cols], use_container_width=True, height=320, hide_index=True)
