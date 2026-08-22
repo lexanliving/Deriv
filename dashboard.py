@@ -500,7 +500,10 @@ def digit_panel_fragment():
         required_lower = int(s.get("digit_required_lower_confirmations", 1) or 1)
         lower_count = int(s.get("digit_lower_confirmation_count", 0) or 0)
         if armed and confirmed:
-            st.success(f"Lower sequence confirmed ({lower_count}/{required_lower}). The next tick is eligible for Over 6.")
+            if s.get("pattern_stage") == "SIGNAL":
+                st.success(f"Entry triggered on the final lower digit ({lower_count}/{required_lower}); awaiting execution.")
+            else:
+                st.success(f"Lower sequence confirmed ({lower_count}/{required_lower}); entry trigger recorded.")
         elif armed:
             st.warning(f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive.")
         else:
@@ -549,7 +552,7 @@ def journal_fragment():
     preferred = [
         "timestamp_utc", "symbol", "direction", "taken", "rejection_reason", "score",
         "p_over6_fast", "p_over6_medium", "p_over6_slow", "p_over6_avg_fast", "p_over6_avg_medium", "p_over6_avg_slow",
-        "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow", "review_timestamp_utc", "confirmation_boundary_utc",
+        "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow", "review_timestamp_utc", "confirmation_boundary_utc", "review_epoch", "confirmation_boundary_epoch", "entry_tick_epoch",
         "lower_confirmation_digit", "lower_confirmation_required", "lower_confirmation_count", "entry_digit", "quote_ask", "quote_payout", "outcome", "pnl",
     ]
     cols = [col for col in preferred if col in df.columns]
