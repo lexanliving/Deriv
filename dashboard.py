@@ -32,11 +32,10 @@ from config import (
     DIGIT_DEFAULT_TICK_DURATION,
     DIGIT_DEFAULT_RECOVERY_ENABLED,
     DIGIT_DEFAULT_RECOVERY_MULTIPLIER,
+    DIGIT_DEFAULT_PROFIT_TARGET,
     DIGIT_MAX_RECOVERY_STEPS,
     DIGIT_LOWER_CONFIRM_MAX,
     DIGIT_MIN_OVER6_SHARE,
-    DIGIT_MIN_QUOTE_EDGE,
-    DIGIT_REQUIRE_QUOTE_EDGE,
     DIGIT_REVIEW_INTERVAL_SECONDS,
     DIGIT_TICK_DURATION_OPTIONS,
     DIGIT_WINDOWS,
@@ -117,6 +116,18 @@ def _load_accounts(app_id: str, token: str):
     return asyncio.run(DerivAPIClient.get_accounts(token, app_id))
 
 
+def _is_derived_index(item: Dict[str, Any]) -> bool:
+    symbol = str(item.get("symbol", "")).strip().upper()
+    metadata = " ".join(str(item.get(key, "")) for key in ("market", "market_type", "submarket", "symbol_type", "display_name", "name")).lower()
+    financial_markers = ("forex", "financial", "commodit", "stock", "crypto", "exchange")
+    index_markers = ("synthetic", "derived", "volatility", "jump", "boom", "crash", "step index", "range break")
+    if any(marker in metadata for marker in financial_markers):
+        return False
+    if any(marker in metadata for marker in index_markers):
+        return True
+    return symbol.startswith(("1HZ", "R_", "JD", "BOOM", "CRASH", "STPRNG", "RDBULL", "RDBEAR"))
+
+
 @st.cache_data(ttl=180, show_spinner=False)
 def _load_live_digit_markets(app_id: str, token: str, account_id: str):
     """Load all symbols the selected account/API currently exposes for digits."""
@@ -130,7 +141,7 @@ def _load_live_digit_markets(app_id: str, token: str, account_id: str):
             for item in symbols:
                 symbol = str(item.get("symbol", "")).strip()
                 suspended = str(item.get("is_trading_suspended", "")).strip().lower() in {"1", "true", "yes", "y"}
-                if not symbol or suspended:
+                if not symbol or suspended or not _is_derived_index(item):
                     continue
                 label = str(item.get("display_name") or item.get("name") or symbol).strip()
                 if label in result and result[label] != symbol:
@@ -185,10 +196,8 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
             min_over6_share=config["min_over6_share"],
             lower_tick_max=config["lower_tick_max"],
             review_interval_seconds=config["review_interval_seconds"],
-            require_quote_edge=config["require_quote_edge"],
-            min_quote_edge=config["min_quote_edge"],
             digit_windows=config["digit_windows"],
-            max_session_loss=config.get("max_session_loss", 0.0),
+            take_profit_target=config.get("take_profit_target", 0.0),
         )
         if not reset_state:
             engine._daily_trade_count = _today_filled_trade_count(state)
@@ -331,6 +340,7 @@ with st.sidebar:
     default_label = DEFAULT_MARKET_DISPLAY if DEFAULT_MARKET_DISPLAY in market_catalog else labels[0]
     market_display = st.selectbox("Market", options=labels, index=labels.index(default_label), disabled=state.is_running)
     selected_symbol = market_catalog[market_display]
+    st.caption("Indices only: Volatility, Jump, Boom, Crash, Step Index, and Range Break. Forex, commodities, stocks, and crypto are excluded.")
 
     st.divider()
     duration_ticks = st.select_slider(
@@ -344,10 +354,9 @@ with st.sidebar:
 
     st.divider()
     st.markdown("#### Strategy rule")
-    min_over6_share = st.slider("Minimum recent 7–9 share", 0.30, 0.60, float(DIGIT_MIN_OVER6_SHARE), 0.01, disabled=state.is_running, format="%.0f%%")
-    require_quote_edge = st.checkbox("Require quote-aware edge", value=bool(DIGIT_REQUIRE_QUOTE_EDGE), disabled=state.is_running)
-    min_quote_edge = st.slider("Minimum estimated edge", 0.00, 0.15, float(DIGIT_MIN_QUOTE_EDGE), 0.01, disabled=state.is_running, format="%.0f%%")
-    st.caption(f"Fast/medium/slow windows: {DIGIT_WINDOWS['fast']} / {DIGIT_WINDOWS['medium']} / {DIGIT_WINDOWS['slow']} ticks · lower confirmation ≤ {DIGIT_LOWER_CONFIRM_MAX}")
+    min_over6_share_pct = st.slider("Minimum recent 7–9 share (%)", 30, 60, int(round(DIGIT_MIN_OVER6_SHARE * 100)), 1, disabled=state.is_running)
+    min_over6_share = min_over6_share_pct / 100.0
+    st.caption(f"{min_over6_share_pct}% means at least that share of recent ticks ends in 7, 8, or 9. Because the groups contain 3 versus 6 digits, the rule compares average frequency per digit: (7–9 share ÷ 3) > (1–6 share ÷ 6). Fast/medium use {min_over6_share_pct}%; slow support uses at least {max(30, min_over6_share_pct - 1)}%. Windows: {DIGIT_WINDOWS['fast']} / {DIGIT_WINDOWS['medium']} / {DIGIT_WINDOWS['slow']} ticks; lower confirmation ≤ {DIGIT_LOWER_CONFIRM_MAX}.")
 
     st.divider()
     st.markdown("#### Account safety")
@@ -367,8 +376,8 @@ with st.sidebar:
     max_steps = st.slider("Maximum recovery steps", 0, int(DIGIT_MAX_RECOVERY_STEPS), int(DIGIT_MAX_RECOVERY_STEPS if use_martingale else 0), disabled=state.is_running)
     if not use_martingale:
         max_steps = 0
-    max_session_loss = st.number_input("Optional session loss stop", min_value=0.0, max_value=100000.0, value=0.0, step=1.0, format="%.2f", disabled=state.is_running, help="0 disables this stop. The bot stops before a new entry once session P&L reaches this loss.")
-    st.caption("A 1.10 multiplier grows slowly, but it still increases exposure after losses. Fixed stake is recommended until demo evidence supports recovery sizing.")
+    take_profit_target = st.number_input("Session take-profit target", min_value=0.0, max_value=100000.0, value=float(DIGIT_DEFAULT_PROFIT_TARGET), step=1.0, format="%.2f", disabled=state.is_running, help="0 disables the target. When session P&L reaches this positive amount, the bot stops before a new entry.")
+    st.caption("Recovery: 1.10 means the next stake is 110% of the previous stake after a loss. Take-profit stops new entries only after positive session P&L reaches your target; there is no session loss-stop.")
 
     st.divider()
     c1, c2 = st.columns(2)
@@ -391,7 +400,7 @@ with st.sidebar:
                 "initial_stake": float(initial_stake),
                 "max_steps": int(max_steps),
                 "martingale_multiplier": float(martingale_multiplier),
-                "max_session_loss": float(max_session_loss),
+                "take_profit_target": float(take_profit_target),
                 "symbol": selected_symbol,
                 "symbol_display": market_display,
                 "duration_ticks": int(duration_ticks),
@@ -399,8 +408,6 @@ with st.sidebar:
                 "min_over6_share": float(min_over6_share),
                 "lower_tick_max": DIGIT_LOWER_CONFIRM_MAX,
                 "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
-                "require_quote_edge": bool(require_quote_edge),
-                "min_quote_edge": float(min_quote_edge),
                 "digit_windows": dict(DIGIT_WINDOWS),
             })
             st.rerun()
@@ -438,10 +445,15 @@ def metrics_fragment():
     wins = stats["wins"]
     losses = stats["losses"]
     cards = st.columns(5)
+    medium = s.get("digit_windows", {}).get("medium", {}) or {}
+    medium_count = int(medium.get("count", 0) or 0)
+    medium_high = int(medium.get("over6_count", 0) or 0)
+    condition_valid = bool(s.get("digit_condition_valid"))
+    digit_state = "ARMED" if s.get("digit_armed") else ("QUALIFYING" if condition_valid else "DISARMED")
     values = [
         ("Last digit", str(s.get("last_digit") if s.get("last_digit") is not None else "—"), "latest quote digit"),
-        ("Over 6 reviews", f"{s.get('digit_windows', {}).get('medium', {}).get('p_over6', 0) * 100:.1f}%", "medium window 7–9"),
-        ("Digit state", "ARMED" if s.get("digit_armed") else "WAITING", "lower tick confirmation"),
+        ("7–9 share", f"{medium_high}/{medium_count} = {float(medium.get('p_over6', 0)) * 100:.1f}%", "medium window"),
+        ("Digit state", digit_state, "lower tick confirmation"),
         ("Session P&L", f"{stats['total_pnl']:+.2f}", f"{wins}W · {losses}L"),
         ("Next stake", f"{mart['stake']:.2f}", f"recovery step {mart['step']}"),
     ]
@@ -461,13 +473,19 @@ def digit_panel_fragment():
         rows = []
         for name in ("fast", "medium", "slow"):
             w = windows.get(name) or {}
+            count = int(w.get("count", 0) or 0)
+            high_count = int(w.get("over6_count", 0) or 0)
+            comparison_count = int(w.get("comparison_count_1to6", 0) or 0)
             rows.append({
-                "Window": f"{name} · {w.get('count', 0)} ticks",
-                "7–9": f"{float(w.get('p_over6', 0)) * 100:.1f}%",
-                "1–6": f"{float(w.get('p_1to6', 0)) * 100:.1f}%",
-                "Dominance": f"{float(w.get('dominance', 0)) * 100:+.1f}%",
+                "Window": f"{name} · {count} ticks",
+                "7–9 total": f"{high_count}/{count} = {float(w.get('p_over6', 0)) * 100:.1f}%",
+                "7–9 avg/digit": f"{float(w.get('p_over6_avg', 0)) * 100:.1f}% each",
+                "1–6 total": f"{comparison_count}/{count} = {float(w.get('p_1to6', 0)) * 100:.1f}%",
+                "1–6 avg/digit": f"{float(w.get('p_1to6_avg', 0)) * 100:.1f}% each",
+                "Per-digit gap": f"{float(w.get('per_digit_dominance', 0)) * 100:+.1f} pp",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Example: 60.0% in a 20-tick window means 12 of 20 ticks ended in 7, 8, or 9. The strategy compares average frequency per digit as well: 60% ÷ 3 = 20% for each 7–9 digit group, versus the 1–6 average.")
         armed = bool(s.get("digit_armed"))
         confirmed = bool(s.get("digit_lower_confirmed"))
         if armed and confirmed:
@@ -480,7 +498,7 @@ def digit_panel_fragment():
         st.markdown('<div class="mm-section">Digit counts · current buffer</div>', unsafe_allow_html=True)
         data = [{"Digit": d, "Count": int(counts.get(str(d), 0))} for d in range(10)]
         st.dataframe(pd.DataFrame(data), use_container_width=True, height=250, hide_index=True)
-        st.caption("Numeric counts only; no extra chart is rendered. A trade is sent only after the strategy condition, lower-tick confirmation, safety gates, and live quote edge all pass.")
+        st.caption("Numeric counts only; no extra chart is rendered. A trade is sent only after the strategy condition, lower-tick confirmation, account safeguards, and a valid Deriv proposal all pass. Proposal payout is recorded but is not used as a guessed edge signal.")
 
 
 @st.fragment(run_every=8.0)
@@ -519,8 +537,9 @@ def journal_fragment():
     df = pd.DataFrame(rows).tail(50).iloc[::-1]
     preferred = [
         "timestamp_utc", "symbol", "direction", "taken", "rejection_reason", "score",
-        "p_over6_fast", "p_over6_medium", "p_over6_slow", "lower_confirmation_digit",
-        "entry_digit", "quote_break_even", "quote_edge", "outcome", "pnl",
+        "p_over6_fast", "p_over6_medium", "p_over6_slow", "p_over6_avg_fast", "p_over6_avg_medium", "p_over6_avg_slow",
+        "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow", "lower_confirmation_digit",
+        "entry_digit", "quote_ask", "quote_payout", "outcome", "pnl",
     ]
     cols = [col for col in preferred if col in df.columns]
     st.dataframe(df[cols], use_container_width=True, height=320, hide_index=True)
