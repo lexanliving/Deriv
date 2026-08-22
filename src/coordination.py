@@ -122,6 +122,7 @@ class SharedMarketCoordinator:
             "daily_filled": 0,
             "in_flight": False,
             "entry_minute": "",
+            "last_attempt_minute": "",
             "last_filled_minute": "",
             "blocked": False,
             "blocked_reason": "",
@@ -189,8 +190,8 @@ class SharedMarketCoordinator:
             else:
                 return {"allowed": False, "reason": "another session has an unresolved trade for this market"}
         current_minute = self._minute_key(current)
-        if state.get("last_filled_minute") == current_minute:
-            return {"allowed": False, "reason": "same-market same-minute entry already completed; duplicate blocked"}
+        if state.get("last_attempt_minute") == current_minute:
+            return {"allowed": False, "reason": "same-market same-minute attempt already sent; duplicate blocked"}
         cooldown = max(0.0, float(state.get("cooldown_until", 0.0)) - current)
         if cooldown > 0:
             return {"allowed": False, "reason": f"shared cooldown active for {cooldown:.0f}s"}
@@ -201,6 +202,7 @@ class SharedMarketCoordinator:
         state["trade_id"] = str(trade_id)
         state["claimed_at"] = current
         state["entry_minute"] = current_minute
+        state["last_attempt_minute"] = current_minute
         state["bought_at"] = 0.0
         state["bought"] = False
         self._write_state(state)
