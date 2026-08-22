@@ -37,6 +37,12 @@ class StateManager:
         "micro_bias": "_micro_bias", "last_entry_mode": "_last_entry_mode",
         "last_signal_score": "_last_signal_score",
         "last_signal_score_breakdown": "_last_signal_score_breakdown",
+        "strategy_mode": "_strategy_mode", "digit_barrier": "_digit_barrier",
+        "digit_precision": "_digit_precision", "last_digit": "_last_digit",
+        "digit_counts": "_digit_counts", "digit_windows": "_digit_windows",
+        "digit_armed": "_digit_armed", "digit_lower_confirmed": "_digit_lower_confirmed",
+        "digit_lower_confirmation": "_digit_lower_confirmation", "digit_last_rejection": "_digit_last_rejection",
+        "digit_contract_duration_ticks": "_digit_contract_duration_ticks",
     }
     def __init__(self):
         self._lock = threading.Lock()
@@ -45,7 +51,6 @@ class StateManager:
         self._recent_ticks = deque(maxlen=TICK_BUFFER_SIZE)
         self._tick_timestamps = deque(maxlen=TICK_BUFFER_SIZE)
         self._total_ticks_processed = 0
-        self._candles_5m: List[Dict[str, Any]] = []
         self._current_trend_direction: Optional[str] = None
         self._trend_tick_count = 0
         self._trend_kind: Optional[str] = None
@@ -60,6 +65,17 @@ class StateManager:
         self._last_entry_mode: Optional[str] = None
         self._last_signal_score = 0
         self._last_signal_score_breakdown: Dict[str, int] = {}
+        self._strategy_mode = "CANDLE"
+        self._digit_barrier = 6
+        self._digit_precision = 2
+        self._last_digit = None
+        self._digit_counts: Dict[str, int] = {}
+        self._digit_windows: Dict[str, Any] = {}
+        self._digit_armed = False
+        self._digit_lower_confirmed = False
+        self._digit_lower_confirmation = None
+        self._digit_last_rejection = ""
+        self._digit_contract_duration_ticks = 0
         self._current_martingale_step = 0
         self._current_stake = DEFAULT_INITIAL_STAKE
         self._initial_stake = DEFAULT_INITIAL_STAKE
@@ -105,13 +121,6 @@ class StateManager:
     def get_recent_ticks(self):
         with self._lock:
             return list(self._recent_ticks)
-    def update_candles_5m(self, candles):
-        with self._lock:
-            src = candles or []
-            self._candles_5m = [{"open": c.get("open"), "high": c.get("high"), "low": c.get("low"), "close": c.get("close"), "epoch": c.get("epoch")} for c in src if c is not None][-120:]
-    def get_candles_5m(self):
-        with self._lock:
-            return list(self._candles_5m)
     def get_tick_heartbeat(self):
         with self._lock:
             last_tick_time = self._tick_timestamps[-1] if self._tick_timestamps else None
@@ -125,7 +134,14 @@ class StateManager:
                     "mtf_agreement": self._mtf_agreement, "mtf_tf_biases": dict(self._mtf_tf_biases),
                     "micro_bias": self._micro_bias, "last_entry_mode": self._last_entry_mode,
                     "last_signal_score": self._last_signal_score,
-                    "last_signal_score_breakdown": dict(self._last_signal_score_breakdown)}
+                    "last_signal_score_breakdown": dict(self._last_signal_score_breakdown),
+                    "strategy_mode": self._strategy_mode, "digit_barrier": self._digit_barrier,
+                    "digit_precision": self._digit_precision, "last_digit": self._last_digit,
+                    "digit_counts": dict(self._digit_counts), "digit_windows": dict(self._digit_windows),
+                    "digit_armed": self._digit_armed, "digit_lower_confirmed": self._digit_lower_confirmed,
+                    "digit_lower_confirmation": self._digit_lower_confirmation,
+                    "digit_last_rejection": self._digit_last_rejection,
+                    "digit_contract_duration_ticks": self._digit_contract_duration_ticks}
     def update_strategy_state(self, **kwargs):
         with self._lock:
             self._apply_strategy_state(kwargs)
@@ -254,13 +270,17 @@ class StateManager:
             self._current_price = 0.0
             self._recent_ticks.clear(); self._tick_timestamps.clear()
             self._total_ticks_processed = 0
-            self._candles_5m = []
             self._current_trend_direction = None; self._trend_tick_count = 0; self._trend_kind = None
             self._trades_in_current_trend = 0; self._in_cooldown = False
             self._pattern_stage = "IDLE"; self._pattern_ticks = []
             self._mtf_bias = None; self._mtf_agreement = 0; self._mtf_tf_biases = {}
             self._micro_bias = None; self._last_entry_mode = None
             self._last_signal_score = 0; self._last_signal_score_breakdown = {}
+            self._strategy_mode = "CANDLE"; self._digit_barrier = 6; self._digit_precision = 2
+            self._last_digit = None; self._digit_counts = {}; self._digit_windows = {}
+            self._digit_armed = False; self._digit_lower_confirmed = False
+            self._digit_lower_confirmation = None; self._digit_last_rejection = ""
+            self._digit_contract_duration_ticks = 0
             self._current_martingale_step = 0
             self._initial_stake = initial_stake; self._current_stake = initial_stake
             self._trade_history = deque(maxlen=TRADE_HISTORY_LIMIT)
