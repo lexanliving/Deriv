@@ -35,7 +35,7 @@ COLUMNS = [
     "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow",
     "dominance_fast", "dominance_medium", "dominance_slow",
     "per_digit_dominance_fast", "per_digit_dominance_medium", "per_digit_dominance_slow",
-    "lower_confirmation_digit", "entry_digit", "quote_ask", "quote_payout",
+    "lower_confirmation_digit", "lower_confirmation_required", "lower_confirmation_count", "entry_digit", "quote_ask", "quote_payout",
     "quote_break_even", "quote_edge", "review_type",
 ]
 ARCHIVE_COLUMNS = ["kind"] + COLUMNS
