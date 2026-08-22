@@ -12,7 +12,6 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
-from config import CANDLE_LOOKBACK
 from src.logger import get_logger
 
 logger = get_logger("api_client")
@@ -404,14 +403,40 @@ class DerivAPIClient:
 
         return float(value)
 
-    async def get_active_symbols(self) -> List[Dict[str, Any]]:
-        response = await self._send_request({"active_symbols": "brief"})
+    async def get_active_symbols(self, full: bool = False, contract_types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        payload: Dict[str, Any] = {"active_symbols": "full" if full else "brief"}
+        if contract_types:
+            payload["contract_type"] = list(contract_types)
+        response = await self._send_request(payload)
         symbols = response.get("active_symbols")
 
         if not isinstance(symbols, list):
             raise DerivAPIError("Deriv returned an invalid active_symbols response.", "INVALID_RESPONSE")
 
         return [s for s in symbols if isinstance(s, dict)]
+
+    async def get_contracts_for(self, symbol: str) -> Dict[str, Any]:
+        response = await self._send_request({"contracts_for": str(symbol)})
+        value = response.get("contracts_for")
+        if not isinstance(value, dict):
+            raise DerivAPIError("Deriv returned an invalid contracts_for response.", "INVALID_RESPONSE")
+        return value
+
+    async def get_ticks_history(self, symbol: str, count: int = 500) -> Dict[str, Any]:
+        response = await self._send_request({
+            "ticks_history": str(symbol),
+            "count": max(1, int(count)),
+            "end": "latest",
+            "style": "ticks",
+        })
+        history = response.get("history")
+        if not isinstance(history, dict):
+            raise DerivAPIError("Deriv returned an invalid tick-history response.", "INVALID_RESPONSE")
+        prices = history.get("prices")
+        times = history.get("times")
+        if not isinstance(prices, list) or not isinstance(times, list):
+            raise DerivAPIError("Deriv returned incomplete tick-history data.", "INVALID_RESPONSE")
+        return {"prices": prices, "times": times}
 
     async def subscribe_ticks(self, symbol: str, callback) -> Dict[str, Any]:
         self._tick_callback = callback
@@ -440,22 +465,6 @@ class DerivAPIClient:
                 await self._send_request({"forget": subscription_id})
             except DerivAPIError as exc:
                 logger.debug("Tick unsubscribe could not be confirmed: %s", exc)
-
-    async def get_candles(self, symbol: str, granularity: int, count: int = CANDLE_LOOKBACK) -> List[Dict[str, Any]]:
-        response = await self._send_request({
-            "ticks_history": symbol,
-            "style": "candles",
-            "granularity": granularity,
-            "count": count,
-            "end": "latest",
-        })
-
-        candles = response.get("candles")
-
-        if not isinstance(candles, list):
-            raise DerivAPIError("Deriv returned an invalid candle-history response.", "INVALID_RESPONSE")
-
-        return [c for c in candles if isinstance(c, dict)]
 
     async def get_proposal(
         self,
