@@ -311,8 +311,9 @@ class TradingEngine:
         self._engine_ready_monotonic = time.monotonic()
         target_text = f" · take-profit {self.take_profit_target:.2f}" if self.take_profit_target > 0 else ""
         self.state.set_status(
-                f"Live digit review on {self.symbol_display}. Reviewing every minute; first entry possible in "
-                f"{INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s{target_text}."
+                f"Live digit review on {self.symbol_display}. Reviewing every minute; lower confirmation N="
+                f"{self.required_lower_confirmations}; first eligible tick must be strictly after the review timestamp; "
+                f"first entry possible in {INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s{target_text}."
             )
 
         try:
