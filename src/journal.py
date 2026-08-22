@@ -27,6 +27,13 @@ COLUMNS = [
     "outcome", "pnl", "stake", "martingale_step", "contract_id",
     "execution_mode", "regime", "duration_min", "mae", "mfe",
     "tf_5m", "tf_15m", "tf_30m", "tf_1h", "mtf_agreement",
+    "strategy_mode", "barrier", "duration_unit", "digit_precision", "last_digit",
+    "digit_counts_fast", "digit_counts_medium", "digit_counts_slow",
+    "p_over6_fast", "p_over6_medium", "p_over6_slow",
+    "p_low_fast", "p_low_medium", "p_low_slow",
+    "dominance_fast", "dominance_medium", "dominance_slow",
+    "lower_confirmation_digit", "entry_digit", "quote_ask", "quote_payout",
+    "quote_break_even", "quote_edge", "review_type",
 ]
 ARCHIVE_COLUMNS = ["kind"] + COLUMNS
 OUTCOME_MERGE_FIELDS = (
