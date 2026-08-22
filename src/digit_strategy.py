@@ -127,8 +127,12 @@ class DigitStrategyEngine:
 
         if allow_signal and self._armed and self._pending_signal is None:
             # A minute review establishes the boundary; never count the review
-            # tick itself or any delayed/pre-review tick as confirmation.
-            if self._confirmation_boundary_epoch is not None and tick_epoch <= self._confirmation_boundary_epoch:
+            # tick itself, a tick from an unreviewed new bucket, or any delayed/
+            # pre-review tick as confirmation.
+            tick_bucket = int(tick_epoch // self.review_interval_seconds)
+            if self._last_review_bucket is None or tick_bucket > self._last_review_bucket:
+                self._last_rejection = "waiting for the current minute review before confirmation"
+            elif self._confirmation_boundary_epoch is None or tick_epoch <= self._confirmation_boundary_epoch:
                 self._last_rejection = "waiting for first tick after the minute review boundary"
             elif not self._confirmation_seen:
                 if digit <= self.low_digit_max:
@@ -210,8 +214,20 @@ class DigitStrategyEngine:
         if self._last_review_bucket == bucket:
             return None
         self._last_review_bucket = bucket
-        review_boundary_epoch = float(bucket * self.review_interval_seconds)
+        # The boundary is the actual qualifying-review execution timestamp.
+        # Using `current` prevents a tick received before a delayed review
+        # callback from being counted merely because it shares the same minute.
+        review_boundary_epoch = current
         self._confirmation_boundary_epoch = review_boundary_epoch
+
+        # A signal from the preceding review window must never be executed
+        # after this new boundary. This closes the scheduling gap where the
+        # main loop reviews first and consumes a delayed old signal at :00.
+        if self._pending_signal is not None:
+            self._pending_signal = None
+            self._pending_signal_id = None
+            self._entry_evaluation = None
+            self._last_rejection = "pending signal discarded at the new minute review boundary"
 
         stats = {name: self._window_stats(size) for name, size in self.windows.items()}
         qualifies, reason = self._candidate(stats)
@@ -369,9 +385,27 @@ class DigitStrategyEngine:
     def consume_signal(self) -> Optional[str]:
         signal = self._pending_signal
         self._last_consumed_signal_id = self._pending_signal_id
+        pending_record = self._entry_evaluation or {}
         self._pending_signal = None
         self._pending_signal_id = None
         if signal is None:
+            return None
+        try:
+            signal_boundary = float(pending_record.get("confirmation_boundary_epoch"))
+        except (TypeError, ValueError):
+            signal_boundary = None
+        if (self._confirmation_boundary_epoch is not None and signal_boundary is not None
+                and signal_boundary < self._confirmation_boundary_epoch):
+            self._armed = False
+            self._armed_context = None
+            self._confirmation_seen = False
+            self._lower_confirmation_count = 0
+            self._confirmation_digit = None
+            self._confirmation_epoch = None
+            self._confirmation_boundary_epoch = None
+            self._entry_evaluation = None
+            self._last_rejection = "stale digit signal discarded after a newer minute review boundary"
+            self._sync_state_version()
             return None
         if time.time() - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
             self._armed = False
