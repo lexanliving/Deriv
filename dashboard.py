@@ -1,8 +1,6 @@
-"""dashboard.py — MomentumMaster TF terminal (original professional theme).
+"""MomentumMaster Digit — Streamlit terminal for 1–2 tick Over 6 contracts."""
 
-Pure rule-based terminal. Contract lengths include Deriv-native second
-durations (15s-50s), which run the exact 1-minute setup (5m trigger).
-"""
+from __future__ import annotations
 
 import asyncio
 import html
@@ -11,9 +9,9 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Any, Dict, List
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 try:
@@ -28,11 +26,22 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    AVAILABLE_MARKETS, CONTRACT_DURATION, CONTRACT_DURATION_OPTIONS_SECONDS,
-    CONTRACT_DURATION_UNIT, DEFAULT_ENTRY_TIMEFRAME, DEFAULT_INITIAL_STAKE,
-    DEFAULT_MARKET_DISPLAY, DEFAULT_MAX_MARTINGALE_STEPS, DEFAULT_STRATEGY_SENSITIVITY,
-    DERIV_APP_ID, DERIV_API_TOKEN, ENTRY_TIMEFRAME_BY_DURATION, MARTINGALE_MULTIPLIER,
-    SCORE_MAX, STRATEGY_SENSITIVITY_PRESETS,
+    AVAILABLE_MARKETS,
+    DEFAULT_INITIAL_STAKE,
+    DEFAULT_MARKET_DISPLAY,
+    DIGIT_DEFAULT_TICK_DURATION,
+    DIGIT_DEFAULT_RECOVERY_ENABLED,
+    DIGIT_DEFAULT_RECOVERY_MULTIPLIER,
+    DIGIT_MAX_RECOVERY_STEPS,
+    DIGIT_LOWER_CONFIRM_MAX,
+    DIGIT_MIN_OVER6_SHARE,
+    DIGIT_MIN_QUOTE_EDGE,
+    DIGIT_REQUIRE_QUOTE_EDGE,
+    DIGIT_REVIEW_INTERVAL_SECONDS,
+    DIGIT_TICK_DURATION_OPTIONS,
+    DIGIT_WINDOWS,
+    DERIV_APP_ID,
+    DERIV_API_TOKEN,
 )
 from src.api_client import DerivAPIClient, DerivAPIError
 from src.journal import get_journal
@@ -40,89 +49,27 @@ from src.persistence import export_archive_csv_bytes, export_merged_json_bytes, 
 from src.state_manager import StateManager
 from src.trading_engine import TradingEngine, normalize_account_type, resolve_execution_mode
 
-st.set_page_config(page_title="MomentumMaster TF", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="MomentumMaster Digit", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
 configured_pat = DERIV_API_TOKEN.strip()
 
-_STAGE_LABEL = {"IDLE": "Scanning", "TREND": "Trend set", "SIGNAL": "Setup armed", "PULLBACK": "Pullback", "MOMENTUM": "Momentum"}
-_MODE_LABEL = {"DEMO": "Demo", "REAL": "Live", "BLOCKED": "Paused", "UNCONFIGURED": "No account", "SIGNAL_ONLY": "Preview"}
-
-
-def _fmt_duration_option(secs: int) -> str:
-    return f"{secs}s" if secs < 60 else f"{secs // 60}m"
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _load_accounts(app_id: str, token: str):
-    return asyncio.run(DerivAPIClient.get_accounts(token, app_id))
-
-
 st.markdown(
     """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
-html,body,.stApp{background-color:#060912;color:#c7d2e0;font-family:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,sans-serif;}
-.stApp{background-image:radial-gradient(900px 460px at 6% -8%, rgba(16,185,129,0.10), transparent 60%),radial-gradient(820px 440px at 100% 108%, rgba(56,132,255,0.09), transparent 60%),radial-gradient(rgba(120,150,190,0.05) 1px, transparent 1px);background-size:auto,auto,22px 22px;background-attachment:fixed;}
-[data-testid="stMainBlockContainer"]{max-width:1480px;padding-top:1.3rem;}
-[data-testid="stSidebar"]{background-color:#0a0f1c;border-right:1px solid #1b2740;}
-[data-testid="stSidebarNav"]{padding-top:6px;margin-bottom:6px;}
-[data-testid="stSidebarNav"] li button,[data-testid="stSidebarNav"] a{font-family:'Space Grotesk',sans-serif;letter-spacing:.04em;}
-.mm-header{display:flex;align-items:flex-end;justify-content:space-between;padding:4px 2px 14px 2px;position:relative;}
-.mm-header::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,#10b981,#3884ff 45%,transparent 92%);background-size:220% 100%;animation:mm-scan 6s linear infinite;border-radius:2px;}
-@keyframes mm-scan{0%{background-position:120% 0;}100%{background-position:-120% 0;}}
-.mm-logo{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.32rem;letter-spacing:0.18em;color:#eef3fb;text-transform:uppercase;}
-.mm-logo .mm-dot{color:#10b981;}
-.mm-eyebrow{font-family:'Space Grotesk',sans-serif;font-size:.58rem;font-weight:600;letter-spacing:.22em;color:#4f6080;text-transform:uppercase;margin-top:5px;}
-.mm-sub{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:#8294b0;letter-spacing:.03em;margin-top:2px;}
-.mm-acct{text-align:right;font-family:'JetBrains Mono',monospace;}
-.mm-acct .mm-mode{font-size:.86rem;font-weight:600;color:#eef3fb;letter-spacing:.06em;}
-.mm-acct .mm-id{font-size:.68rem;color:#6b7c97;margin-top:2px;}
-.mm-dotlive{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:middle;}
-.mm-run{background:#10b981;animation:mm-pulse 2.2s ease-in-out infinite;}
-.mm-stop{background:#5b6b85;}
-.mm-err{background:#f43f5e;box-shadow:0 0 9px #f43f5e99;}
-@keyframes mm-pulse{0%,100%{box-shadow:0 0 4px rgba(16,185,129,0.5);}50%{box-shadow:0 0 14px rgba(16,185,129,0.95);}}
-.mm-strip{padding:10px 16px;border-radius:9px;font-size:.82rem;font-weight:500;margin:14px 0 18px 0;letter-spacing:.01em;}
-.mm-strip-run{background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.28);color:#34d399;}
-.mm-strip-stop{background:rgba(91,107,133,0.07);border:1px solid rgba(91,107,133,0.22);color:#8294b0;}
-.mm-strip-err{background:rgba(244,63,94,0.09);border:1px solid rgba(244,63,94,0.3);color:#fb7185;}
-.mm-kpi-grid{display:grid;grid-template-columns:1.9fr 1.05fr 0.85fr 0.85fr;gap:14px;margin-bottom:18px;}
-@media(max-width:900px){.mm-kpi-grid{grid-template-columns:1fr 1fr;}}
-.mm-kpi{position:relative;background:linear-gradient(150deg,#0c1426,#0e1830);border:1px solid #1d2c49;border-radius:11px;padding:16px 18px 15px 18px;overflow:hidden;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;}
-.mm-kpi:hover{transform:translateY(-3px);border-color:#33507e;box-shadow:0 10px 26px rgba(0,0,0,0.4);}
-.mm-kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent,#33507e);}
-.mm-kpi-hero{padding-top:20px;padding-bottom:20px;}
-.mm-kpi__label{font-family:'Space Grotesk',sans-serif;font-size:.62rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;}
-.mm-kpi__value{font-family:'JetBrains Mono',monospace;font-weight:700;line-height:1.02;margin-top:8px;color:var(--val,#eef3fb);font-variant-numeric:tabular-nums;}
-.mm-kpi-hero .mm-kpi__value{font-size:clamp(2.3rem,4.4vw,3.4rem);letter-spacing:-0.03em;}
-.mm-kpi:not(.mm-kpi-hero) .mm-kpi__value{font-size:clamp(1.5rem,2.4vw,2rem);}
-.mm-kpi__sub{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#6b7c97;margin-top:7px;}
-.mm-rail{background:linear-gradient(160deg,#0c1426,#0b1222);border:1px solid #1d2c49;border-radius:12px;padding:16px 16px 18px 16px;}
-.mm-rail__label{font-family:'Space Grotesk',sans-serif;font-size:.6rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;margin:13px 0 4px 0;}
-.mm-rail__label:first-child{margin-top:0;}
-.mm-price{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;color:#eef3fb;}
-.mm-caret{display:inline-block;width:7px;color:#10b981;animation:mm-blink 1.1s steps(1) infinite;}
-@keyframes mm-blink{50%{opacity:0;}}
-.mm-trend{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.05rem;letter-spacing:.04em;}
-.mm-up{color:#34d399;} .mm-down{color:#fb7185;} .mm-flat{color:#8294b0;}
-.mm-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
-.mm-chip{font-family:'JetBrains Mono',monospace;font-size:.66rem;font-weight:600;padding:3px 8px;border-radius:6px;border:1px solid #233452;background:#0e1830;}
-.mm-stage{display:inline-block;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:.82rem;letter-spacing:.06em;padding:3px 11px;border-radius:20px;}
-.mm-scorebar{height:7px;border-radius:5px;background:#16223c;overflow:hidden;margin-top:7px;}
-.mm-scorefill{height:100%;border-radius:5px;background:linear-gradient(90deg,#3884ff,#10b981);transition:width .4s ease;}
-.mm-hb{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#6b7c97;margin-top:12px;}
-.mm-ledger-head{font-family:'Space Grotesk',sans-serif;font-size:.7rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;margin:22px 0 10px 0;padding-bottom:7px;border-bottom:1px solid #1b2740;}
-.pos{color:#4ade80;} .neg{color:#fb7185;}
-.mm-glitch{margin:14px 0;padding:14px 16px;border-radius:11px;background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.28);}
-.mm-glitch .t{font-family:'Space Grotesk',sans-serif;font-weight:600;color:#fb7185;font-size:.84rem;letter-spacing:.04em;}
-.mm-glitch .s{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:#9fb0c9;margin-top:6px;line-height:1.5;}
-[data-testid="stDataFrame"]{border:0;}
-[data-testid="stButton"] button{border-radius:8px;font-family:'Space Grotesk',sans-serif;font-weight:600;min-height:2.6rem;letter-spacing:.05em;transition:filter .15s ease,transform .12s ease;}
-[data-testid="stButton"] button:hover{filter:brightness(1.14);}
-[data-testid="stButton"] button:active{transform:scale(0.985);}
-#MainMenu,footer{visibility:hidden;}
-</style>
-""",
+    <style>
+    html,body,.stApp{background:#060912;color:#c7d2e0;font-family:Inter,system-ui,sans-serif;}
+    [data-testid="stSidebar"]{background:#0a0f1c;border-right:1px solid #1b2740;}
+    [data-testid="stMainBlockContainer"]{max-width:1480px;padding-top:1.2rem;}
+    .mm-head{display:flex;justify-content:space-between;align-items:end;border-bottom:2px solid #10b981;padding:8px 0 14px;margin-bottom:14px;}
+    .mm-logo{font-size:1.45rem;font-weight:800;letter-spacing:.12em;color:#eef3fb;text-transform:uppercase;}
+    .mm-logo b{color:#10b981;}.mm-sub{color:#8294b0;font-size:.78rem;margin-top:5px;}
+    .mm-card{background:linear-gradient(150deg,#0c1426,#0e1830);border:1px solid #1d2c49;border-radius:11px;padding:15px 17px;height:100%;}
+    .mm-label{font-size:.64rem;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:#6b7c97;}
+    .mm-value{font-family:monospace;font-size:1.65rem;font-weight:800;color:#eef3fb;margin-top:7px;}
+    .mm-small{font-size:.76rem;color:#8294b0;margin-top:6px;line-height:1.45;}
+    .mm-section{font-size:.72rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97;margin:20px 0 9px;border-bottom:1px solid #1b2740;padding-bottom:7px;}
+    .good{color:#34d399}.bad{color:#fb7185}.warn{color:#fbbf24}.muted{color:#8294b0}
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
@@ -146,26 +93,15 @@ if "last_auto_restart" not in st.session_state:
 state: StateManager = st.session_state.state_manager
 
 
-def _glitch(where, exc):
-    st.markdown(
-        f'<div class="mm-glitch"><div class="t">⚠ {where} hit a snag</div>'
-        f'<div class="s">The bot is fine — this is a rendering edge case, not a trading '
-        f'fault. Details are in the expander; the controls stay live.</div></div>',
-        unsafe_allow_html=True,
-    )
-    with st.expander("Technical details"):
-        st.exception(exc)
-
-
-def _run_engine_in_thread(engine, loop):
+def _run_engine_in_thread(engine: TradingEngine, loop: asyncio.AbstractEventLoop) -> None:
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(engine.run())
     finally:
         try:
-            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-            for t in pending:
-                t.cancel()
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
             if pending:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         except Exception:
@@ -176,23 +112,47 @@ def _run_engine_in_thread(engine, loop):
             pass
 
 
-RESTART_COOLDOWN_SECONDS = 20.0
-MAX_AUTO_RESTARTS = 5
-HEALTHY_WINDOW_SECONDS = 120.0
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_accounts(app_id: str, token: str):
+    return asyncio.run(DerivAPIClient.get_accounts(token, app_id))
 
 
-def _today_filled_trade_count(state_obj):
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    count = 0
-    for t in state_obj.get_trade_history():
-        if getattr(t, "contract_id", None) is None:
-            continue
-        if str(t.timestamp).startswith(today_str):
-            count += 1
-    return count
+@st.cache_data(ttl=180, show_spinner=False)
+def _load_live_digit_markets(app_id: str, token: str, account_id: str):
+    """Load all symbols the selected account/API currently exposes for digits."""
+    async def fetch():
+        client = DerivAPIClient(token, app_id, account_id)
+        if not await client.connect():
+            raise DerivAPIError(client.last_error or "Could not connect while loading markets.", "MARKET_LOAD_FAILED")
+        try:
+            symbols = await client.get_active_symbols(full=True)
+            result = {}
+            for item in symbols:
+                symbol = str(item.get("symbol", "")).strip()
+                suspended = str(item.get("is_trading_suspended", "")).strip().lower() in {"1", "true", "yes", "y"}
+                if not symbol or suspended:
+                    continue
+                label = str(item.get("display_name") or item.get("name") or symbol).strip()
+                if label in result and result[label] != symbol:
+                    label = f"{label} · {symbol}"
+                result[label] = symbol
+            return dict(sorted(result.items(), key=lambda pair: pair[0].lower()))
+        finally:
+            await client.disconnect()
+    return asyncio.run(fetch())
 
 
-def _launch_engine(config, reset_state):
+def _fallback_markets() -> Dict[str, str]:
+    return dict(sorted(AVAILABLE_MARKETS.items(), key=lambda pair: pair[0].lower()))
+
+
+def _today_filled_trade_count(state_obj: StateManager) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return sum(1 for trade in state_obj.get_trade_history()
+               if getattr(trade, "contract_id", None) is not None and str(trade.timestamp).startswith(today))
+
+
+def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
     try:
         if reset_state:
             state.reset_for_new_session(config["initial_stake"])
@@ -200,21 +160,36 @@ def _launch_engine(config, reset_state):
             state.clear_error()
         history = state.get_trade_history()
         if history and history[0].status == "OPEN":
-            state.update_trade_outcome(history[0].trade_id, "UNKNOWN", 0.0,
-                                       "The engine restarted while this contract was open — check the Deriv statement.")
-        dur_s = int(config["duration_seconds"])
-        if dur_s < 60:
-            contract_duration, duration_unit = dur_s, "s"
-        else:
-            contract_duration, duration_unit = dur_s // 60, "m"
+            state.update_trade_outcome(
+                history[0].trade_id,
+                "UNKNOWN",
+                0.0,
+                "The engine restarted while a contract was open — check the Deriv statement.",
+            )
         engine = TradingEngine(
-            api_token=config["api_token"], app_id=config["app_id"], account_id=config["account_id"],
-            account_currency=config["account_currency"], state=state, initial_stake=config["initial_stake"],
-            max_martingale_steps=config["max_steps"], symbol=config["symbol"],
-            symbol_display=config["symbol_display"], contract_duration=contract_duration,
-            contract_duration_unit=duration_unit, strategy_sensitivity=config["strategy_sensitivity"],
-            account_type=config["account_type"], real_execution_confirmed=config["real_execution_confirmed"],
-            martingale_multiplier=config["martingale_multiplier"])
+            api_token=config["api_token"],
+            app_id=config["app_id"],
+            account_id=config["account_id"],
+            account_currency=config["account_currency"],
+            state=state,
+            initial_stake=config["initial_stake"],
+            max_martingale_steps=config["max_steps"],
+            symbol=config["symbol"],
+            symbol_display=config["symbol_display"],
+            contract_duration=config["duration_ticks"],
+            contract_duration_unit="t",
+            account_type=config["account_type"],
+            real_execution_confirmed=config["real_execution_confirmed"],
+            martingale_multiplier=config["martingale_multiplier"],
+            quote_precision=config.get("quote_precision", 2),
+            min_over6_share=config["min_over6_share"],
+            lower_tick_max=config["lower_tick_max"],
+            review_interval_seconds=config["review_interval_seconds"],
+            require_quote_edge=config["require_quote_edge"],
+            min_quote_edge=config["min_quote_edge"],
+            digit_windows=config["digit_windows"],
+            max_session_loss=config.get("max_session_loss", 0.0),
+        )
         if not reset_state:
             engine._daily_trade_count = _today_filled_trade_count(state)
             engine._daily_date = datetime.now(timezone.utc).date()
@@ -223,11 +198,12 @@ def _launch_engine(config, reset_state):
         state.set_error(f"The engine could not start: {exc}")
         state.set_status("Could not start.")
         return False
+
     st.session_state.engine_instance = engine
     state.set_running(True)
     loop = asyncio.new_event_loop()
     st.session_state.engine_loop = loop
-    thread = threading.Thread(target=_run_engine_in_thread, args=(engine, loop), daemon=True, name="TradingEngineThread")
+    thread = threading.Thread(target=_run_engine_in_thread, args=(engine, loop), daemon=True, name="DigitTradingEngineThread")
     try:
         add_script_run_ctx(thread)
     except Exception:
@@ -237,25 +213,32 @@ def _launch_engine(config, reset_state):
     return True
 
 
+RESTART_COOLDOWN_SECONDS = 20.0
+MAX_AUTO_RESTARTS = 5
+HEALTHY_WINDOW_SECONDS = 120.0
+
+
 @st.fragment(run_every=2.0)
 def watchdog_fragment():
     if not st.session_state.get("should_run", False):
         return
+    if state.stop_requested:
+        st.session_state.should_run = False
+        state.set_running(False)
+        return
     thread = st.session_state.get("engine_thread")
     now = time.monotonic()
     if thread is not None and thread.is_alive():
-        last_restart = st.session_state.get("last_auto_restart", 0.0)
-        if (st.session_state.get("auto_restart_count", 0) > 0 and (now - last_restart) > HEALTHY_WINDOW_SECONDS):
+        if st.session_state.get("auto_restart_count", 0) > 0 and now - st.session_state.get("last_auto_restart", 0.0) > HEALTHY_WINDOW_SECONDS:
             st.session_state.auto_restart_count = 0
         return
-    last = st.session_state.get("last_auto_restart", 0.0)
-    if now - last < RESTART_COOLDOWN_SECONDS:
+    if now - st.session_state.get("last_auto_restart", 0.0) < RESTART_COOLDOWN_SECONDS:
         return
     count = st.session_state.get("auto_restart_count", 0)
     if count >= MAX_AUTO_RESTARTS:
         st.session_state.should_run = False
         state.set_running(False)
-        state.set_error(f"The engine stopped {MAX_AUTO_RESTARTS} times in a row — auto-restart is paused. Press Start to try again.")
+        state.set_error(f"The engine stopped {MAX_AUTO_RESTARTS} times in a row — auto-restart paused.")
         state.set_status("Auto-restart paused.")
         st.rerun()
         return
@@ -266,22 +249,14 @@ def watchdog_fragment():
         return
     st.session_state.last_auto_restart = now
     st.session_state.auto_restart_count = count + 1
-    state.set_status(f"The engine stopped unexpectedly — restarting (attempt {count + 1}/{MAX_AUTO_RESTARTS})…")
+    state.set_status(f"Engine stopped unexpectedly — restarting ({count + 1}/{MAX_AUTO_RESTARTS})…")
     if not _launch_engine(config, reset_state=False):
         st.session_state.should_run = False
 
 
-def start_bot(api_token, app_id, account_id, account_currency, account_type, real_execution_confirmed,
-              initial_stake, max_steps, strategy_sensitivity, martingale_multiplier, symbol, symbol_display,
-              duration_seconds):
+def start_bot(config: Dict[str, Any]) -> None:
     if st.session_state.engine_thread and st.session_state.engine_thread.is_alive():
         return
-    config = {"api_token": api_token, "app_id": app_id, "account_id": account_id,
-              "account_currency": account_currency, "account_type": account_type,
-              "real_execution_confirmed": real_execution_confirmed, "initial_stake": initial_stake,
-              "max_steps": max_steps, "strategy_sensitivity": strategy_sensitivity,
-              "martingale_multiplier": martingale_multiplier, "symbol": symbol,
-              "symbol_display": symbol_display, "duration_seconds": int(duration_seconds)}
     st.session_state.engine_config = config
     st.session_state.should_run = True
     st.session_state.auto_restart_count = 0
@@ -290,469 +265,288 @@ def start_bot(api_token, app_id, account_id, account_currency, account_type, rea
         st.session_state.should_run = False
 
 
-def stop_bot():
+def stop_bot() -> None:
     st.session_state.should_run = False
     state.request_stop()
     state.set_status("Stopping…")
 
 
+# ---------------------------------------------------------------------------
+# Sidebar controls
+# ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("<div style='font-family:Space Grotesk;font-size:0.74rem;color:#6b7c97;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;margin-bottom:14px;'>Setup</div>", unsafe_allow_html=True)
+    st.markdown("### Digit terminal")
+    st.caption("Rolling last-digit reviews · Over 6 · 1–2 ticks")
 
-    accounts = []
-    account_load_error = ""
+    accounts: List[Dict[str, Any]] = []
+    account_error = ""
     if not DERIV_APP_ID or not configured_pat:
-        account_load_error = "Add DERIV_APP_ID and DERIV_API_TOKEN to Streamlit Secrets."
+        account_error = "Add DERIV_APP_ID and DERIV_API_TOKEN to Streamlit Secrets or .env."
     else:
         try:
             accounts = _load_accounts(DERIV_APP_ID, configured_pat)
-        except DerivAPIError as exc:
-            account_load_error = f"Could not verify the access token: {exc.message}"
-        except Exception:
-            account_load_error = "Account check failed — confirm the App ID, token, and connection."
+        except Exception as exc:
+            account_error = str(exc)
 
     account_id = ""
     account_currency = "USD"
+    account_type = "UNKNOWN"
     selected_account = None
-    selected_account_type = "UNKNOWN"
     real_execution_confirmed = False
-    execution_mode = "UNCONFIGURED"
 
-    if account_load_error:
-        st.error(account_load_error)
+    if account_error:
+        st.error(account_error)
     elif not accounts:
         st.warning("No active accounts were found.")
     else:
-        account_map = {a["account_id"]: a for a in accounts if a.get("account_id")}
-        if not account_map:
-            st.warning("No usable account IDs were returned.")
-        else:
-            _acct_opts = list(account_map)
-            _acct_val = st.session_state.get("dash_account_pick", _acct_opts[0])
-            if _acct_val not in _acct_opts:
-                _acct_val = _acct_opts[0]
-            account_id = st.selectbox("Account", options=_acct_opts, index=_acct_opts.index(_acct_val),
-                                      key="dash_account_pick", disabled=state.is_running,
-                                      format_func=lambda v: (f"{normalize_account_type(account_map[v].get('account_type', 'unknown'))} · "
-                                                             f"{v} · {account_map[v].get('currency', 'USD')} {float(account_map[v].get('balance', 0)):,.2f}"))
-            selected_account = account_map.get(account_id)
-            if selected_account:
-                selected_account_type = normalize_account_type(selected_account.get("account_type", "unknown"))
-                account_currency = str(selected_account.get("currency", "USD")).upper()
-                st.success("Connected")
-                st.metric("Balance", f"{account_currency} {float(selected_account.get('balance', 0)):,.2f}")
+        account_map = {str(item.get("account_id")): item for item in accounts if item.get("account_id")}
+        options = list(account_map)
+        picked = st.selectbox(
+            "Account",
+            options=options,
+            disabled=state.is_running,
+            format_func=lambda value: (
+                f"{normalize_account_type(account_map[value].get('account_type', 'UNKNOWN'))} · {value} · "
+                f"{account_map[value].get('currency', 'USD')} {float(account_map[value].get('balance', 0)):,.2f}"
+            ),
+        )
+        account_id = picked
+        selected_account = account_map[picked]
+        account_type = normalize_account_type(selected_account.get("account_type", "UNKNOWN"))
+        account_currency = str(selected_account.get("currency", "USD")).upper()
+        st.success(f"{account_type} account · {account_currency} {float(selected_account.get('balance', 0)):,.2f}")
 
     st.divider()
-    st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Market</div>", unsafe_allow_html=True)
-    market_options = list(AVAILABLE_MARKETS.keys())
-    try:
-        market_index = market_options.index(DEFAULT_MARKET_DISPLAY)
-    except ValueError:
-        market_index = 0
-    market_display = st.selectbox("Market", options=market_options, index=market_index, disabled=state.is_running)
-    selected_symbol = AVAILABLE_MARKETS.get(market_display, next(iter(AVAILABLE_MARKETS.values()), ""))
-    st.caption("Up = Call · Down = Put. Direction only — no barriers.")
+    market_catalog = _fallback_markets()
+    if selected_account and DERIV_APP_ID and configured_pat:
+        try:
+            live_catalog = _load_live_digit_markets(DERIV_APP_ID, configured_pat, account_id)
+            if live_catalog:
+                market_catalog = live_catalog
+                st.caption(f"{len(market_catalog)} active markets loaded from Deriv; digit offerings are checked when the engine starts")
+        except Exception as exc:
+            st.caption(f"Live catalogue unavailable; using local list ({str(exc)[:80]})")
+
+    labels = list(market_catalog)
+    default_label = DEFAULT_MARKET_DISPLAY if DEFAULT_MARKET_DISPLAY in market_catalog else labels[0]
+    market_display = st.selectbox("Market", options=labels, index=labels.index(default_label), disabled=state.is_running)
+    selected_symbol = market_catalog[market_display]
 
     st.divider()
-    st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Contract</div>", unsafe_allow_html=True)
-    default_duration_seconds = CONTRACT_DURATION * 60 if CONTRACT_DURATION_UNIT == "m" else int(CONTRACT_DURATION)
-    duration_options = list(CONTRACT_DURATION_OPTIONS_SECONDS)
-    if default_duration_seconds not in duration_options:
-        duration_options = sorted(duration_options + [default_duration_seconds])
-    duration_seconds = st.select_slider("Length", options=duration_options, value=default_duration_seconds,
-                                        disabled=state.is_running, format_func=_fmt_duration_option)
-    if duration_seconds < 60:
-        entry_tf = "5m"  # second contracts trade the exact 1-minute setup
-    else:
-        entry_tf = ENTRY_TIMEFRAME_BY_DURATION.get(duration_seconds // 60, "5m" if duration_seconds <= 900 else "15m")
-    st.caption("Up to 10 trades a day. Second lengths are Deriv-native and use the 1-minute setup (5m trigger) — "
-               "mainly available on synthetic indices; on markets that don't offer them Deriv rejects the quote safely.")
+    duration_ticks = st.select_slider(
+        "Contract duration",
+        options=list(DIGIT_TICK_DURATION_OPTIONS),
+        value=DIGIT_DEFAULT_TICK_DURATION,
+        disabled=state.is_running,
+        format_func=lambda value: f"{value} tick" if value == 1 else f"{value} ticks",
+    )
+    st.caption("Settlement uses the final tick. The confirmation rule waits for one 0–6 tick, then enters on the next tick.")
 
     st.divider()
-    st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Account safety</div>", unsafe_allow_html=True)
-    if selected_account:
-        if selected_account_type == "DEMO":
-            st.success("Demo account — trades use virtual funds.")
-        elif selected_account_type == "REAL":
-            live_confirmation = st.text_input("Type LIVE to allow real orders", value="", max_chars=4, disabled=state.is_running)
-            real_execution_confirmed = live_confirmation == "LIVE"
-            if real_execution_confirmed:
-                st.warning("Real-money trading is ON.")
-            else:
-                st.warning("Real account — orders stay blocked until you type LIVE.")
-        else:
-            st.error("Unknown account type — orders are blocked.")
-        execution_mode = resolve_execution_mode(selected_account_type, real_execution_confirmed)
+    st.markdown("#### Strategy rule")
+    min_over6_share = st.slider("Minimum recent 7–9 share", 0.30, 0.60, float(DIGIT_MIN_OVER6_SHARE), 0.01, disabled=state.is_running, format="%.0f%%")
+    require_quote_edge = st.checkbox("Require quote-aware edge", value=bool(DIGIT_REQUIRE_QUOTE_EDGE), disabled=state.is_running)
+    min_quote_edge = st.slider("Minimum estimated edge", 0.00, 0.15, float(DIGIT_MIN_QUOTE_EDGE), 0.01, disabled=state.is_running, format="%.0f%%")
+    st.caption(f"Fast/medium/slow windows: {DIGIT_WINDOWS['fast']} / {DIGIT_WINDOWS['medium']} / {DIGIT_WINDOWS['slow']} ticks · lower confirmation ≤ {DIGIT_LOWER_CONFIRM_MAX}")
 
     st.divider()
-    st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Stake</div>", unsafe_allow_html=True)
+    st.markdown("#### Account safety")
+    if selected_account and account_type == "REAL":
+        live_text = st.text_input("Type LIVE to enable real orders", max_chars=4, disabled=state.is_running)
+        real_execution_confirmed = live_text == "LIVE"
+        st.warning("Real-money orders are ON." if real_execution_confirmed else "Real account: orders remain blocked until LIVE is typed exactly.")
+    elif selected_account and account_type == "DEMO":
+        st.success("Demo account: virtual funds only.")
+    elif selected_account:
+        st.error("Unrecognized account type: orders are blocked.")
+
+    st.divider()
     initial_stake = st.number_input("Starting stake", min_value=0.35, max_value=10000.0, value=float(DEFAULT_INITIAL_STAKE), step=0.5, format="%.2f", disabled=state.is_running)
-    martingale_multiplier = st.slider("Step multiplier", 1.5, 4.0, float(MARTINGALE_MULTIPLIER), step=0.1, format="%.1f", disabled=state.is_running)
-    max_martingale_steps = st.slider("Maximum steps", 1, 6, DEFAULT_MAX_MARTINGALE_STEPS, disabled=state.is_running)
-    stakes = [initial_stake]
-    for _ in range(1, max_martingale_steps):
-        stakes.append(round(stakes[-1] * martingale_multiplier, 2))
-    ccy_tag = f" {account_currency}" if selected_account else ""
-    st.caption(f"Steps: {' → '.join(f'{s:.2f}' for s in stakes)} · max exposure {sum(stakes):.2f}{ccy_tag}")
+    use_martingale = st.checkbox("Enable recovery multiplier", value=bool(DIGIT_DEFAULT_RECOVERY_ENABLED), disabled=state.is_running)
+    martingale_multiplier = st.number_input("Recovery multiplier", min_value=1.01, max_value=4.0, value=float(DIGIT_DEFAULT_RECOVERY_MULTIPLIER), step=0.01, format="%.2f", disabled=state.is_running)
+    max_steps = st.slider("Maximum recovery steps", 0, int(DIGIT_MAX_RECOVERY_STEPS), int(DIGIT_MAX_RECOVERY_STEPS if use_martingale else 0), disabled=state.is_running)
+    if not use_martingale:
+        max_steps = 0
+    max_session_loss = st.number_input("Optional session loss stop", min_value=0.0, max_value=100000.0, value=0.0, step=1.0, format="%.2f", disabled=state.is_running, help="0 disables this stop. The bot stops before a new entry once session P&L reaches this loss.")
+    st.caption("A 1.10 multiplier grows slowly, but it still increases exposure after losses. Fixed stake is recommended until demo evidence supports recovery sizing.")
 
     st.divider()
-    st.markdown("<div style='font-size:0.7rem;color:#6b7c97;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:8px;'>Selectivity</div>", unsafe_allow_html=True)
-    _sens_opts = list(STRATEGY_SENSITIVITY_PRESETS.keys()) or ["Conservative"]
-    _sens_val = DEFAULT_STRATEGY_SENSITIVITY if DEFAULT_STRATEGY_SENSITIVITY in _sens_opts else _sens_opts[0]
-    strategy_sensitivity = st.select_slider("How strict", options=_sens_opts, value=_sens_val, disabled=state.is_running)
-    preset = STRATEGY_SENSITIVITY_PRESETS.get(strategy_sensitivity, {}) or {}
-    if duration_seconds <= 120:
-        regime_note = "scalp → 5m trigger; trend must agree; power candles get the express lane"
-    elif duration_seconds <= 900:
-        regime_note = "short → 5m trigger; 5m must trend & decisive body"
-    elif duration_seconds <= 1800:
-        regime_note = "medium → 15m trigger; 30m + 1h must agree"
-    else:
-        regime_note = "long → 15m trigger; 30m + 1h agree, 1h ADX & MACD confirm"
-    st.caption(f"Needs {preset.get('entry_score_threshold', SCORE_MAX)}/{SCORE_MAX} · {entry_tf} ADX ≥ {preset.get('entry_adx_floor', 15)} · {regime_note}")
-
-    st.divider()
-    col_start, col_stop = st.columns(2)
-    with col_start:
+    c1, c2 = st.columns(2)
+    with c1:
         start_pressed = st.button("Start", type="primary", use_container_width=True, disabled=state.is_running)
-    with col_stop:
-        stop_pressed = st.button("Stop", type="secondary", use_container_width=True, disabled=not state.is_running)
+    with c2:
+        stop_pressed = st.button("Stop", use_container_width=True, disabled=not state.is_running)
 
     if start_pressed:
         if not selected_account:
             st.error("Choose a Deriv account first.")
         else:
-            start_bot(api_token=configured_pat, app_id=DERIV_APP_ID, account_id=account_id,
-                      account_currency=account_currency, account_type=selected_account_type,
-                      real_execution_confirmed=real_execution_confirmed, initial_stake=initial_stake,
-                      max_steps=max_martingale_steps, strategy_sensitivity=strategy_sensitivity,
-                      martingale_multiplier=martingale_multiplier, symbol=selected_symbol,
-                      symbol_display=market_display, duration_seconds=duration_seconds)
+            start_bot({
+                "api_token": configured_pat,
+                "app_id": DERIV_APP_ID,
+                "account_id": account_id,
+                "account_currency": account_currency,
+                "account_type": account_type,
+                "real_execution_confirmed": real_execution_confirmed,
+                "initial_stake": float(initial_stake),
+                "max_steps": int(max_steps),
+                "martingale_multiplier": float(martingale_multiplier),
+                "max_session_loss": float(max_session_loss),
+                "symbol": selected_symbol,
+                "symbol_display": market_display,
+                "duration_ticks": int(duration_ticks),
+                "quote_precision": 2,
+                "min_over6_share": float(min_over6_share),
+                "lower_tick_max": DIGIT_LOWER_CONFIRM_MAX,
+                "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
+                "require_quote_edge": bool(require_quote_edge),
+                "min_quote_edge": float(min_quote_edge),
+                "digit_windows": dict(DIGIT_WINDOWS),
+            })
             st.rerun()
     if stop_pressed:
         stop_bot()
         st.rerun()
 
-    st.divider()
-    st.caption(f"Market {market_display} · {selected_symbol}\n\nContract Call / Put · {_fmt_duration_option(duration_seconds)}\n\nTrend {entry_tf} trigger, confirmed by 30m + 1h")
-
-try:
-    active_ctx = state.get_execution_context()
-    if state.is_running:
-        display_account_id = active_ctx.get("account_id", "")
-        display_account_type = active_ctx.get("account_type", "UNKNOWN")
-        display_currency = active_ctx.get("currency", "USD")
-        display_mode = active_ctx.get("execution_mode", "UNCONFIGURED")
-    elif selected_account:
-        display_account_id = account_id
-        display_account_type = selected_account_type
-        display_currency = account_currency
-        display_mode = execution_mode
-    else:
-        display_account_id = ""
-        display_account_type = "UNKNOWN"
-        display_currency = account_currency
-        display_mode = "UNCONFIGURED"
-    mode_line = _MODE_LABEL.get(display_mode, "Paused")
-    acct_id_short = html.escape(display_account_id[:8]) if display_account_id else "—"
-    st.markdown(
-        f'<div class="mm-header"><div>'
-        f'<div class="mm-logo">Momentum<span class="mm-dot">·</span>Master '
-        f'<span style="color:#6b7c97;font-weight:500;font-size:0.8rem;letter-spacing:0.1em;">TF</span></div>'
-        f'<div class="mm-eyebrow">Multi-timeframe trend system</div>'
-        f'<div class="mm-sub">{html.escape(str(market_display))} · {html.escape(str(selected_symbol))}</div>'
-        f'</div><div class="mm-acct"><div class="mm-mode">{html.escape(str(mode_line))}</div>'
-        f'<div class="mm-id">{html.escape(str(display_account_type))} · {acct_id_short} · {html.escape(str(display_currency))}</div>'
-        f'</div></div>',
-        unsafe_allow_html=True,
-    )
-except Exception as _e:
-    _glitch("Header", _e)
+# ---------------------------------------------------------------------------
+# Main terminal
+# ---------------------------------------------------------------------------
+ctx = state.get_execution_context()
+mode = ctx.get("execution_mode", "UNCONFIGURED")
+mode_color = "#34d399" if mode == "DEMO" else "#fbbf24" if mode == "REAL" else "#8294b0"
+st.markdown(
+    f'<div class="mm-head"><div><div class="mm-logo">Momentum<b>·</b>Master DIGIT</div>'
+    f'<div class="mm-sub">Manual-market selection · rolling 7–9 frequency · Over 6 · 1–2 tick settlement</div></div>'
+    f'<div style="text-align:right"><b style="color:{mode_color}">{html.escape(str(mode))}</b><br>'
+    f'<span class="muted">{html.escape(str(ctx.get("account_id", "")[:12]))}</span></div></div>',
+    unsafe_allow_html=True,
+)
 
 
 @st.fragment(run_every=2.0)
 def status_fragment():
-    try:
-        err = state.error_message
-        msg = state.status_message
-        if err:
-            cls, dot, text = "mm-strip-err", "", html.escape(err)
-        elif state.is_running:
-            cls, dot, text = "mm-strip-run", '<span class="mm-dotlive mm-run"></span>', html.escape(msg)
-        else:
-            cls, dot, text = "mm-strip-stop", '<span class="mm-dotlive mm-stop"></span>', html.escape(msg)
-        st.markdown(f'<div class="mm-strip {cls}">{dot}{text}</div>', unsafe_allow_html=True)
-    except Exception as _e:
-        _glitch("Status", _e)
-
-
-def _kpi(label, value, sub="", accent="#33507e", val_color="#eef3fb", hero=False):
-    cls = "mm-kpi mm-kpi-hero" if hero else "mm-kpi"
-    return (f'<div class="{cls}" style="--accent:{accent};--val:{val_color};">'
-            f'<div class="mm-kpi__label">{html.escape(label)}</div>'
-            f'<div class="mm-kpi__value">{html.escape(value)}</div>'
-            f'<div class="mm-kpi__sub">{html.escape(sub)}</div></div>')
+    message = state.error_message or state.status_message
+    color = "#fb7185" if state.error_message else "#34d399" if state.is_running else "#8294b0"
+    st.markdown(f'<div class="mm-card" style="border-left:4px solid {color};"><b>{html.escape(message)}</b></div>', unsafe_allow_html=True)
 
 
 @st.fragment(run_every=2.0)
 def metrics_fragment():
-    try:
-        stats = state.get_performance_stats()
-        ctx = state.get_execution_context()
-        currency = ctx.get("currency", "USD")
-        pnl = stats["total_pnl"]
-        pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
-        pnl_accent = "#10b981" if pnl > 0 else "#f43f5e" if pnl < 0 else "#33507e"
-        pnl_val = "#34d399" if pnl > 0 else "#fb7185" if pnl < 0 else "#eef3fb"
-        exp = stats["expectancy"]
-        exp_str = f"+{exp:.2f}" if exp > 0 else f"{exp:.2f}"
-        exp_accent = "#10b981" if exp > 0 else "#f43f5e" if exp < 0 else "#33507e"
-        exp_val = "#34d399" if exp > 0 else "#fb7185" if exp < 0 else "#9fb0c9"
-        wr = stats["win_rate"]
-        wr_accent = "#10b981" if wr >= 55 else "#f43f5e" if wr < 45 and stats["total_trades"] > 0 else "#3884ff"
-        mart = state.get_martingale_state()
-        step = mart["step"]
-        sub_trades = f"{stats['wins']}W · {stats['losses']}L"
-        if step > 0:
-            sub_trades += f" · step {step}"
-        cards = (_kpi("Net result", pnl_str, f"{currency} · this session", pnl_accent, pnl_val, hero=True)
-                 + _kpi("Edge / trade", exp_str, "expected value", exp_accent, exp_val)
-                 + _kpi("Win rate", f"{wr:.1f}%", f"{stats['total_trades']} closed", wr_accent)
-                 + _kpi("Stake plan", f"{mart['stake']:.2f}", sub_trades, "#3884ff"))
-        st.markdown(f'<div class="mm-kpi-grid">{cards}</div>', unsafe_allow_html=True)
-    except Exception as _e:
-        _glitch("Metrics", _e)
-
-
-def _chart_layout(height):
-    return dict(paper_bgcolor="#0a1120", plot_bgcolor="#0a1120",
-                font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
-                xaxis=dict(gridcolor="#16223c", tickcolor="#16223c", rangeslider_visible=False, tickfont=dict(size=9),
-                           showspikes=True, spikecolor="#33507e", spikethickness=1),
-                yaxis=dict(gridcolor="#16223c", tickcolor="#16223c", side="right", tickfont=dict(size=9), tickformat=".5f"),
-                margin=dict(l=8, r=8, t=8, b=8), height=height, showlegend=False, dragmode="pan")
-
-
-@st.fragment(run_every=5.0)
-def chart_fragment():
-    try:
-        candles = state.get_candles_5m()
-        if candles:
-            dfc = candles[-120:]
-            times = pd.to_datetime([c.get("epoch") for c in dfc], unit="s", utc=True)
-            o = [float(c.get("open")) for c in dfc]
-            h = [float(c.get("high")) for c in dfc]
-            l = [float(c.get("low")) for c in dfc]
-            cl = [float(c.get("close")) for c in dfc]
-            last = cl[-1]
-            first = cl[0]
-            chg = last - first
-            chg_pct = (chg / first * 100) if first else 0.0
-            chg_cls = "pos" if chg >= 0 else "neg"
-            st.markdown(
-                f'<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 6px 2px;flex-wrap:wrap">'
-                f'<span style="font-family:Space Grotesk,sans-serif;font-size:.62rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#6b7c97">5m candles</span>'
-                f'<span style="font-family:JetBrains Mono,monospace;font-weight:700;color:#eef3fb;font-size:1.05rem">{last:.5f}</span>'
-                f'<span class="{chg_cls}" style="font-family:JetBrains Mono,monospace;font-size:.8rem;font-weight:600">{chg:+.5f} ({chg_pct:+.2f}%)</span></div>',
-                unsafe_allow_html=True)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=times, y=cl, mode="lines", line=dict(color="rgba(127,176,255,0.35)", width=1),
-                                     showlegend=False, hoverinfo="skip"))
-            fig.add_trace(go.Candlestick(x=times, open=o, high=h, low=l, close=cl, name="",
-                                         increasing_line_color="#34d399", increasing_fillcolor="#34d399",
-                                         decreasing_line_color="#fb7185", decreasing_fillcolor="#fb7185", whiskerwidth=0.5,
-                                         hovertemplate="%{x|%b %d %H:%M}<br>O %{open:.5f}  H %{high:.5f}<br>L %{low:.5f}  C %{close:.5f}<extra></extra>"))
-            fig.add_trace(go.Scatter(x=[times[-1]], y=[last], mode="markers",
-                                     marker=dict(color="#10b981", size=10, line=dict(color="#06281f", width=2)),
-                                     showlegend=False, hoverinfo="skip"))
-            fig.add_hline(y=last, line=dict(color="#34d399", width=1, dash="dot"), opacity=0.45)
-            fig.update_layout(**_chart_layout(360))
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
-        else:
-            ticks = state.get_recent_ticks()
-            if not ticks:
-                st.info("Waiting for market data — the 5m chart fills in within ~30s of connecting.")
-                return
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=list(range(len(ticks))), y=ticks, mode="lines",
-                                     line=dict(color="#3884ff", width=1.6), hovertemplate="price %{y:.5f}<extra></extra>"))
-            fig.add_trace(go.Scatter(x=[len(ticks) - 1], y=[ticks[-1]], mode="markers",
-                                     marker=dict(color="#10b981", size=9, line=dict(color="#06281f", width=1)), hoverinfo="skip"))
-            fig.update_layout(paper_bgcolor="#0a1120", plot_bgcolor="#0a1120",
-                              font=dict(color="#6b7c97", size=10, family="JetBrains Mono"),
-                              xaxis=dict(gridcolor="#16223c", showticklabels=False, zeroline=False),
-                              yaxis=dict(gridcolor="#16223c", zeroline=False, side="right", tickformat=".5f"),
-                              margin=dict(l=8, r=8, t=8, b=8), height=360, showlegend=False)
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    except Exception as _e:
-        _glitch("5m chart", _e)
+    stats = state.get_performance_stats()
+    mart = state.get_martingale_state()
+    s = state.get_strategy_state()
+    wins = stats["wins"]
+    losses = stats["losses"]
+    cards = st.columns(5)
+    values = [
+        ("Last digit", str(s.get("last_digit") if s.get("last_digit") is not None else "—"), "latest quote digit"),
+        ("Over 6 reviews", f"{s.get('digit_windows', {}).get('medium', {}).get('p_over6', 0) * 100:.1f}%", "medium window 7–9"),
+        ("Digit state", "ARMED" if s.get("digit_armed") else "WAITING", "lower tick confirmation"),
+        ("Session P&L", f"{stats['total_pnl']:+.2f}", f"{wins}W · {losses}L"),
+        ("Next stake", f"{mart['stake']:.2f}", f"recovery step {mart['step']}"),
+    ]
+    for col, (label, value, sub) in zip(cards, values):
+        with col:
+            st.markdown(f'<div class="mm-card"><div class="mm-label">{label}</div><div class="mm-value">{html.escape(value)}</div><div class="mm-small">{html.escape(sub)}</div></div>', unsafe_allow_html=True)
 
 
 @st.fragment(run_every=2.0)
-def state_panel_fragment():
-    try:
-        s = state.get_strategy_state()
-        price = state.current_price
-        trend = s.get("trend_direction") or "—"
-        t_cls = "mm-up" if trend == "UP" else ("mm-down" if trend == "DOWN" else "mm-flat")
-        t_arrow = "▲" if trend == "UP" else ("▼" if trend == "DOWN" else "—")
-        tf_biases = s.get("mtf_tf_biases", {})
-        chips = []
-        for tf in ["5m", "15m", "30m", "1h"]:
-            if tf in tf_biases:
-                v = tf_biases[tf]
-                c = "#34d399" if v == "UP" else ("#fb7185" if v == "DOWN" else "#8294b0")
-                ic = "▲" if v == "UP" else ("▼" if v == "DOWN" else "·")
-                chips.append(f'<span class="mm-chip" style="color:{c};border-color:{c}55;">{tf} {ic}</span>')
-        chips_html = f'<div class="mm-chips">{" ".join(chips)}</div>' if chips else ""
-        stage = s.get("pattern_stage", "IDLE")
-        stage_colors = {"IDLE": ("#5b6b85", "#10182b"), "TREND": ("#a78bfa", "#1a1430"), "PULLBACK": ("#fbbf24", "#241c08"),
-                        "MOMENTUM": ("#3884ff", "#0c1730"), "SIGNAL": ("#34d399", "#08241a")}
-        sc, sbg = stage_colors.get(stage, ("#5b6b85", "#10182b"))
-        stage_label = _STAGE_LABEL.get(stage, stage)
-        score = int(s.get("last_signal_score", 0))
-        pct = max(0, min(100, int(round(score / SCORE_MAX * 100))))
-        hb = state.get_tick_heartbeat()
-        total = hb.get("total_ticks_processed", 0)
-        last_t = hb.get("last_tick_time")
-        if last_t is not None:
-            age = time.time() - last_t
-            if age <= 35:
-                hb_html = f'<span style="color:#34d399;">●</span> live · {total:,} ticks'
-            elif age <= 90:
-                hb_html = f'<span style="color:#fbbf24;">●</span> {age:.0f}s ago · {total:,} ticks'
-            else:
-                hb_html = f'<span style="color:#fb7185;">●</span> waiting · {age:.0f}s'
+def digit_panel_fragment():
+    s = state.get_strategy_state()
+    windows = s.get("digit_windows") or {}
+    counts = s.get("digit_counts") or {}
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown('<div class="mm-section">Manual-style digit review</div>', unsafe_allow_html=True)
+        rows = []
+        for name in ("fast", "medium", "slow"):
+            w = windows.get(name) or {}
+            rows.append({
+                "Window": f"{name} · {w.get('count', 0)} ticks",
+                "7–9": f"{float(w.get('p_over6', 0)) * 100:.1f}%",
+                "1–6": f"{float(w.get('p_1to6', 0)) * 100:.1f}%",
+                "Dominance": f"{float(w.get('dominance', 0)) * 100:+.1f}%",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        armed = bool(s.get("digit_armed"))
+        confirmed = bool(s.get("digit_lower_confirmed"))
+        if armed and confirmed:
+            st.success(f"Lower tick confirmed: {s.get('digit_lower_confirmation')}. The next tick is eligible for Over 6.")
+        elif armed:
+            st.warning("7–9 condition is armed. Waiting for one lower digit from 0 to 6.")
         else:
-            hb_html = '<span style="color:#fb7185;">●</span> awaiting first tick'
-        rail = ('<div class="mm-rail"><div class="mm-rail__label">Price</div>'
-                f'<div class="mm-price">{price:.5f} <span class="mm-caret">▌</span></div>'
-                '<div class="mm-rail__label">Trend</div>'
-                f'<div class="mm-trend {t_cls}">{t_arrow} {html.escape(str(trend))}</div>'
-                '<div class="mm-rail__label">Timeframes</div>'
-                f'{chips_html}'
-                '<div class="mm-rail__label">Status</div>'
-                f'<span class="mm-stage" style="color:{sc};background:{sbg};border:1px solid {sc}55;">{html.escape(str(stage_label))}</span>'
-                '<div class="mm-rail__label">Setup score</div>'
-                f'<div style="font-family:\'JetBrains Mono\',monospace;font-weight:700;color:#eef3fb;">{score} / {SCORE_MAX}</div>'
-                '<div class="mm-scorebar">'
-                f'<div class="mm-scorefill" style="width:{pct}%;"></div></div>'
-                f'<div class="mm-hb">{hb_html}</div></div>')
-        st.markdown(rail, unsafe_allow_html=True)
-    except Exception as _e:
-        _glitch("Status rail", _e)
+            st.info(str(s.get("digit_last_rejection") or "Collecting digit history…"))
+    with right:
+        st.markdown('<div class="mm-section">Digit counts · current buffer</div>', unsafe_allow_html=True)
+        data = [{"Digit": d, "Count": int(counts.get(str(d), 0))} for d in range(10)]
+        st.dataframe(pd.DataFrame(data), use_container_width=True, height=250, hide_index=True)
+        st.caption("Numeric counts only; no extra chart is rendered. A trade is sent only after the strategy condition, lower-tick confirmation, safety gates, and live quote edge all pass.")
 
 
-@st.fragment(run_every=10.0)
+@st.fragment(run_every=8.0)
 def ledger_fragment():
-    try:
-        st.markdown('<div class="mm-ledger-head">Trades</div>', unsafe_allow_html=True)
-        history = state.get_trade_history()
-        if not history:
-            st.markdown('<div style="color:#6b7c97;font-size:0.82rem;padding:18px 0;text-align:center;">No trades yet. MomentumMaster only acts when the trend agrees for your contract length and the trigger candle confirms it.</div>', unsafe_allow_html=True)
-            return
-        records = []
-        for t in history[:50]:
-            pnl_str = f"+{t.pnl:.2f}" if t.pnl > 0 else f"{t.pnl:.2f}" if t.pnl < 0 else "0.00"
-            records.append({"Time": t.timestamp, "Side": t.direction, "Stake": t.stake, "Entry": t.entry_price,
-                            "Result": t.status, "P&L": pnl_str, "Step": t.martingale_step})
-        df = pd.DataFrame(records)
-
-        def st_status(v):
-            return {"WON": "color:#34d399;font-weight:700;", "LOST": "color:#fb7185;font-weight:700;",
-                    "OPEN": "color:#fbbf24;font-weight:600;", "CANCELLED": "color:#6b7c97;"}.get(v, "")
-
-        def st_pnl(v):
-            try:
-                n = float(str(v).replace("+", ""))
-                return "color:#34d399;font-weight:700;" if n > 0 else ("color:#fb7185;font-weight:700;" if n < 0 else "")
-            except Exception:
-                return ""
-
-        def st_dir(v):
-            return "color:#34d399;" if v == "BUY" else ("color:#fb7185;" if v == "SELL" else "")
-
-        styled = (df.style.map(st_status, subset=["Result"]).map(st_pnl, subset=["P&L"]).map(st_dir, subset=["Side"]))
-        st.dataframe(styled, use_container_width=True, height=320, hide_index=True)
-    except Exception as _e:
-        _glitch("Trades ledger", _e)
+    st.markdown('<div class="mm-section">Trades</div>', unsafe_allow_html=True)
+    history = state.get_trade_history()
+    if not history:
+        st.info("No trades yet. The bot will stand aside until the rolling digit rule qualifies.")
+        return
+    records = []
+    for trade in history[:50]:
+        records.append({
+            "Time": trade.timestamp,
+            "Direction": trade.direction,
+            "Barrier": trade.barrier,
+            "Stake": trade.stake,
+            "Result": trade.status,
+            "P&L": trade.pnl,
+            "Step": trade.martingale_step,
+            "Mode": trade.execution_mode,
+        })
+    st.dataframe(pd.DataFrame(records), use_container_width=True, height=300, hide_index=True)
 
 
 @st.fragment(run_every=15.0)
 def journal_fragment():
-    try:
-        journal = get_journal()
-        st.markdown('<div class="mm-ledger-head">Decision log · every trigger-candle review</div>', unsafe_allow_html=True)
-        csv_bytes = journal.to_csv_bytes()
-        if csv_bytes:
-            st.download_button("Download decision log (CSV)", data=csv_bytes, file_name="momentummaster_journal.csv",
-                               mime="text/csv", use_container_width=True)
-        rows = journal.read_rows()
-        if not rows:
-            st.caption("Every trigger-candle review is recorded here — whether it traded or stood aside — along with the result and the reason.")
-            return
-        df = pd.DataFrame(rows).tail(40).iloc[::-1]
-        cols = ["timestamp_utc", "symbol", "direction", "trend", "taken", "score", "threshold", "rejection_reason",
-                "note", "outcome", "pnl"]
-        cols = [c for c in cols if c in df.columns]
-        st.dataframe(df[cols], use_container_width=True, height=300, hide_index=True)
-    except Exception as _e:
-        _glitch("Decision log", _e)
+    journal = get_journal()
+    st.markdown('<div class="mm-section">Decision log · every minute review and entry decision</div>', unsafe_allow_html=True)
+    csv_bytes = journal.to_csv_bytes()
+    if csv_bytes:
+        st.download_button("Download decision log", data=csv_bytes, file_name="momentummaster_digit_journal.csv", mime="text/csv", use_container_width=True)
+    rows = journal.read_rows()
+    if not rows:
+        st.caption("No reviews recorded yet.")
+        return
+    df = pd.DataFrame(rows).tail(50).iloc[::-1]
+    preferred = [
+        "timestamp_utc", "symbol", "direction", "taken", "rejection_reason", "score",
+        "p_over6_fast", "p_over6_medium", "p_over6_slow", "lower_confirmation_digit",
+        "entry_digit", "quote_break_even", "quote_edge", "outcome", "pnl",
+    ]
+    cols = [col for col in preferred if col in df.columns]
+    st.dataframe(df[cols], use_container_width=True, height=320, hide_index=True)
 
 
 @st.fragment(run_every=30.0)
 def backup_fragment():
-    try:
-        journal = get_journal()
-        with st.expander("💾 Backup & restore — protect the journal against reboots", expanded=False):
-            st.caption(
-                "Streamlit Cloud reboots wipe the local log files. Download a backup after a session "
-                "(or before a reboot), then import the same file here to restore everything. "
-                "The merge is idempotent — importing the same file twice adds nothing, so it is always safe.")
-            b1, b2 = st.columns(2)
-            with b1:
-                st.download_button("Download backup (CSV)", data=export_archive_csv_bytes(journal),
-                                   file_name="momentummaster_backup.csv", mime="text/csv",
-                                   use_container_width=True, key="bk_dl_csv")
-            with b2:
-                st.download_button("Download backup (JSON)", data=export_merged_json_bytes(journal),
-                                   file_name="momentummaster_backup.json", mime="application/json",
-                                   use_container_width=True, key="bk_dl_json")
-            up = st.file_uploader("Import a downloaded backup file", type=["csv", "json"], key="bk_file")
-            if up is not None:
-                if st.button("Restore backup now", type="primary", use_container_width=True, key="bk_go"):
-                    try:
-                        st.session_state["bk_result"] = import_journal(journal, up.read(), up.name)
-                    except Exception as exc:
-                        st.session_state["bk_result"] = {"error": str(exc)}
-                    st.cache_data.clear()
-                    st.rerun()
-            res = st.session_state.get("bk_result")
-            if res:
-                if "error" in res:
-                    st.error("Restore failed: " + str(res["error"]))
-                else:
-                    added = int(res.get("eval_added", 0)) + int(res.get("outcome_added", 0))
-                    skipped = int(res.get("skipped", 0))
-                    errors = int(res.get("errors", 0))
-                    if added == 0:
-                        st.info(f"Already up to date — {skipped} rows were already present.")
-                    else:
-                        st.success(f"Restored {added} rows ({res.get('eval_added', 0)} reviews, "
-                                   f"{res.get('outcome_added', 0)} outcomes) · {skipped} already present · {errors} errors.")
-    except Exception as _e:
-        _glitch("Backup & restore", _e)
+    journal = get_journal()
+    with st.expander("Backup & restore", expanded=False):
+        st.caption("The append-only archive is the master journal. Restore is idempotent and does not alter the live strategy.")
+        a, b = st.columns(2)
+        with a:
+            st.download_button("Download archive CSV", export_archive_csv_bytes(journal), "momentummaster_digit_archive.csv", "text/csv", use_container_width=True)
+        with b:
+            st.download_button("Download merged JSON", export_merged_json_bytes(journal), "momentummaster_digit_merged.json", "application/json", use_container_width=True)
+        uploaded = st.file_uploader("Import backup", type=["csv", "json"], key="digit_backup_upload")
+        if uploaded is not None and st.button("Restore backup", type="primary", use_container_width=True, key="digit_restore"):
+            result = import_journal(journal, uploaded.read(), uploaded.name)
+            st.success(f"Restore complete: {result}")
+            st.cache_data.clear()
 
 
 watchdog_fragment()
 status_fragment()
 metrics_fragment()
-
-col_chart, col_rail = st.columns([3, 1], gap="medium")
-with col_chart:
-    chart_fragment()
-    ledger_fragment()
-    journal_fragment()
-    backup_fragment()
-with col_rail:
-    state_panel_fragment()
+digit_panel_fragment()
+ledger_fragment()
+journal_fragment()
+backup_fragment()
