@@ -104,6 +104,10 @@ class SharedMarketCoordinator:
     def _today() -> str:
         return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
+    @staticmethod
+    def _minute_key(timestamp: float) -> str:
+        return dt.datetime.fromtimestamp(float(timestamp), tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M")
+
     def _default_state(self) -> Dict[str, Any]:
         return {
             "version": 1,
@@ -117,6 +121,8 @@ class SharedMarketCoordinator:
             "daily_date": self._today(),
             "daily_filled": 0,
             "in_flight": False,
+            "entry_minute": "",
+            "last_filled_minute": "",
             "blocked": False,
             "blocked_reason": "",
         }
@@ -182,6 +188,9 @@ class SharedMarketCoordinator:
                 return {"allowed": False, "reason": state["blocked_reason"]}
             else:
                 return {"allowed": False, "reason": "another session has an unresolved trade for this market"}
+        current_minute = self._minute_key(current)
+        if state.get("last_filled_minute") == current_minute:
+            return {"allowed": False, "reason": "same-market same-minute entry already completed; duplicate blocked"}
         cooldown = max(0.0, float(state.get("cooldown_until", 0.0)) - current)
         if cooldown > 0:
             return {"allowed": False, "reason": f"shared cooldown active for {cooldown:.0f}s"}
@@ -191,6 +200,7 @@ class SharedMarketCoordinator:
         state["in_flight"] = True
         state["trade_id"] = str(trade_id)
         state["claimed_at"] = current
+        state["entry_minute"] = current_minute
         state["bought_at"] = 0.0
         state["bought"] = False
         self._write_state(state)
@@ -207,8 +217,10 @@ class SharedMarketCoordinator:
         state = self._read_state()
         if not state.get("in_flight"):
             raise RuntimeError("Cannot mark a shared entry bought without a reservation.")
+        bought_at = float(now if now is not None else time.time())
         state["bought"] = True
-        state["bought_at"] = float(now if now is not None else time.time())
+        state["bought_at"] = bought_at
+        state["last_filled_minute"] = state.get("entry_minute") or self._minute_key(bought_at)
         state["daily_filled"] = int(state.get("daily_filled", 0)) + 1
         self._write_state(state)
 
@@ -218,6 +230,7 @@ class SharedMarketCoordinator:
         state["in_flight"] = False
         state["trade_id"] = ""
         state["claimed_at"] = 0.0
+        state["entry_minute"] = ""
         state["bought_at"] = 0.0
         state["bought"] = False
         self._write_state(state)
@@ -262,6 +275,7 @@ class SharedMarketCoordinator:
         state["in_flight"] = False
         state["trade_id"] = ""
         state["claimed_at"] = 0.0
+        state["entry_minute"] = ""
         state["bought_at"] = 0.0
         state["bought"] = False
         state["last_outcome"] = normalized
