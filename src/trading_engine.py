@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 from config import CURRENCY, DEFAULT_INITIAL_STAKE, MAX_TRADES_PER_DAY, MARTINGALE_MULTIPLIER
 from src.api_client import DerivAPIClient, DerivAPIError
+from src.coordination import SharedMarketCoordinator
 from src.digit_strategy import DigitStrategyEngine
 from src.journal import get_journal
 from src.logger import get_logger
@@ -71,6 +72,7 @@ class TradingEngine:
         quote_precision: int = 2,
         min_over6_share: float = 0.31,
         lower_tick_max: int = 6,
+        required_lower_confirmations: int = 1,
         review_interval_seconds: float = 60.0,
         take_profit_target: float = 0.0,
         digit_windows: Optional[Dict[str, int]] = None,
@@ -95,6 +97,7 @@ class TradingEngine:
         self.quote_precision = max(0, int(quote_precision))
         self.min_over6_share = float(min_over6_share)
         self.lower_tick_max = int(lower_tick_max)
+        self.required_lower_confirmations = max(1, min(3, int(required_lower_confirmations)))
         self.review_interval_seconds = float(review_interval_seconds)
         self.take_profit_target = max(0.0, float(take_profit_target))
         self._client: Optional[DerivAPIClient] = None
@@ -105,6 +108,7 @@ class TradingEngine:
             min_over6_share=self.min_over6_share,
             low_digit_max=self.lower_tick_max,
             review_interval_seconds=self.review_interval_seconds,
+            required_lower_confirmations=self.required_lower_confirmations,
         )
         self._journal = get_journal()
         self._active_contract_id: Optional[int] = None
@@ -116,6 +120,15 @@ class TradingEngine:
         self._daily_trade_count = 0
         self._daily_date = datetime.now(timezone.utc).date()
         self._reconnect_lock = asyncio.Lock()
+        self._market_coordinator = SharedMarketCoordinator(
+            account_id=self.account_id,
+            symbol=self.symbol,
+            initial_stake=self.initial_stake,
+        )
+        self._shared_lock_held = False
+        self._shared_trade_claimed = False
+        self._shared_trade_bought = False
+        self._buy_attempted = False
 
     # ------------------------------------------------------------- utilities
     @staticmethod
@@ -380,15 +393,82 @@ class TradingEngine:
         except Exception as exc:
             logger.exception("Error processing digit tick: %s", exc)
 
-    # -------------------------------------------------------------- execution
+    # ---------------------------------------------------------------- execution
+    async def _claim_shared_entry(self, trade_id: str) -> tuple[bool, str]:
+        """Reserve the account/symbol slot before reading stake or sending a proposal."""
+        try:
+            acquired = await self._market_coordinator.acquire(timeout_seconds=8.0)
+            if not acquired:
+                return False, "another session is executing this market; entry was skipped"
+            self._shared_lock_held = True
+            claim = self._market_coordinator.claim_entry(
+                trade_id=trade_id,
+                now=time.time(),
+                daily_cap=MAX_TRADES_PER_DAY,
+            )
+            if not claim.get("allowed"):
+                reason = str(claim.get("reason") or "shared market gate rejected the entry")
+                self._market_coordinator.release()
+                self._shared_lock_held = False
+                return False, reason
+            self._shared_trade_claimed = True
+            self.state.sync_shared_trade_risk(
+                step=claim.get("recovery_step", 0),
+                stake=claim.get("stake", self.initial_stake),
+                consecutive_losses=claim.get("consecutive_losses", 0),
+                trade_time=claim.get("last_trade_time"),
+            )
+            return True, ""
+        except Exception as exc:
+            logger.exception("Shared market claim failed for %s: %s", self.symbol, exc)
+            if self._shared_lock_held:
+                self._market_coordinator.release()
+                self._shared_lock_held = False
+            return False, "shared market coordination failed; no order was sent"
+
+    def _finish_shared_entry(self, outcome: Optional[str]) -> None:
+        if not self._shared_lock_held:
+            return
+        try:
+            if self._shared_trade_claimed:
+                normalized = str(outcome or "").upper()
+                if self._shared_trade_bought or self._buy_attempted:
+                    self._market_coordinator.complete_entry(
+                        normalized if normalized in {"WON", "LOST", "UNKNOWN"} else "UNKNOWN",
+                        now=time.time(),
+                        multiplier=self.martingale_multiplier,
+                        max_steps=self.max_martingale_steps,
+                    )
+                else:
+                    self._market_coordinator.abort_entry()
+        except Exception as exc:
+            logger.exception("Could not finalize shared market state for %s.", self.symbol)
+            self.state.set_error(f"Shared market state could not be finalized: {exc}")
+            self.state.request_stop()
+        finally:
+            self._market_coordinator.release()
+            self._shared_lock_held = False
+            self._shared_trade_claimed = False
+            self._shared_trade_bought = False
+            self._buy_attempted = False
+
     async def _execute_trade(self, signal: str, entry_record: Optional[Dict[str, Any]], signal_id: Optional[str]) -> None:
         if self._trade_in_progress:
             return
         self._trade_in_progress = True
+        self._shared_trade_bought = False
+        self._buy_attempted = False
+        trade_id = str(uuid.uuid4())[:8]
+        shared_allowed, shared_reason = await self._claim_shared_entry(trade_id)
+        if not shared_allowed:
+            self._trade_in_progress = False
+            self._record_entry_decision(entry_record, False, shared_reason)
+            self._strategy.on_signal_skipped()
+            self.state.set_status(f"Over 6 setup skipped — {shared_reason}")
+            return
         martingale = self.state.get_martingale_state()
         stake = float(martingale["stake"])
         martingale_step = int(martingale["step"])
-        trade_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         contract_type = DIGIT_CONTRACT_TYPE_OVER if signal == "OVER6" else DIGIT_CONTRACT_TYPE_UNDER
         trade_record = TradeRecord(
@@ -446,7 +526,10 @@ class TradingEngine:
             if self.state.stop_requested:
                 raise DerivAPIError("Stop requested before buy; no order was submitted.", "STOP_REQUESTED")
             self.state.set_status(f"Buying Over 6 for {self.contract_duration} tick(s) at {ask_price:.2f}…")
+            self._buy_attempted = True
             buy = await self._client.buy_contract(proposal_id=proposal_id, price=ask_price)
+            self._market_coordinator.mark_bought(now=time.time())
+            self._shared_trade_bought = True
             contract_id = buy.get("contract_id")
             buy_price = float(buy.get("buy_price", ask_price))
             buy_payout = float(buy.get("payout", payout))
@@ -500,6 +583,7 @@ class TradingEngine:
             self.state.set_error(reason)
         finally:
             self._active_contract_id = None
+            self._finish_shared_entry(locals().get("outcome"))
             self._trade_in_progress = False
             self._strategy.on_trade_finished(allow_rearm=not self.state.stop_requested)
 
