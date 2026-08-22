@@ -7,8 +7,9 @@ This module deliberately keeps the live rule small and inspectable:
 * Over 6 is considered only when 7/8/9 meet the configured total-share
   threshold and their average per-digit frequency exceeds the 1–6 average
   in both fast and medium windows, with slow-window support;
-* after a qualifying review, one digit 0-6 must print before the next tick
-  becomes eligible for a one- or two-tick DIGITOVER contract;
+* after a qualifying review, consecutive digits 0-6 must print before the
+  next tick becomes eligible for a one- or two-tick DIGITOVER contract;
+* a higher digit resets the lower-confirmation sequence;
 * no martingale or candle/AI decision is involved here.
 
 The trading engine requests a live proposal for execution and audit, but no
@@ -31,6 +32,7 @@ REVIEW_INTERVAL_SECONDS = 60.0
 DEFAULT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
 DEFAULT_MIN_OVER6_SHARE = 0.31
 DEFAULT_LOW_DIGIT_MAX = 6
+DEFAULT_REQUIRED_LOWER_CONFIRMATIONS = 1
 COMPARISON_LOW_DIGITS = tuple(range(1, 7))
 SIGNAL_MAX_AGE_SECONDS = 10.0
 
@@ -46,6 +48,7 @@ class DigitStrategyEngine:
         min_over6_share: float = DEFAULT_MIN_OVER6_SHARE,
         low_digit_max: int = DEFAULT_LOW_DIGIT_MAX,
         review_interval_seconds: float = REVIEW_INTERVAL_SECONDS,
+        required_lower_confirmations: int = DEFAULT_REQUIRED_LOWER_CONFIRMATIONS,
         **_: Any,
     ) -> None:
         self.contract_duration_ticks = int(contract_duration_ticks)
@@ -54,6 +57,7 @@ class DigitStrategyEngine:
         self.min_over6_share = float(min_over6_share)
         self.low_digit_max = int(low_digit_max)
         self.review_interval_seconds = float(review_interval_seconds)
+        self.required_lower_confirmations = max(1, min(3, int(required_lower_confirmations)))
         self._max_buffer = max(self.windows.values()) * 5
 
         self._digits: Deque[int] = deque(maxlen=self._max_buffer)
@@ -77,6 +81,7 @@ class DigitStrategyEngine:
         self._armed_context: Optional[Dict[str, Any]] = None
         self._last_qualifying_context: Optional[Dict[str, Any]] = None
         self._confirmation_seen = False
+        self._lower_confirmation_count = 0
         self._confirmation_digit: Optional[int] = None
         self._confirmation_epoch: Optional[float] = None
         self._pending_signal: Optional[str] = None
@@ -122,12 +127,23 @@ class DigitStrategyEngine:
         if allow_signal and self._armed and self._pending_signal is None:
             if not self._confirmation_seen:
                 if digit <= self.low_digit_max:
-                    self._confirmation_seen = True
+                    self._lower_confirmation_count += 1
                     self._confirmation_digit = digit
                     self._confirmation_epoch = tick_epoch
-                    self._last_rejection = (
-                        f"lower-tick confirmation received ({digit}); next tick is eligible"
-                    )
+                    if self._lower_confirmation_count >= self.required_lower_confirmations:
+                        self._confirmation_seen = True
+                        self._last_rejection = (
+                            f"{self.required_lower_confirmations} lower-tick confirmations received; next tick is eligible"
+                        )
+                    else:
+                        self._last_rejection = (
+                            f"lower-tick confirmation {self._lower_confirmation_count}/{self.required_lower_confirmations} received ({digit})"
+                        )
+                else:
+                    self._lower_confirmation_count = 0
+                    self._confirmation_digit = None
+                    self._confirmation_epoch = None
+                    self._last_rejection = f"higher digit {digit} reset lower-tick confirmation sequence"
             else:
                 self._queue_signal(digit, tick_epoch)
         self._sync_state_version()
@@ -217,16 +233,20 @@ class DigitStrategyEngine:
                 self._confirmation_seen = False
                 self._confirmation_digit = None
                 self._confirmation_epoch = None
+                self._lower_confirmation_count = 0
                 self._armed_context = dict(self._last_qualifying_context)
-                self._last_rejection = "armed — waiting for one lower tick (0–6)"
+                self._last_rejection = f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6)"
             elif self._armed:
-                self._last_rejection = "still armed — waiting for one lower tick (0–6)"
+                self._last_rejection = f"still armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6)"
         else:
             self._condition_valid = False
             self._last_qualifying_context = None
             if self._armed and self._pending_signal is None:
                 self._armed = False
                 self._confirmation_seen = False
+                self._lower_confirmation_count = 0
+                self._confirmation_digit = None
+                self._confirmation_epoch = None
                 self._armed_context = None
             self._last_rejection = reason
 
@@ -254,7 +274,7 @@ class DigitStrategyEngine:
             "taken": "FALSE",
             "executed": "FALSE",
             "rejection_reason": "" if qualifies else reason,
-            "note": "armed; waiting for one lower tick" if qualifies else "",
+            "note": (f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks" if qualifies else ""),
             "score": self._last_signal_score,
             "threshold": round(self.min_over6_share * 100, 2),
             "regime": "DIGIT",
@@ -287,6 +307,8 @@ class DigitStrategyEngine:
             "per_digit_dominance_medium": medium.get("per_digit_dominance", ""),
             "per_digit_dominance_slow": slow.get("per_digit_dominance", ""),
             "lower_confirmation_digit": self._confirmation_digit if self._confirmation_digit is not None else "",
+            "lower_confirmation_required": self.required_lower_confirmations,
+            "lower_confirmation_count": self._lower_confirmation_count,
             "entry_digit": "",
             "quote_ask": "",
             "quote_payout": "",
@@ -306,7 +328,7 @@ class DigitStrategyEngine:
             "signal_id": self._pending_signal_id,
             "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch)),
             "taken": "TRUE",
-            "note": "one lower tick confirmed; entered on the next tick",
+            "note": f"{self.required_lower_confirmations} consecutive lower ticks confirmed; entered on the next tick",
             "rejection_reason": "",
             "lower_confirmation_digit": self._confirmation_digit,
             "entry_digit": entry_digit,
@@ -332,6 +354,7 @@ class DigitStrategyEngine:
         if time.time() - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
             self._armed = False
             self._confirmation_seen = False
+            self._lower_confirmation_count = 0
             self._last_rejection = "stale digit signal discarded"
             self._sync_state_version()
             return None
@@ -362,6 +385,7 @@ class DigitStrategyEngine:
         self._confirmation_seen = False
         self._confirmation_digit = None
         self._confirmation_epoch = None
+        self._lower_confirmation_count = 0
         self._pending_signal = None
         self._pending_signal_id = None
         self._sync_state_version()
@@ -374,13 +398,15 @@ class DigitStrategyEngine:
             self._confirmation_seen = False
             self._confirmation_digit = None
             self._confirmation_epoch = None
-            self._last_rejection = "trade finished — condition still valid; waiting for one lower tick"
+            self._lower_confirmation_count = 0
+            self._last_rejection = f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks"
         else:
             self._armed = False
             self._armed_context = None
             self._confirmation_seen = False
             self._confirmation_digit = None
             self._confirmation_epoch = None
+            self._lower_confirmation_count = 0
             if not allow_rearm and self._condition_valid:
                 self._last_rejection = "trade finished — re-entry disabled because stopping was requested"
         self._sync_state_version()
@@ -391,6 +417,7 @@ class DigitStrategyEngine:
         self._confirmation_seen = False
         self._confirmation_digit = None
         self._confirmation_epoch = None
+        self._lower_confirmation_count = 0
         self._pending_signal = None
         self._pending_signal_id = None
         self._last_rejection = "signal skipped by execution gate"
@@ -430,6 +457,8 @@ class DigitStrategyEngine:
             "digit_windows": stats,
             "digit_armed": self._armed, "digit_condition_valid": self._condition_valid, "digit_lower_confirmed": self._confirmation_seen,
             "digit_lower_confirmation": self._confirmation_digit,
+            "digit_lower_confirmation_count": self._lower_confirmation_count,
+            "digit_required_lower_confirmations": self.required_lower_confirmations,
             "digit_last_rejection": self._last_rejection,
             "digit_contract_duration_ticks": self.contract_duration_ticks,
         }
@@ -449,6 +478,7 @@ class DigitStrategyEngine:
             min_over6_share=self.min_over6_share,
             low_digit_max=self.low_digit_max,
             review_interval_seconds=self.review_interval_seconds,
+            required_lower_confirmations=self.required_lower_confirmations,
         )
 
     # --------------------------------------------------------------- internals
