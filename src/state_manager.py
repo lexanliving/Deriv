@@ -41,7 +41,7 @@ class StateManager:
         "digit_precision": "_digit_precision", "last_digit": "_last_digit",
         "digit_counts": "_digit_counts", "digit_windows": "_digit_windows",
         "digit_armed": "_digit_armed", "digit_condition_valid": "_digit_condition_valid", "digit_lower_confirmed": "_digit_lower_confirmed",
-        "digit_lower_confirmation": "_digit_lower_confirmation", "digit_last_rejection": "_digit_last_rejection",
+        "digit_lower_confirmation": "_digit_lower_confirmation", "digit_lower_confirmation_count": "_digit_lower_confirmation_count", "digit_required_lower_confirmations": "_digit_required_lower_confirmations", "digit_last_rejection": "_digit_last_rejection",
         "digit_contract_duration_ticks": "_digit_contract_duration_ticks",
     }
     def __init__(self):
@@ -75,6 +75,8 @@ class StateManager:
         self._digit_condition_valid = False
         self._digit_lower_confirmed = False
         self._digit_lower_confirmation = None
+        self._digit_lower_confirmation_count = 0
+        self._digit_required_lower_confirmations = 1
         self._digit_last_rejection = ""
         self._digit_contract_duration_ticks = 0
         self._current_martingale_step = 0
@@ -142,6 +144,8 @@ class StateManager:
                     "digit_armed": self._digit_armed, "digit_condition_valid": self._digit_condition_valid,
                     "digit_lower_confirmed": self._digit_lower_confirmed,
                     "digit_lower_confirmation": self._digit_lower_confirmation,
+                    "digit_lower_confirmation_count": self._digit_lower_confirmation_count,
+                    "digit_required_lower_confirmations": self._digit_required_lower_confirmations,
                     "digit_last_rejection": self._digit_last_rejection,
                     "digit_contract_duration_ticks": self._digit_contract_duration_ticks}
     def update_strategy_state(self, **kwargs):
@@ -170,6 +174,13 @@ class StateManager:
         with self._lock:
             self._current_martingale_step = 0
             self._current_stake = self._initial_stake
+    def sync_shared_trade_risk(self, step, stake, consecutive_losses=0, trade_time=None):
+        """Mirror authoritative cross-session recovery/cooldown inputs locally."""
+        with self._lock:
+            self._current_martingale_step = max(0, int(step))
+            self._current_stake = round(float(stake), 2)
+            self._consecutive_losses = max(0, int(consecutive_losses))
+            self._last_trade_time = float(trade_time if trade_time is not None else time.time())
     def on_trade_loss(self, multiplier, max_steps):
         with self._lock:
             if self._current_martingale_step < max_steps:
