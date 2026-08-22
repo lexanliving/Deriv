@@ -7,8 +7,8 @@ This module deliberately keeps the live rule small and inspectable:
 * Over 6 is considered only when 7/8/9 meet the configured total-share
   threshold and their average per-digit frequency exceeds the 1–6 average
   in both fast and medium windows, with slow-window support;
-* after a qualifying review, consecutive digits 0-6 must print before the
-  next tick becomes eligible for a one- or two-tick DIGITOVER contract;
+* after a qualifying review, the configured consecutive digits 0-6 themselves
+  trigger a one- or two-tick DIGITOVER contract on the final lower tick;
 * a higher digit resets the lower-confirmation sequence;
 * no martingale or candle/AI decision is involved here.
 
@@ -133,8 +133,9 @@ class DigitStrategyEngine:
                     if self._lower_confirmation_count >= self.required_lower_confirmations:
                         self._confirmation_seen = True
                         self._last_rejection = (
-                            f"{self.required_lower_confirmations} lower-tick confirmations received; next tick is eligible"
+                            f"{self.required_lower_confirmations} lower-tick confirmations received; entry triggered on this digit"
                         )
+                        self._queue_signal(digit, tick_epoch)
                     else:
                         self._last_rejection = (
                             f"lower-tick confirmation {self._lower_confirmation_count}/{self.required_lower_confirmations} received ({digit})"
@@ -328,7 +329,7 @@ class DigitStrategyEngine:
             "signal_id": self._pending_signal_id,
             "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch)),
             "taken": "TRUE",
-            "note": f"{self.required_lower_confirmations} consecutive lower ticks confirmed; entered on the next tick",
+            "note": f"{self.required_lower_confirmations} consecutive lower ticks confirmed; entered on the confirmation digit",
             "rejection_reason": "",
             "lower_confirmation_digit": self._confirmation_digit,
             "entry_digit": entry_digit,
@@ -358,6 +359,15 @@ class DigitStrategyEngine:
             self._last_rejection = "stale digit signal discarded"
             self._sync_state_version()
             return None
+        # Consuming a signal reserves the strategy state for this execution.
+        # Do not leave it armed while proposal/buy is still in progress.
+        self._armed = False
+        self._armed_context = None
+        self._confirmation_seen = False
+        self._lower_confirmation_count = 0
+        self._confirmation_digit = None
+        self._confirmation_epoch = None
+        self._last_rejection = "signal consumed — execution in progress"
         self._sync_state_version()
         return signal
 
