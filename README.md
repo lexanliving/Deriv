@@ -1,432 +1,54 @@
-# MomentumMaster TF
+# MomentumMaster Digit
 
-A multi-market trend terminal for Deriv with a full read-only trading-journal cockpit and an offline learning loop.
+MomentumMaster Digit is a Streamlit terminal for Deriv digit contracts. It supports manual selection from the live market catalogue, rolling last-digit reviews, and automated **Over 6** entries for one- or two-tick contracts.
 
-It trades **Up / Down** as **Call / Put** on a selectable market — **Gold by default**, plus major forex pairs and the synthetic 1-second indices — using a higher-timeframe trend strategy:
+## Strategy behavior
 
-- a duration-aware candle-close trigger
-- confirmation by **30m + 1h** agreement
-- a 25-point confluence score
-- adaptive quality gates
-- an express lane for overwhelming candles
+The bot collects raw quotes and extracts the final displayed digit using the selected symbol’s quote precision. Every minute it reviews fast, medium, and slow rolling windows. The default windows are 20, 50, and 200 ticks.
 
-No barriers.  
-Minute lengths: **1 / 2 / 5 / 15 / 30 / 60**.  
-At most **10 trades per day, per tab**.
+A review arms the Over 6 setup only when digits 7, 8, and 9 have at least the configured minimum share, exceed the combined appearance of digits 1–6 in the fast and medium windows, and remain supported by the slow window. After the review arms, the bot waits for one lower digit from 0 through 6. The next tick becomes eligible for a `DIGITOVER` contract with barrier `6`. The selected duration is one or two ticks; a two-tick contract settles on its final tick and is not two independent attempts.
 
----
-
-## Duration-aware trigger
-
-The trigger candle matches the contract length so timing stays sharp at every duration, while the higher-timeframe confirmation is unchanged:
-
-| Contract | Trigger candle |
-|---|---|
-| 1m  | 5m candle-close trigger |
-| 2m  | 5m candle-close trigger |
-| 5m  | 5m candle-close trigger |
-| 15m | 5m candle-close trigger |
-| 30m | 15m candle-close trigger |
-| 60m | 15m candle-close trigger |
-
-Trend confirmation is always **30m + 1h**.
-
-Signals fire only on a **new trigger-candle close**.
-
----
-
-## Hard gates vs. confidence stack
-
-The flat **25-point score** answers:
-
-> “How good is this setup?”
-
-A separate **hard-gate layer** answers:
-
-> “Is this setup even allowed?”
-
-Hard gates cannot be overridden by a high score.
-
-They include:
-
-- trend agreement
-- trigger break
-- close beyond the fast EMA
-- the express-aware exhaustion limit
-- RSI/price divergence
-- entry-timeframe structure
-- regime-specific gates
-
-The **express lane** widens the exhaustion band only when the candle’s own conviction is overwhelming, so a power breakout that is far from its EMA is taken instead of being chased-and-rejected.
-
----
-
-## Three views
-
-### 1. Terminal — `dashboard.py`
-
-Configure:
-
-- account
-- market
-- stake plan
-- selectivity
-
-Then:
-
-- start / stop the engine
-- watch a themed 5-minute candlestick chart
-- see live trend, status, trades, and the Decision Log
-
-The Decision Log records **every trigger-candle review** — whether it traded or stood aside — along with the market, result, and reason.
-
-The CSV export lives here.
-
----
-
-### 2. Performance Scope — `pages/bubbles.py`
-
-A read-only cockpit with four tabs:
-
-- **Overview**
-- **Calendar**
-- **Trades**
-- **Analytics**
-
-The **Trades** tab shows every trade as a full **BEFORE / AFTER** report:
-
-- the 10 confluence factors
-- entry ADX / RSI / MACD / ATR / close
-- a plain-language read of each entry reading
-- the per-timeframe bias snapshot
-- a narrative of why it was placed
-- a narrative of why it won or lost, including MAE / MFE
-
-Switch between the Terminal and the Scope using the sidebar or the **← Back to Terminal** button.
-
-The Scope reads an append-only archive, so a cleared live log never erases a past day.
-
----
-
-### 3. Research Loop — `pages/research.py`
-
-A read-only offline learning page.
-
-It appears automatically in the sidebar.
-
-It has four tabs:
-
-- **SEND TO Q**
-- **BACKUP**
-- **GATE BACKTEST**
-- **MISSED & AVOIDABLE**
-
-This page:
-
-- places no trades
-- mutates nothing live
-- never changes the strategy by itself
-
-It exists to turn recorded history into sharper future decisions.
-
----
-
-## Offline learning loop
-
-MomentumMaster TF now includes an **offline learning loop**.
-
-This is deliberately conservative.
-
-The bot **does not** rewrite its own strategy at runtime.
-
-It records decisions, then a human reviews the evidence offline and proposes changes that must be forward-tested on demo before being manually opted into.
-
-### What gets recorded
-
-Every trigger-candle review is journaled.
-
-That includes:
-
-- taken setups
-- stand-asides
-- rejection reasons
-- score and threshold
-- factor breakdown
-- regime
-- duration
-- MTF biases
-- outcome
-- P&L
-- MAE / MFE
-
-When a trade is taken, the engine also appends one compact line to:
+The bot does not alternate blindly between Over and Under. It uses the actual live proposal quote and calculates:
 
 ```text
-logs/trade_snapshots.jsonl
+break_even_probability = ask_price / payout
+estimated_edge = estimated_probability - break_even_probability
 ```
 
-Each snapshot contains:
+With quote-aware filtering enabled, the bot refuses the entry unless the estimated edge meets the configured minimum. This prevents a headline return percentage from being treated as a guaranteed advantage.
 
-- signal metadata
-- score / threshold / regime
-- entry price
-- analytical stop / target equivalents
-- last ~40 candles per timeframe
+## Markets and controls
 
-This recorder is isolated and fully swallowed.
+The sidebar loads all currently active markets from Deriv when credentials and an account are available. A broad local catalogue remains available as a fallback. You can manually select the market, one- or two-tick duration, minimum 7–9 share, quote-edge threshold, starting stake, recovery multiplier, maximum recovery steps, and optional session-loss stop.
 
-It cannot affect:
+The recovery multiplier accepts values starting at **1.01**, including the requested **1.10**. The digit profile defaults to a mild **1.10 multiplier** with a maximum of three recovery steps, and it can be disabled from the sidebar for fixed-stake testing. The session-loss stop, daily filled-trade cap, cooldowns, ambiguous-settlement stop, and real-account confirmation remain active. Fixed-stake demo or paper validation is still the safest way to verify the signal before using recovery sizing.
 
-- proposal
-- buy
-- monitoring
-- the async loop
+## Safety behavior
 
-If snapshot writing fails, the bot continues normally.
+Demo accounts are allowed to trade virtual funds. Real accounts remain blocked unless the account is recognized as real and `LIVE` is typed exactly in the sidebar. Unknown account types remain monitoring-only. If a buy or settlement cannot be confirmed, the trade is classified as unknown and the engine stops for manual statement verification.
 
----
+## Setup
 
-## Research Loop tabs
-
-### SEND TO Q
-
-Download:
-
-- the full learning bundle as a zip
-- `postmortem.json`
-
-The bundle contains:
-
-- `trade_journal.csv`
-- `journal_archive.csv`
-- `trade_snapshots.jsonl`
-- `postmortem.json`
-- `gate_backtest.json`
-- `READ_ME_FIRST.txt`
-
-This tab also shows the plain-language lenses:
-
-| Lens | Meaning | Lever |
-|---|---|---|
-| avoidable losses | lost after price was in favour | duration / exit |
-| fragile wins | won but spent too much time against entry | entry timing |
-| gatekeeper factor | weakest soft factor in near-miss trending stand-asides | the one gate to re-test |
-| edges | where the closed sample actually made money | symbol / hour / regime selection |
-
----
-
-### BACKUP
-
-Export:
-
-- master archive CSV
-- merged JSON view
-
-Import:
-
-- archive CSV
-- merged JSON
-
-Import is **idempotent**.
-
-That means:
-
-> importing the same backup twice adds nothing the second time.
-
----
-
-### GATE BACKTEST
-
-A non-destructive offline replay of recorded reviews.
-
-It compares:
-
-- weight variants
-- thresholds
-
-against the real **AS-RECORDED** baseline.
-
-You can export a plain-text preset proposal.
-
-Nothing is auto-applied.
-
----
-
-### MISSED & AVOIDABLE
-
-This tab shows:
-
-- avoidable losses table
-- fragile wins table
-- gatekeeper factor chart
-- edge tables by:
-  - symbol
-  - hour UTC
-  - regime
-
----
-
-## The honest ceiling
-
-This loop is designed to avoid the most common failure mode:
-
-> self-tuning on a tiny sample of noisy binary-option outcomes.
-
-So the system intentionally stops at:
-
-- recording
-- explaining
-- backtesting offline
-- proposing a preset
-
-The human still decides.
-
-The bot never self-modifies.
-
-### Suggested cadence
-
-- Review the bundle **weekly**, not after every trade.
-- Change **one thing at a time**.
-- Forward-test on demo before opting in manually.
-- Trust blank days. Even stand-asides produce useful gate data.
-
----
-
-## How it behaves
-
-The engine runs in a background thread, independent of the browser.
-
-Closing a tab does not stop it.
-
-A watchdog relaunches the engine automatically if it dies while you intend it to run — resuming the stake plan, results, and daily cap.
-
-Every terminal outcome is written to the log with a reason and a signal id:
-
-- won
-- lost
-- cancelled
-- skipped
-- unresolved
-
-Nothing is silently dropped.
-
-Multiple tabs trade concurrently and independently:
-
-- own strategy
-- own stake plan
-- own martingale
-
-Avoid mirror-image markets on different tabs, such as a pair and its USD-inverse, because they move as one doubled bet.
-
-On a real account, orders stay blocked until you type:
-
-```text
-LIVE
-```
-
----
-
-## Project structure
-
-```text
-dashboard.py
-pages/
-  bubbles.py
-  research.py
-src/
-  api_client.py
-  journal.py
-  logger.py
-  persistence.py
-  state_manager.py
-  strategy.py
-  trading_engine.py
-config.py
-requirements.txt
-logs/
-  trade_journal.csv
-  journal_archive.csv
-  trade_snapshots.jsonl
-  deriv_bot.log
-```
-
----
-
-## Credentials
-
-### Streamlit Cloud
-
-Go to:
-
-```text
-App settings → Secrets
-```
-
-Add:
-
-```toml
-DERIV_APP_ID = "your_app_id"
-DERIV_API_TOKEN = "your_pat_token"
-```
-
-### Local `.env`
-
-For local runs, you can also use:
-
-```env
-DERIV_APP_ID=your_app_id
-DERIV_API_TOKEN=your_pat_token
-```
-
----
-
-## Local setup
+Install the dependencies in `requirements.txt`, provide `DERIV_APP_ID` and `DERIV_API_TOKEN` through Streamlit Secrets or the project environment, and start the dashboard with:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 streamlit run dashboard.py
 ```
 
----
+The first recommended run is monitoring or paper/demo mode with quote-aware filtering enabled, fixed stake, and zero recovery steps. The journal records every minute review, rolling digit counts, lower-tick confirmation, quote fields, estimated edge, execution result, and settlement outcome in the `logs` directory.
 
-## Logs and data
+## Project structure
 
-The bot writes:
+| File | Purpose |
+|---|---|
+| `dashboard.py` | Streamlit controls, market selector, digit review display, trade ledger, journal download, and safety controls. |
+| `src/digit_strategy.py` | Rolling digit counts, minute review cadence, 7–9 versus 1–6 condition, lower-tick confirmation, and signal state machine. |
+| `src/trading_engine.py` | Deriv connection, tick subscription, proposal/buy flow, quote-aware gate, recovery sizing, settlement monitoring, and reconnection. |
+| `src/api_client.py` | Current Deriv account, market, tick, proposal, buy, and open-contract requests. |
+| `src/state_manager.py` | Thread-safe runtime state, trade accounting, cooldowns, and recovery state. |
+| `src/journal.py` | Append-only decision and outcome journal with digit-specific fields. |
+| `EXPECTED_BEHAVIOR.md` | Exact operational behavior and entry-state sequence. |
 
-```text
-logs/trade_journal.csv
-logs/journal_archive.csv
-logs/trade_snapshots.jsonl
-logs/deriv_bot.log
-```
+The lightweight build intentionally excludes the former candle-indicator strategy, candle chart pages, AI brain/advisory modules, Plotly dependency, Supabase mirror, and candle-learning backtests. These components do not participate in the selected-market digit execution path; journal backup and restore remain because they protect the digit evidence and settlement history.
 
-The journal archive is the lossless master copy.
-
-The snapshots file is only appended on taken trades and is used for offline review.
-
----
-
-## Safety notes
-
-- Demo accounts use virtual funds.
-- Real accounts require explicit confirmation.
-- Real orders remain blocked until you type `LIVE`.
-- The offline learning loop never auto-applies changes.
-- Any proposed preset should be forward-tested on demo first.
-
----
-
-## Summary
-
-MomentumMaster TF is:
-
-- a live Deriv trend terminal
-- a full decision journal
-- a read-only performance cockpit
-- an offline learning loop
-
-It is built around one principle:
-
-> record everything, learn offline, change one thing at a time, and never let the bot rewrite itself live.
+This software is experimental and does not guarantee profit. A high recent 7–9 percentage can be useful as a hypothesis, but every contract must still be evaluated against the live quote, tested out of sample, and operated with funds you can afford to lose.
