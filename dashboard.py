@@ -196,6 +196,7 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
             min_over6_share=config["min_over6_share"],
             lower_tick_max=config["lower_tick_max"],
             review_interval_seconds=config["review_interval_seconds"],
+            required_lower_confirmations=config.get("required_lower_confirmations", 1),
             digit_windows=config["digit_windows"],
             take_profit_target=config.get("take_profit_target", 0.0),
         )
@@ -357,7 +358,7 @@ with st.sidebar:
         disabled=state.is_running,
         format_func=lambda value: f"{value} lower tick" if value == 1 else f"{value} consecutive lower ticks",
     )
-    st.caption("This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. A higher digit resets the sequence. The original behavior is 1 lower 0–6 tick, then entry on the next tick.")
+    st.caption("This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. The final required lower digit itself triggers entry; a higher digit resets the sequence. Default: 1 lower 0–6 tick, then immediate entry on that same tick.")
 
     st.divider()
     st.markdown("#### Strategy rule")
@@ -548,8 +549,8 @@ def journal_fragment():
     preferred = [
         "timestamp_utc", "symbol", "direction", "taken", "rejection_reason", "score",
         "p_over6_fast", "p_over6_medium", "p_over6_slow", "p_over6_avg_fast", "p_over6_avg_medium", "p_over6_avg_slow",
-        "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow", "lower_confirmation_digit",
-        "lower_confirmation_required", "lower_confirmation_count", "entry_digit", "quote_ask", "quote_payout", "outcome", "pnl",
+        "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow", "review_timestamp_utc", "confirmation_boundary_utc",
+        "lower_confirmation_digit", "lower_confirmation_required", "lower_confirmation_count", "entry_digit", "quote_ask", "quote_payout", "outcome", "pnl",
     ]
     cols = [col for col in preferred if col in df.columns]
     st.dataframe(df[cols], use_container_width=True, height=320, hide_index=True)
