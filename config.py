@@ -27,23 +27,14 @@ DERIV_WS_URL = ""
 # also asks Deriv for the live symbol catalogue and validates the chosen symbol.
 # Unsupported symbol/contract combinations are rejected safely at proposal time.
 AVAILABLE_MARKETS = {
-    "Gold (XAU/USD)": "frxXAUUSD", "Silver (XAG/USD)": "frxXAGUSD",
-    "Platinum (XPT/USD)": "frxXPTUSD", "Palladium (XPD/USD)": "frxXPDUSD",
-    "EUR/USD": "frxEURUSD", "GBP/USD": "frxGBPUSD", "USD/JPY": "frxUSDJPY",
-    "AUD/USD": "frxAUDUSD", "USD/CHF": "frxUSDCHF", "USD/CAD": "frxUSDCAD",
-    "NZD/USD": "frxNZDUSD", "EUR/GBP": "frxEURGBP", "EUR/JPY": "frxEURJPY",
-    "EUR/AUD": "frxEURAUD", "EUR/CAD": "frxEURCAD", "EUR/CHF": "frxEURCHF",
-    "EUR/NZD": "frxEURNZD", "GBP/AUD": "frxGBPAUD", "GBP/CAD": "frxGBPCAD",
-    "GBP/CHF": "frxGBPCHF", "GBP/JPY": "frxGBPJPY", "GBP/NZD": "frxGBPNZD",
-    "AUD/CAD": "frxAUDCAD", "AUD/CHF": "frxAUDCHF", "AUD/JPY": "frxAUDJPY",
-    "AUD/NZD": "frxAUDNZD", "CAD/CHF": "frxCADCHF", "CAD/JPY": "frxCADJPY",
-    "CHF/JPY": "frxCHFJPY", "NZD/CAD": "frxNZDCAD", "NZD/JPY": "frxNZDJPY",
+    # Derived indices only. Financial markets such as forex, commodities,
+    # stocks, and crypto are intentionally not included in the fallback list.
     "Volatility 10 (1s)": "1HZ10V", "Volatility 25 (1s)": "1HZ25V",
     "Volatility 50 (1s)": "1HZ50V", "Volatility 75 (1s)": "1HZ75V",
-    "Volatility 100 (1s)": "1HZ100V", "Volatility 10": "R_10",
-    "Volatility 25": "R_25", "Volatility 50": "R_50", "Volatility 75": "R_75",
-    "Volatility 100": "R_100", "Volatility 150 (1s)": "1HZ150V",
+    "Volatility 100 (1s)": "1HZ100V", "Volatility 150 (1s)": "1HZ150V",
     "Volatility 200 (1s)": "1HZ200V", "Volatility 300 (1s)": "1HZ300V",
+    "Volatility 10": "R_10", "Volatility 25": "R_25", "Volatility 50": "R_50",
+    "Volatility 75": "R_75", "Volatility 100": "R_100",
     "Jump 10": "JD10", "Jump 25": "JD25", "Jump 50": "JD50",
     "Jump 75": "JD75", "Jump 100": "JD100",
     "Boom 300": "BOOM300N", "Boom 500": "BOOM500", "Boom 1000": "BOOM1000",
@@ -60,14 +51,12 @@ DIGIT_TICK_DURATION_OPTIONS = [1, 2]
 DIGIT_DEFAULT_TICK_DURATION = 1
 DIGIT_REVIEW_INTERVAL_SECONDS = 60.0
 DIGIT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
-DIGIT_MIN_OVER6_SHARE = 0.35
+DIGIT_MIN_OVER6_SHARE = 0.31
 DIGIT_LOWER_CONFIRM_MAX = 6
-DIGIT_MIN_QUOTE_EDGE = 0.02
-DIGIT_REQUIRE_QUOTE_EDGE = True
 DIGIT_DEFAULT_RECOVERY_MULTIPLIER = 1.1
 DIGIT_DEFAULT_RECOVERY_ENABLED = True
-DIGIT_MAX_RECOVERY_STEPS = 3
-DIGIT_MAX_SESSION_LOSS = 0.0  # 0 disables the optional session loss stop.
+DIGIT_MAX_RECOVERY_STEPS = 10
+DIGIT_DEFAULT_PROFIT_TARGET = 1.0  # Positive session P&L target; 0 disables the target.
 
 
 MAX_TRADES_PER_DAY = 10
