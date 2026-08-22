@@ -9,6 +9,9 @@ Proposal payout is logged for audit; estimated edge is not an execution gate.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import math
 import time
 import uuid
 from datetime import datetime, timezone
@@ -228,20 +231,31 @@ class TradingEngine:
         """Require strategy-produced lower-digit evidence before any proposal."""
         if not isinstance(entry_record, dict):
             return False, "lower-digit confirmation evidence missing"
-        required = max(1, min(3, int(entry_record.get("lower_confirmation_required", self.required_lower_confirmations) or 0)))
-        observed = int(entry_record.get("lower_confirmation_count", 0) or 0)
-        digit = entry_record.get("lower_confirmation_digit")
         try:
-            digit_value = int(digit)
+            required = max(1, min(3, int(entry_record.get("lower_confirmation_required", self.required_lower_confirmations) or 0)))
+            observed = int(entry_record.get("lower_confirmation_count", 0) or 0)
+            digit_value = int(entry_record.get("lower_confirmation_digit"))
+            entry_digit_value = int(entry_record.get("entry_digit"))
         except (TypeError, ValueError):
-            digit_value = -1
+            return False, "lower-digit confirmation evidence is malformed"
         if required != self.required_lower_confirmations:
             return False, f"lower-confirmation setting mismatch ({required} recorded, {self.required_lower_confirmations} required)"
         if observed < required:
             return False, f"lower-digit confirmation incomplete ({observed}/{required})"
         if not 0 <= digit_value <= self.lower_tick_max:
             return False, "lower-digit confirmation is not a valid 0–6 digit"
-        return True, "lower-digit confirmation verified"
+        if entry_digit_value != digit_value:
+            return False, "entry digit does not match the final lower confirmation digit"
+        try:
+            boundary_epoch = float(entry_record.get("confirmation_boundary_epoch"))
+            entry_epoch = float(entry_record.get("entry_tick_epoch"))
+        except (TypeError, ValueError):
+            return False, "review-boundary timing evidence missing"
+        if not math.isfinite(boundary_epoch) or not math.isfinite(entry_epoch):
+            return False, "review-boundary timing evidence invalid"
+        if entry_epoch <= boundary_epoch:
+            return False, "entry tick was not strictly after the minute review boundary"
+        return True, "lower-digit confirmation and post-review timing verified"
 
     # --------------------------------------------------------------- lifecycle
     async def _validate_symbol(self) -> None:
