@@ -84,6 +84,7 @@ class DigitStrategyEngine:
         self._lower_confirmation_count = 0
         self._confirmation_digit: Optional[int] = None
         self._confirmation_epoch: Optional[float] = None
+        self._confirmation_boundary_epoch: Optional[float] = None
         self._pending_signal: Optional[str] = None
         self._pending_signal_id: Optional[str] = None
         self._pending_signal_time = 0.0
@@ -125,7 +126,11 @@ class DigitStrategyEngine:
         self._digits.append(digit)
 
         if allow_signal and self._armed and self._pending_signal is None:
-            if not self._confirmation_seen:
+            # A minute review establishes the boundary; never count the review
+            # tick itself or any delayed/pre-review tick as confirmation.
+            if self._confirmation_boundary_epoch is not None and tick_epoch <= self._confirmation_boundary_epoch:
+                self._last_rejection = "waiting for first tick after the minute review boundary"
+            elif not self._confirmation_seen:
                 if digit <= self.low_digit_max:
                     self._lower_confirmation_count += 1
                     self._confirmation_digit = digit
@@ -205,6 +210,8 @@ class DigitStrategyEngine:
         if self._last_review_bucket == bucket:
             return None
         self._last_review_bucket = bucket
+        review_boundary_epoch = float(bucket * self.review_interval_seconds)
+        self._confirmation_boundary_epoch = review_boundary_epoch
 
         stats = {name: self._window_stats(size) for name, size in self.windows.items()}
         qualifies, reason = self._candidate(stats)
@@ -231,14 +238,15 @@ class DigitStrategyEngine:
             }
             if not self._armed and self._pending_signal is None:
                 self._armed = True
+            if self._armed and self._pending_signal is None:
+                # Every qualifying minute review starts a fresh sequence. A
+                # partial sequence from the prior minute must never carry over.
                 self._confirmation_seen = False
                 self._confirmation_digit = None
                 self._confirmation_epoch = None
                 self._lower_confirmation_count = 0
                 self._armed_context = dict(self._last_qualifying_context)
-                self._last_rejection = f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6)"
-            elif self._armed:
-                self._last_rejection = f"still armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6)"
+                self._last_rejection = f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) after the review boundary"
         else:
             self._condition_valid = False
             self._last_qualifying_context = None
@@ -251,7 +259,7 @@ class DigitStrategyEngine:
                 self._armed_context = None
             self._last_rejection = reason
 
-        record = self._review_record(stats, qualifies, reason, current)
+        record = self._review_record(stats, qualifies, reason, current, review_epoch=current)
         self._last_review = record
         self._last_evaluation = record
         self._sync_state_version()
@@ -263,8 +271,10 @@ class DigitStrategyEngine:
         qualifies: bool,
         reason: str,
         timestamp: float,
+        review_epoch: Optional[float] = None,
     ) -> Dict[str, Any]:
         fast = stats.get("fast") or {}
+        review_epoch_value = float(review_epoch if review_epoch is not None else (self._armed_context or {}).get("review_epoch", timestamp))
         medium = stats.get("medium") or {}
         slow = stats.get("slow") or {}
         return {
@@ -307,6 +317,11 @@ class DigitStrategyEngine:
             "per_digit_dominance_fast": fast.get("per_digit_dominance", ""),
             "per_digit_dominance_medium": medium.get("per_digit_dominance", ""),
             "per_digit_dominance_slow": slow.get("per_digit_dominance", ""),
+            "review_timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(review_epoch_value)),
+            "confirmation_boundary_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else timestamp)),
+            "review_epoch": review_epoch_value,
+            "confirmation_boundary_epoch": self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else "", 
+            "entry_tick_epoch": "",
             "lower_confirmation_digit": self._confirmation_digit if self._confirmation_digit is not None else "",
             "lower_confirmation_required": self.required_lower_confirmations,
             "lower_confirmation_count": self._lower_confirmation_count,
@@ -324,13 +339,19 @@ class DigitStrategyEngine:
         self._pending_signal_time = time.time()
         base = dict(self._armed_context or {})
         stats = base.get("stats") or {}
-        record = self._review_record(stats, True, "", epoch)
+        review_epoch = (self._armed_context or {}).get("review_epoch", self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else epoch)
+        record = self._review_record(stats, True, "", epoch, review_epoch=review_epoch)
         record.update({
             "signal_id": self._pending_signal_id,
             "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch)),
             "taken": "TRUE",
             "note": f"{self.required_lower_confirmations} consecutive lower ticks confirmed; entered on the confirmation digit",
             "rejection_reason": "",
+            "review_timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime((self._armed_context or {}).get("review_epoch", epoch))),
+            "confirmation_boundary_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else epoch)),
+            "review_epoch": float(review_epoch),
+            "confirmation_boundary_epoch": self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else "",
+            "entry_tick_epoch": float(epoch),
             "lower_confirmation_digit": self._confirmation_digit,
             "entry_digit": entry_digit,
         })
@@ -408,14 +429,16 @@ class DigitStrategyEngine:
             self._confirmation_seen = False
             self._confirmation_digit = None
             self._confirmation_epoch = None
+            self._confirmation_boundary_epoch = self._last_tick_epoch if self._last_tick_epoch is not None else time.time()
             self._lower_confirmation_count = 0
-            self._last_rejection = f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks"
+            self._last_rejection = f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks after the new entry boundary"
         else:
             self._armed = False
             self._armed_context = None
             self._confirmation_seen = False
             self._confirmation_digit = None
             self._confirmation_epoch = None
+            self._confirmation_boundary_epoch = None
             self._lower_confirmation_count = 0
             if not allow_rearm and self._condition_valid:
                 self._last_rejection = "trade finished — re-entry disabled because stopping was requested"
@@ -469,6 +492,7 @@ class DigitStrategyEngine:
             "digit_lower_confirmation": self._confirmation_digit,
             "digit_lower_confirmation_count": self._lower_confirmation_count,
             "digit_required_lower_confirmations": self.required_lower_confirmations,
+            "digit_confirmation_boundary_epoch": self._confirmation_boundary_epoch,
             "digit_last_rejection": self._last_rejection,
             "digit_contract_duration_ticks": self.contract_duration_ticks,
         }
