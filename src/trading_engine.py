@@ -224,6 +224,25 @@ class TradingEngine:
         record["quote_payout"] = payout
         self._journal.record_evaluation(record)
 
+    def _confirmation_gate(self, entry_record: Optional[Dict[str, Any]]) -> tuple[bool, str]:
+        """Require strategy-produced lower-digit evidence before any proposal."""
+        if not isinstance(entry_record, dict):
+            return False, "lower-digit confirmation evidence missing"
+        required = max(1, min(3, int(entry_record.get("lower_confirmation_required", self.required_lower_confirmations) or 0)))
+        observed = int(entry_record.get("lower_confirmation_count", 0) or 0)
+        digit = entry_record.get("lower_confirmation_digit")
+        try:
+            digit_value = int(digit)
+        except (TypeError, ValueError):
+            digit_value = -1
+        if required != self.required_lower_confirmations:
+            return False, f"lower-confirmation setting mismatch ({required} recorded, {self.required_lower_confirmations} required)"
+        if observed < required:
+            return False, f"lower-digit confirmation incomplete ({observed}/{required})"
+        if not 0 <= digit_value <= self.lower_tick_max:
+            return False, "lower-digit confirmation is not a valid 0–6 digit"
+        return True, "lower-digit confirmation verified"
+
     # --------------------------------------------------------------- lifecycle
     async def _validate_symbol(self) -> None:
         try:
@@ -455,6 +474,13 @@ class TradingEngine:
     async def _execute_trade(self, signal: str, entry_record: Optional[Dict[str, Any]], signal_id: Optional[str]) -> None:
         if self._trade_in_progress:
             return
+        if signal == "OVER6":
+            confirmed, confirmation_reason = self._confirmation_gate(entry_record)
+            if not confirmed:
+                self._record_entry_decision(entry_record, False, confirmation_reason)
+                self._strategy.on_signal_skipped()
+                self.state.set_status(f"Over 6 setup skipped — {confirmation_reason}")
+                return
         self._trade_in_progress = True
         self._shared_trade_bought = False
         self._buy_attempted = False
