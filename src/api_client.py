@@ -499,7 +499,9 @@ class DerivAPIClient:
                         raise DerivAPIError("Could not reconnect before the proposal request.", "NOT_CONNECTED")
 
                 response = await self._send_request(payload)
-                proposal = self._require_object(response, "proposal", ("id", "ask_price", "payout", "spot", "spot_time"))
+                # Deriv may omit informational spot fields from a valid proposal.
+                # The engine separately requires numeric ask_price and payout before buy.
+                proposal = self._require_object(response, "proposal", ("id",))
 
                 proposal_id = proposal.get("id")
                 if not isinstance(proposal_id, str) or not proposal_id:
