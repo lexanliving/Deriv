@@ -31,7 +31,10 @@ COLUMNS = [
     "digit_counts_fast", "digit_counts_medium", "digit_counts_slow",
     "p_over6_fast", "p_over6_medium", "p_over6_slow",
     "p_low_fast", "p_low_medium", "p_low_slow",
+    "p_over6_avg_fast", "p_over6_avg_medium", "p_over6_avg_slow",
+    "p_1to6_avg_fast", "p_1to6_avg_medium", "p_1to6_avg_slow",
     "dominance_fast", "dominance_medium", "dominance_slow",
+    "per_digit_dominance_fast", "per_digit_dominance_medium", "per_digit_dominance_slow",
     "lower_confirmation_digit", "entry_digit", "quote_ask", "quote_payout",
     "quote_break_even", "quote_edge", "review_type",
 ]
