@@ -45,6 +45,9 @@ class DerivAPIClient:
         self._ping_task: Optional[asyncio.Task] = None
         self._tick_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._tick_callback_tasks: Set[asyncio.Task] = set()
+        # Tick callbacks update the strategy state and must run in arrival order.
+        # A lock keeps rapid WebSocket ticks from overlapping those transitions.
+        self._tick_callback_lock = asyncio.Lock()
         self._tick_subscription_id: Optional[str] = None
         self._req_id = 0
         self._connected = False
@@ -288,16 +291,21 @@ class DerivAPIClient:
         if callback is None:
             return
 
-        try:
-            result = callback(tick)
-        except Exception:
-            logger.exception("Tick callback raised before returning.")
-            return
+        async def run_serialized() -> None:
+            async with self._tick_callback_lock:
+                current = self._tick_callback
+                if current is None:
+                    return
+                try:
+                    result = current(tick)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("Tick callback failed while processing a tick.")
 
-        if inspect.isawaitable(result):
-            task = asyncio.create_task(result, name="deriv-tick-callback")
-            self._tick_callback_tasks.add(task)
-            task.add_done_callback(self._tick_task_finished)
+        task = asyncio.create_task(run_serialized(), name="deriv-tick-callback")
+        self._tick_callback_tasks.add(task)
+        task.add_done_callback(self._tick_task_finished)
 
     async def _message_listener(self) -> None:
         try:
