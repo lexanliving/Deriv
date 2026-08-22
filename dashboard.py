@@ -350,13 +350,20 @@ with st.sidebar:
         disabled=state.is_running,
         format_func=lambda value: f"{value} tick" if value == 1 else f"{value} ticks",
     )
-    st.caption("Settlement uses the final tick. The confirmation rule waits for one 0–6 tick, then enters on the next tick.")
+    lower_confirmations = st.select_slider(
+        "Lower-tick confirmations before entry",
+        options=[1, 2, 3],
+        value=1,
+        disabled=state.is_running,
+        format_func=lambda value: f"{value} lower tick" if value == 1 else f"{value} consecutive lower ticks",
+    )
+    st.caption("This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. A higher digit resets the sequence. The original behavior is 1 lower 0–6 tick, then entry on the next tick.")
 
     st.divider()
     st.markdown("#### Strategy rule")
     min_over6_share_pct = st.slider("Minimum recent 7–9 share (%)", 30, 60, int(round(DIGIT_MIN_OVER6_SHARE * 100)), 1, disabled=state.is_running)
     min_over6_share = min_over6_share_pct / 100.0
-    st.caption(f"{min_over6_share_pct}% means at least that share of recent ticks ends in 7, 8, or 9. Because the groups contain 3 versus 6 digits, the rule compares average frequency per digit: (7–9 share ÷ 3) > (1–6 share ÷ 6). Fast/medium use {min_over6_share_pct}%; slow support uses at least {max(30, min_over6_share_pct - 1)}%. Windows: {DIGIT_WINDOWS['fast']} / {DIGIT_WINDOWS['medium']} / {DIGIT_WINDOWS['slow']} ticks; lower confirmation ≤ {DIGIT_LOWER_CONFIRM_MAX}.")
+    st.caption(f"{min_over6_share_pct}% means at least that share of recent ticks ends in 7, 8, or 9. Because the groups contain 3 versus 6 digits, the rule compares average frequency per digit: (7–9 share ÷ 3) > (1–6 share ÷ 6). Fast/medium use {min_over6_share_pct}%; slow support uses at least {max(30, min_over6_share_pct - 1)}%. Windows: {DIGIT_WINDOWS['fast']} / {DIGIT_WINDOWS['medium']} / {DIGIT_WINDOWS['slow']} ticks. Lower confirmation is separate and currently set to {lower_confirmations}.")
 
     st.divider()
     st.markdown("#### Account safety")
@@ -407,6 +414,7 @@ with st.sidebar:
                 "quote_precision": 2,
                 "min_over6_share": float(min_over6_share),
                 "lower_tick_max": DIGIT_LOWER_CONFIRM_MAX,
+                "required_lower_confirmations": int(lower_confirmations),
                 "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
                 "digit_windows": dict(DIGIT_WINDOWS),
             })
@@ -488,10 +496,12 @@ def digit_panel_fragment():
         st.caption("Example: 60.0% in a 20-tick window means 12 of 20 ticks ended in 7, 8, or 9. The strategy compares average frequency per digit as well: 60% ÷ 3 = 20% for each 7–9 digit group, versus the 1–6 average.")
         armed = bool(s.get("digit_armed"))
         confirmed = bool(s.get("digit_lower_confirmed"))
+        required_lower = int(s.get("digit_required_lower_confirmations", 1) or 1)
+        lower_count = int(s.get("digit_lower_confirmation_count", 0) or 0)
         if armed and confirmed:
-            st.success(f"Lower tick confirmed: {s.get('digit_lower_confirmation')}. The next tick is eligible for Over 6.")
+            st.success(f"Lower sequence confirmed ({lower_count}/{required_lower}). The next tick is eligible for Over 6.")
         elif armed:
-            st.warning("7–9 condition is armed. Waiting for one lower digit from 0 to 6.")
+            st.warning(f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive.")
         else:
             st.info(str(s.get("digit_last_rejection") or "Collecting digit history…"))
     with right:
