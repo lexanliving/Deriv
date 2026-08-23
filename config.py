@@ -22,12 +22,8 @@ DERIV_APP_ID = os.getenv("DERIV_APP_ID") or _streamlit_secret("DERIV_APP_ID") or
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN") or _streamlit_secret("DERIV_API_TOKEN") or ""
 DERIV_WS_URL = ""
 
-# Broad local catalogue used immediately by the selector. At startup the engine
-# also asks Deriv for the live symbol catalogue and validates the chosen symbol.
-# Unsupported symbol/contract combinations are rejected safely at proposal time.
+# Derived indices only.
 AVAILABLE_MARKETS = {
-    # Derived indices only. Financial markets such as forex, commodities,
-    # stocks, and crypto are intentionally not included in the fallback list.
     "Volatility 10 (1s)": "1HZ10V",
     "Volatility 25 (1s)": "1HZ25V",
     "Volatility 50 (1s)": "1HZ50V",
@@ -68,20 +64,33 @@ DIGIT_REVIEW_INTERVAL_SECONDS = 60.0
 
 DIGIT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
 
-# New: default window-stage switches.
-# Set any of these to False if you want that stage ignored by default.
+# Window stage switches.
 DIGIT_WINDOW_ENABLED = {
     "fast": True,
     "medium": True,
     "slow": True,
 }
 
+# Global fallback threshold.
 DIGIT_MIN_OVER6_SHARE = 0.31
+
+# Separate threshold for each window.
+DIGIT_MIN_OVER6_SHARES = {
+    "fast": 0.31,
+    "medium": 0.31,
+    "slow": 0.30,
+}
+
+# Lower digit values are still 0 through 6 for Over 6.
 DIGIT_LOWER_CONFIRM_MAX = 6
+
+# New: maximum selectable lower-tick confirmation length.
+DIGIT_LOWER_CONFIRMATION_MAX = 20
+
 DIGIT_DEFAULT_RECOVERY_MULTIPLIER = 1.1
 DIGIT_DEFAULT_RECOVERY_ENABLED = True
 DIGIT_MAX_RECOVERY_STEPS = 10
-DIGIT_DEFAULT_PROFIT_TARGET = 1.0  # Positive session P&L target; 0 disables the target.
+DIGIT_DEFAULT_PROFIT_TARGET = 1.0
 
 MAX_TRADES_PER_DAY = 10
 CURRENCY = "USD"
