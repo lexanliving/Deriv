@@ -54,6 +54,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+configured_pat = DERIV_API_TOKEN.strip()
+
 st.markdown(
     """
     <style>
@@ -139,12 +141,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-configured_pat = DERIV_API_TOKEN.strip()
-
 # ---------------------------------------------------------------------------
 # Per-session state.
-# This is intentional: each browser tab/session can run one market.
-# To run multiple markets, open multiple tabs.
+# Each browser tab/session can run one market.
+# Open more tabs to run more markets at the same time.
 # ---------------------------------------------------------------------------
 
 if "state_manager" not in st.session_state:
@@ -334,12 +334,12 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
     return True
 
 
-RESTART_COOLDOWN_SECONDS = 3.0
+RESTART_COOLDOWN_SECONDS = 5.0
 MAX_AUTO_RESTARTS = 0  # 0 = unlimited automatic restarts while should_run is True.
 HEALTHY_WINDOW_SECONDS = 180.0
 
 
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=2.0)
 def watchdog_fragment():
     if not st.session_state.get("should_run", False):
         return
@@ -360,6 +360,9 @@ def watchdog_fragment():
             st.session_state.auto_restart_count = 0
         return
 
+    if now - float(st.session_state.get("last_auto_restart", 0.0)) < RESTART_COOLDOWN_SECONDS:
+        return
+
     count = int(st.session_state.get("auto_restart_count", 0))
 
     if MAX_AUTO_RESTARTS and count >= MAX_AUTO_RESTARTS:
@@ -367,10 +370,6 @@ def watchdog_fragment():
         state.set_running(False)
         state.set_error(f"The engine stopped {MAX_AUTO_RESTARTS} times in a row — auto-restart paused.")
         state.set_status("Auto-restart paused.")
-        return
-
-    backoff = 0.0 if count == 0 else min(30.0, RESTART_COOLDOWN_SECONDS * (2 ** min(count, 3)))
-    if now - float(st.session_state.get("last_auto_restart", 0.0)) < backoff:
         return
 
     config = st.session_state.get("engine_config")
@@ -512,14 +511,15 @@ with st.sidebar:
     )
 
     st.caption(
-        "This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. "
-        "The final required lower digit itself triggers entry; a higher digit resets the sequence. "
-        "The lower sequence must occur strictly after the actual minute-review boundary and inside the same minute bucket."
+        "Entry timing rule: after a qualifying minute review, the bot waits for the configured number of consecutive lower digits 0–6. "
+        "The final lower digit triggers entry. If any 7–9 digit appears before the sequence completes, "
+        "the signal is killed completely for that review window and is not retried."
     )
 
     st.divider()
 
     st.markdown("#### Strategy rule")
+
     min_over6_share_pct = st.slider(
         "Minimum recent 7–9 share (%)",
         30,
@@ -530,18 +530,58 @@ with st.sidebar:
     )
     min_over6_share = min_over6_share_pct / 100.0
 
+    st.markdown("#### Rolling digit windows")
+
+    fast_window = st.number_input(
+        "Fast window (ticks)",
+        min_value=5,
+        max_value=10000,
+        value=int(DIGIT_WINDOWS.get("fast", 20)),
+        step=1,
+        disabled=state.is_running,
+    )
+
+    medium_window = st.number_input(
+        "Medium window (ticks)",
+        min_value=5,
+        max_value=10000,
+        value=int(DIGIT_WINDOWS.get("medium", 50)),
+        step=1,
+        disabled=state.is_running,
+    )
+
+    slow_window = st.number_input(
+        "Slow window (ticks)",
+        min_value=5,
+        max_value=10000,
+        value=int(DIGIT_WINDOWS.get("slow", 200)),
+        step=1,
+        disabled=state.is_running,
+    )
+
+    digit_windows = {
+        "fast": int(fast_window),
+        "medium": int(medium_window),
+        "slow": int(slow_window),
+    }
+
+    if fast_window >= medium_window or medium_window >= slow_window:
+        st.warning("Usually the windows should be ordered like fast < medium < slow, for example 20 / 50 / 200.")
+
     st.caption(
         f"{min_over6_share_pct}% means at least that share of recent ticks ends in 7, 8, or 9. "
         "Because the groups contain 3 versus 6 digits, the rule compares average frequency per digit: "
         "(7–9 share ÷ 3) > (1–6 share ÷ 6). "
         f"Fast/medium use {min_over6_share_pct}%; slow support uses at least {max(30, min_over6_share_pct - 1)}%. "
-        f"Windows: {DIGIT_WINDOWS['fast']} / {DIGIT_WINDOWS['medium']} / {DIGIT_WINDOWS['slow']} ticks. "
-        f"Lower confirmation is separate and currently set to {lower_confirmations}."
+        f"Windows: {fast_window} / {medium_window} / {slow_window} ticks. "
+        f"Lower confirmation is separate and currently set to {lower_confirmations}. "
+        "A 7–9 digit before lower-sequence completion kills the signal for that review window."
     )
 
     st.divider()
 
     st.markdown("#### Account safety")
+
     if selected_account and account_type == "REAL":
         live_text = st.text_input("Type LIVE to enable real orders", max_chars=4, disabled=state.is_running)
         real_execution_confirmed = live_text == "LIVE"
@@ -641,7 +681,7 @@ with st.sidebar:
                     "lower_tick_max": DIGIT_LOWER_CONFIRM_MAX,
                     "required_lower_confirmations": int(lower_confirmations),
                     "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
-                    "digit_windows": dict(DIGIT_WINDOWS),
+                    "digit_windows": digit_windows,
                 }
             )
             st.rerun()
@@ -676,7 +716,7 @@ st.markdown(
 )
 
 
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=2.0)
 def status_fragment():
     message = state.error_message or state.status_message
     color = "#fb7185" if state.error_message else "#34d399" if state.is_running else "#8294b0"
@@ -686,7 +726,7 @@ def status_fragment():
     )
 
 
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=2.0)
 def metrics_fragment():
     stats = state.get_performance_stats()
     mart = state.get_martingale_state()
@@ -729,7 +769,7 @@ def metrics_fragment():
             )
 
 
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=2.0)
 def digit_panel_fragment():
     s = state.get_strategy_state()
     windows = s.get("digit_windows") or {}
@@ -763,7 +803,8 @@ def digit_panel_fragment():
         st.caption(
             "Example: 60.0% in a 20-tick window means 12 of 20 ticks ended in 7, 8, or 9. "
             "The strategy compares average frequency per digit as well: 60% ÷ 3 = 20% for each 7–9 digit group, "
-            "versus the 1–6 average."
+            "versus the 1–6 average. "
+            "If a 7–9 digit appears before the lower sequence completes, the signal is killed for that review window."
         )
 
         armed = bool(s.get("digit_armed"))
@@ -778,7 +819,8 @@ def digit_panel_fragment():
                 st.success(f"Lower sequence confirmed ({lower_count}/{required_lower}); entry trigger recorded.")
         elif armed:
             st.warning(
-                f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive."
+                f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive. "
+                "Any 7–9 digit before completion kills this signal."
             )
         else:
             st.info(str(s.get("digit_last_rejection") or "Collecting digit history…"))
@@ -796,7 +838,7 @@ def digit_panel_fragment():
         )
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=8.0)
 def ledger_fragment():
     st.markdown('<div class="mm-section">Trades</div>', unsafe_allow_html=True)
 
@@ -823,7 +865,7 @@ def ledger_fragment():
     st.dataframe(pd.DataFrame(records), use_container_width=True, height=300, hide_index=True)
 
 
-@st.fragment(run_every=10.0)
+@st.fragment(run_every=15.0)
 def journal_fragment():
     journal = get_journal()
 
