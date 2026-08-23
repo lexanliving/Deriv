@@ -38,6 +38,7 @@ from config import (
     DIGIT_REVIEW_INTERVAL_SECONDS,
     DIGIT_TICK_DURATION_OPTIONS,
     DIGIT_WINDOWS,
+    DIGIT_WINDOW_ENABLED,
     DERIV_APP_ID,
     DERIV_API_TOKEN,
 )
@@ -140,12 +141,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-# ---------------------------------------------------------------------------
-# Per-session state.
-# Each browser tab/session can run one market.
-# Open more tabs to run more markets at the same time.
-# ---------------------------------------------------------------------------
 
 if "state_manager" not in st.session_state:
     st.session_state.state_manager = StateManager()
@@ -299,6 +294,7 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
             review_interval_seconds=config["review_interval_seconds"],
             required_lower_confirmations=config.get("required_lower_confirmations", 1),
             digit_windows=config["digit_windows"],
+            digit_window_enabled=config.get("digit_window_enabled"),
             take_profit_target=config.get("take_profit_target", 0.0),
         )
 
@@ -334,9 +330,9 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
     return True
 
 
-RESTART_COOLDOWN_SECONDS = 5.0
-MAX_AUTO_RESTARTS = 0  # 0 = unlimited automatic restarts while should_run is True.
-HEALTHY_WINDOW_SECONDS = 180.0
+RESTART_COOLDOWN_SECONDS = 20.0
+MAX_AUTO_RESTARTS = 5
+HEALTHY_WINDOW_SECONDS = 120.0
 
 
 @st.fragment(run_every=2.0)
@@ -360,16 +356,17 @@ def watchdog_fragment():
             st.session_state.auto_restart_count = 0
         return
 
-    if now - float(st.session_state.get("last_auto_restart", 0.0)) < RESTART_COOLDOWN_SECONDS:
+    if now - st.session_state.get("last_auto_restart", 0.0) < RESTART_COOLDOWN_SECONDS:
         return
 
-    count = int(st.session_state.get("auto_restart_count", 0))
+    count = st.session_state.get("auto_restart_count", 0)
 
-    if MAX_AUTO_RESTARTS and count >= MAX_AUTO_RESTARTS:
+    if count >= MAX_AUTO_RESTARTS:
         st.session_state.should_run = False
         state.set_running(False)
         state.set_error(f"The engine stopped {MAX_AUTO_RESTARTS} times in a row — auto-restart paused.")
         state.set_status("Auto-restart paused.")
+        st.rerun()
         return
 
     config = st.session_state.get("engine_config")
@@ -380,7 +377,7 @@ def watchdog_fragment():
 
     st.session_state.last_auto_restart = now
     st.session_state.auto_restart_count = count + 1
-    state.set_status(f"Engine stopped unexpectedly — restarting ({count + 1})…")
+    state.set_status(f"Engine stopped unexpectedly — restarting ({count + 1}/{MAX_AUTO_RESTARTS})…")
 
     if not _launch_engine(config, reset_state=False):
         st.session_state.should_run = False
@@ -411,7 +408,7 @@ def stop_bot() -> None:
 
 with st.sidebar:
     st.markdown("### Digit terminal")
-    st.caption("One market per browser tab/session. Open more tabs to run more markets.")
+    st.caption("Rolling last-digit reviews · Over 6 · 1–2 ticks")
 
     accounts: List[Dict[str, Any]] = []
     account_error = ""
@@ -511,9 +508,9 @@ with st.sidebar:
     )
 
     st.caption(
-        "Entry timing rule: after a qualifying minute review, the bot waits for the configured number of consecutive lower digits 0–6. "
-        "The final lower digit triggers entry. If any 7–9 digit appears before the sequence completes, "
-        "the signal is killed completely for that review window and is not retried."
+        "This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. "
+        "The final required lower digit itself triggers entry; a higher digit resets the sequence. "
+        "Default: 1 lower 0–6 tick, then immediate entry on that same tick."
     )
 
     st.divider()
@@ -532,12 +529,24 @@ with st.sidebar:
 
     st.markdown("#### Rolling digit windows")
 
+    use_fast = st.checkbox(
+        "Use fast window gate",
+        value=bool(DIGIT_WINDOW_ENABLED.get("fast", True)),
+        disabled=state.is_running,
+    )
+
     fast_window = st.number_input(
         "Fast window (ticks)",
         min_value=5,
         max_value=10000,
         value=int(DIGIT_WINDOWS.get("fast", 20)),
         step=1,
+        disabled=state.is_running or not use_fast,
+    )
+
+    use_medium = st.checkbox(
+        "Use medium window gate",
+        value=bool(DIGIT_WINDOW_ENABLED.get("medium", True)),
         disabled=state.is_running,
     )
 
@@ -547,6 +556,12 @@ with st.sidebar:
         max_value=10000,
         value=int(DIGIT_WINDOWS.get("medium", 50)),
         step=1,
+        disabled=state.is_running or not use_medium,
+    )
+
+    use_slow = st.checkbox(
+        "Use slow window support",
+        value=bool(DIGIT_WINDOW_ENABLED.get("slow", True)),
         disabled=state.is_running,
     )
 
@@ -556,7 +571,7 @@ with st.sidebar:
         max_value=10000,
         value=int(DIGIT_WINDOWS.get("slow", 200)),
         step=1,
-        disabled=state.is_running,
+        disabled=state.is_running or not use_slow,
     )
 
     digit_windows = {
@@ -565,17 +580,25 @@ with st.sidebar:
         "slow": int(slow_window),
     }
 
-    if fast_window >= medium_window or medium_window >= slow_window:
-        st.warning("Usually the windows should be ordered like fast < medium < slow, for example 20 / 50 / 200.")
+    digit_window_enabled = {
+        "fast": bool(use_fast),
+        "medium": bool(use_medium),
+        "slow": bool(use_slow),
+    }
 
+    windows_enabled = any(digit_window_enabled.values())
+
+    if not windows_enabled:
+        st.error("Enable at least one rolling window. If all windows are disabled, the bot can never arm.")
+
+    enabled_names = [name for name, enabled in digit_window_enabled.items() if enabled]
     st.caption(
         f"{min_over6_share_pct}% means at least that share of recent ticks ends in 7, 8, or 9. "
         "Because the groups contain 3 versus 6 digits, the rule compares average frequency per digit: "
         "(7–9 share ÷ 3) > (1–6 share ÷ 6). "
-        f"Fast/medium use {min_over6_share_pct}%; slow support uses at least {max(30, min_over6_share_pct - 1)}%. "
-        f"Windows: {fast_window} / {medium_window} / {slow_window} ticks. "
-        f"Lower confirmation is separate and currently set to {lower_confirmations}. "
-        "A 7–9 digit before lower-sequence completion kills the signal for that review window."
+        f"Enabled windows: {', '.join(enabled_names) if enabled_names else 'none'}. "
+        "Disabled windows are ignored completely. All enabled windows must qualify. "
+        f"Lower confirmation is separate and currently set to {lower_confirmations}."
     )
 
     st.divider()
@@ -660,6 +683,8 @@ with st.sidebar:
     if start_pressed:
         if not selected_account:
             st.error("Choose a Deriv account first.")
+        elif not windows_enabled:
+            st.error("Enable at least one rolling window before starting.")
         else:
             start_bot(
                 {
@@ -682,6 +707,7 @@ with st.sidebar:
                     "required_lower_confirmations": int(lower_confirmations),
                     "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
                     "digit_windows": digit_windows,
+                    "digit_window_enabled": digit_window_enabled,
                 }
             )
             st.rerun()
@@ -803,8 +829,8 @@ def digit_panel_fragment():
         st.caption(
             "Example: 60.0% in a 20-tick window means 12 of 20 ticks ended in 7, 8, or 9. "
             "The strategy compares average frequency per digit as well: 60% ÷ 3 = 20% for each 7–9 digit group, "
-            "versus the 1–6 average. "
-            "If a 7–9 digit appears before the lower sequence completes, the signal is killed for that review window."
+            "versus the 1–6 average. Disabled windows are still shown for diagnostics if enough ticks exist, "
+            "but they are not used as entry gates."
         )
 
         armed = bool(s.get("digit_armed"))
@@ -819,8 +845,7 @@ def digit_panel_fragment():
                 st.success(f"Lower sequence confirmed ({lower_count}/{required_lower}); entry trigger recorded.")
         elif armed:
             st.warning(
-                f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive. "
-                "Any 7–9 digit before completion kills this signal."
+                f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive."
             )
         else:
             st.info(str(s.get("digit_last_rejection") or "Collecting digit history…"))
