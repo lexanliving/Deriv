@@ -65,9 +65,33 @@ DIGIT_DEFAULT_BARRIER = 6
 DIGIT_TICK_DURATION_OPTIONS = [1, 2]
 DIGIT_DEFAULT_TICK_DURATION = 1
 DIGIT_REVIEW_INTERVAL_SECONDS = 60.0
+
 DIGIT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
+
+# Optional window toggles / per-window thresholds for newer dashboard versions.
+DIGIT_WINDOW_ENABLED = {
+    "fast": True,
+    "medium": True,
+    "slow": True,
+}
+
 DIGIT_MIN_OVER6_SHARE = 0.31
+
+DIGIT_MIN_OVER6_SHARES = {
+    "fast": 0.31,
+    "medium": 0.31,
+    "slow": 0.30,
+}
+
+# Lower digit values are still 0 through 6 for Over 6.
 DIGIT_LOWER_CONFIRM_MAX = 6
+
+# Maximum selectable lower-tick confirmation length in newer dashboard versions.
+DIGIT_LOWER_CONFIRMATION_MAX = 20
+
+# Default lower confirmation count.
+DIGIT_DEFAULT_LOWER_CONFIRMATIONS = 1
+
 DIGIT_DEFAULT_RECOVERY_MULTIPLIER = 1.1
 DIGIT_DEFAULT_RECOVERY_ENABLED = True
 DIGIT_MAX_RECOVERY_STEPS = 10
