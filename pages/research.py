@@ -1,9 +1,9 @@
-"""pages/research.py — Digit Research Lab.
+"""pages/research.py — Digit Research Lab with full bot-lifecycle backtest.
 
 Read-only research page.
 Places no trades.
 Does not modify live strategy behavior.
-Uses a local research tape and the existing journal.
+Can run alongside the live dashboard bot.
 """
 from __future__ import annotations
 
@@ -189,10 +189,6 @@ st.markdown(
 )
 
 
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
-
 def _kpi(label: str, value: str, sub: str, accent: str) -> str:
     return (
         f'<div class="rl-kpi" style="--ac:{html.escape(accent)}">'
@@ -269,10 +265,6 @@ def _render_month_calendar(year: int, month: int, days: dict) -> str:
     return "".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Cache loaders
-# ---------------------------------------------------------------------------
-
 @st.cache_data(ttl=5, show_spinner=False)
 def _db_token():
     try:
@@ -318,17 +310,14 @@ def _load_accounts(app_id: str, token: str):
     return rl.get_accounts_sync(token, app_id)
 
 
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-
 st.markdown(
     """
     <div class="rl-panel">
-        <div class="rl-h">Digit Research Lab · evidence collector · full condition backtest · calendar · advisor</div>
+        <div class="rl-h">Digit Research Lab · full bot-lifecycle backtest · calendar · advisor</div>
         <div class="mut">
             Read-only research branch. This page places no trades and does not modify live strategy behavior.
-            Simulated backtests are paper estimates based on collected tick evidence and the payout assumption.
+            It can run alongside the real bot. Simulated backtests include cooldowns, recovery, daily cap,
+            lower-digit sequence behavior, and the payout assumption.
         </div>
     </div>
     """,
@@ -336,7 +325,7 @@ st.markdown(
 )
 
 tab_overview, tab_calendar, tab_evidence, tab_backtest, tab_advisor, tab_backup = st.tabs(
-    ["OVERVIEW", "CALENDAR", "EVIDENCE", "FULL BACKTEST", "ADVISOR", "BACKUP"]
+    ["OVERVIEW", "CALENDAR", "EVIDENCE", "FULL BOT BACKTEST", "ADVISOR", "BACKUP"]
 )
 
 actual_rows = _actual_rows(_journal_token())
@@ -372,10 +361,6 @@ st.markdown(
 )
 
 
-# ---------------------------------------------------------------------------
-# Overview
-# ---------------------------------------------------------------------------
-
 with tab_overview:
     st.markdown('<div class="rl-h">Actual journal daily progress</div>', unsafe_allow_html=True)
 
@@ -401,10 +386,6 @@ with tab_overview:
         st.line_chart(sim_df.set_index("date")[["cum_pnl"]])
 
 
-# ---------------------------------------------------------------------------
-# Calendar
-# ---------------------------------------------------------------------------
-
 with tab_calendar:
     st.markdown('<div class="rl-h">Progress calendar</div>', unsafe_allow_html=True)
 
@@ -424,7 +405,7 @@ with tab_calendar:
         if source == "Actual journal":
             st.info("No actual journal daily progress yet.")
         else:
-            st.info("No simulated trades yet. Run the full backtest first.")
+            st.info("No simulated trades yet. Run the full bot backtest first.")
     else:
         days = {row["date"]: row for row in daily_for_calendar}
         years = sorted({int(row["date"][:4]) for row in daily_for_calendar if row.get("date")})
@@ -470,10 +451,6 @@ with tab_calendar:
             _table(pd.DataFrame(yearly), height=260)
 
 
-# ---------------------------------------------------------------------------
-# Evidence collector
-# ---------------------------------------------------------------------------
-
 with tab_evidence:
     st.markdown(
         """
@@ -481,8 +458,7 @@ with tab_evidence:
             <div class="rl-h">Research evidence collector</div>
             <div class="mut">
                 This fetches Deriv tick history and stores it locally in logs/research.db.
-                It is read-only. It does not trade.
-                Deriv tick-history limits apply, so collect evidence regularly to build a long-term tape.
+                It is read-only. It does not trade. It can run while the live bot is running.
             </div>
         </div>
         """,
@@ -583,19 +559,15 @@ with tab_evidence:
             st.info("No research tape stored yet.")
 
 
-# ---------------------------------------------------------------------------
-# Full backtest
-# ---------------------------------------------------------------------------
-
 with tab_backtest:
     st.markdown(
         """
         <div class="rl-panel">
-            <div class="rl-h">Full condition backtest</div>
+            <div class="rl-h">Full bot-lifecycle backtest</div>
             <div class="mut">
-                Runs paper trades across condition combinations using the collected tape.
-                Settlement assumption: a 1-tick contract settles on the next available tick after the trigger;
-                a 2-tick contract settles two ticks after the trigger.
+                Simulates your bot logic against the collected tape:
+                reviews, lower sequence, cooldowns, recovery, daily cap, warmup,
+                one attempt per UTC minute bucket, and optional take-profit.
             </div>
         </div>
         """,
@@ -616,34 +588,38 @@ with tab_backtest:
         thresholds = st.multiselect(
             "Thresholds (%)",
             options=[28, 30, 31, 33, 35, 37, 40],
-            default=[30, 31, 33, 35],
+            default=[31],
             key="backtest_thresholds",
         )
 
         lower_ns = st.multiselect(
             "Lower confirmation lengths",
             options=[1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20],
-            default=[1, 2, 3, 5, 8],
+            default=[1, 2, 3],
             key="backtest_lower_ns",
         )
 
         upper_modes = st.multiselect(
             "Upper-digit behavior",
-            options=["kill", "reset"],
-            default=["kill", "reset"],
+            options=["reset", "kill"],
+            default=["reset"],
             key="backtest_upper_modes",
+            help=(
+                "Live default behavior is reset: a 7–9 digit resets the lower sequence. "
+                "Kill is hypothetical unless your live bot has been changed to kill."
+            ),
         )
 
         window_options = {
-            "10/30/120": (10, 30, 120),
             "20/50/200": (20, 50, 200),
+            "10/30/120": (10, 30, 120),
             "30/80/300": (30, 80, 300),
         }
 
         selected_window_labels = st.multiselect(
             "Window sets",
             options=list(window_options.keys()),
-            default=list(window_options.keys()),
+            default=["20/50/200"],
             key="backtest_window_sets",
         )
 
@@ -664,21 +640,82 @@ with tab_backtest:
             key="backtest_payout",
         )
 
+        with st.expander("Bot lifecycle settings", expanded=True):
+            use_cooldown = st.checkbox("Use cooldown gates", value=True, key="backtest_use_cooldown")
+
+            c1, c2, c3 = st.columns(3)
+
+            initial_stake = c1.number_input(
+                "Initial stake",
+                min_value=0.35,
+                max_value=10000.0,
+                value=1.0,
+                step=0.05,
+                key="backtest_initial_stake",
+            )
+
+            martingale_multiplier = c2.number_input(
+                "Recovery multiplier",
+                min_value=1.00,
+                max_value=4.00,
+                value=1.10,
+                step=0.01,
+                key="backtest_multiplier",
+            )
+
+            max_martingale_steps = c3.number_input(
+                "Max recovery steps",
+                min_value=0,
+                max_value=20,
+                value=10,
+                step=1,
+                key="backtest_max_steps",
+            )
+
+            d1, d2, d3 = st.columns(3)
+
+            daily_cap = d1.number_input(
+                "Daily filled-trade cap",
+                min_value=0,
+                max_value=100,
+                value=10,
+                step=1,
+                key="backtest_daily_cap",
+            )
+
+            take_profit_target = d2.number_input(
+                "Take-profit target (0 disables)",
+                min_value=0.0,
+                max_value=100000.0,
+                value=0.0,
+                step=1.0,
+                key="backtest_take_profit",
+            )
+
+            warmup_seconds = d3.number_input(
+                "Warmup seconds",
+                min_value=0,
+                max_value=300,
+                value=10,
+                step=1,
+                key="backtest_warmup",
+            )
+
         min_trades = st.number_input(
             "Minimum trades per condition",
             min_value=0,
             max_value=1000,
-            value=3,
+            value=1,
             step=1,
             key="backtest_min_trades",
         )
 
-        if st.button("Run full condition backtest", type="primary", use_container_width=True):
+        if st.button("Run full bot backtest", type="primary", use_container_width=True):
             if not thresholds or not lower_ns or not upper_modes or not selected_window_labels:
                 st.warning("Select at least one threshold, lower length, upper mode, and window set.")
             else:
-                with st.spinner("Running full condition backtest…"):
-                    results = rl.run_full_backtest(
+                with st.spinner("Running full bot-lifecycle backtest…"):
+                    results = rl.run_full_bot_backtest(
                         symbol=symbol,
                         thresholds_pct=thresholds,
                         lower_ns=lower_ns,
@@ -686,18 +723,37 @@ with tab_backtest:
                         window_sets=[window_options[label] for label in selected_window_labels],
                         duration_ticks=int(duration_ticks),
                         payout_ratio=float(payout_ratio),
+                        initial_stake=float(initial_stake),
+                        martingale_multiplier=float(martingale_multiplier),
+                        max_martingale_steps=int(max_martingale_steps),
+                        daily_cap=int(daily_cap),
+                        take_profit_target=float(take_profit_target),
+                        use_cooldown=bool(use_cooldown),
+                        warmup_seconds=float(warmup_seconds),
                         min_trades=int(min_trades),
                     )
 
+                    settings = {
+                        "symbol": symbol,
+                        "duration_ticks": int(duration_ticks),
+                        "payout_ratio": float(payout_ratio),
+                        "initial_stake": float(initial_stake),
+                        "martingale_multiplier": float(martingale_multiplier),
+                        "max_martingale_steps": int(max_martingale_steps),
+                        "daily_cap": int(daily_cap),
+                        "take_profit_target": float(take_profit_target),
+                        "use_cooldown": bool(use_cooldown),
+                        "warmup_seconds": float(warmup_seconds),
+                    }
+
                     st.session_state.research_results = results
-                    st.session_state.research_symbol = symbol
-                    st.session_state.research_payout = float(payout_ratio)
+                    st.session_state.research_settings = settings
 
                     if results:
                         best = results[0]
                         st.session_state.best_condition = best
 
-                        trades = rl.simulate_condition_trades(
+                        trades = rl.simulate_bot_condition_trades(
                             symbol=symbol,
                             threshold_pct=best["threshold_pct"],
                             lower_n=best["lower_N"],
@@ -709,6 +765,13 @@ with tab_backtest:
                             ),
                             duration_ticks=best["duration_ticks"],
                             payout_ratio=float(payout_ratio),
+                            initial_stake=float(initial_stake),
+                            martingale_multiplier=float(martingale_multiplier),
+                            max_martingale_steps=int(max_martingale_steps),
+                            daily_cap=int(daily_cap),
+                            take_profit_target=float(take_profit_target),
+                            use_cooldown=bool(use_cooldown),
+                            warmup_seconds=float(warmup_seconds),
                         )
 
                         st.session_state.sim_trades = trades
@@ -724,7 +787,7 @@ with tab_backtest:
         results = st.session_state.get("research_results")
 
         if results:
-            st.markdown('<div class="rl-h">Condition results</div>', unsafe_allow_html=True)
+            st.markdown('<div class="rl-h">Full bot-lifecycle condition results</div>', unsafe_allow_html=True)
 
             results_df = pd.DataFrame(results)
             _table(results_df.head(200), height=420)
@@ -734,7 +797,7 @@ with tab_backtest:
             st.download_button(
                 "Download full backtest CSV",
                 data=csv_bytes,
-                file_name="digit_full_backtest.csv",
+                file_name="digit_full_bot_backtest.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -742,17 +805,13 @@ with tab_backtest:
             st.info("No backtest results yet.")
 
 
-# ---------------------------------------------------------------------------
-# Advisor
-# ---------------------------------------------------------------------------
-
 with tab_advisor:
     st.markdown(
         """
         <div class="rl-panel">
             <div class="rl-h">Advisor · proposal only</div>
             <div class="mut">
-                The advisor ranks collected evidence and proposes conditions.
+                The advisor ranks collected evidence using the full bot-lifecycle simulation.
                 It never changes the live bot. Forward-test any proposal on demo first.
             </div>
         </div>
@@ -761,23 +820,27 @@ with tab_advisor:
     )
 
     best_condition = st.session_state.get("best_condition")
+    settings = st.session_state.get("research_settings") or {}
 
     if not best_condition:
-        st.info("Run the full backtest first.")
+        st.info("Run the full bot backtest first.")
     else:
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric("Condition", f"{best_condition['window_set']} · {best_condition['threshold_pct']}% · N={best_condition['lower_N']} · {best_condition['upper_mode']}")
+        c1.metric(
+            "Condition",
+            f"{best_condition['window_set']} · {best_condition['threshold_pct']}% · N={best_condition['lower_N']} · {best_condition['upper_mode']}",
+        )
         c2.metric("Trades", best_condition["trades"])
         c3.metric("Win rate", f"{best_condition['win_rate_pct']}%")
         c4.metric("Net paper P&L", f"{best_condition['net_pnl']:+,.2f}")
 
         preset_lines = [
-            "MomentumMaster Digit — research condition proposal",
+            "MomentumMaster Digit — full bot-lifecycle research proposal",
             "STATUS: PROPOSAL ONLY. Do not auto-apply.",
             f"generated_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
             "",
-            f"symbol: {st.session_state.get('research_symbol', '')}",
+            f"symbol: {settings.get('symbol', '')}",
             f"window_set: {best_condition['window_set']}",
             f"fast_window: {best_condition['fast_window']}",
             f"medium_window: {best_condition['medium_window']}",
@@ -786,7 +849,16 @@ with tab_advisor:
             f"lower_confirmation: {best_condition['lower_N']}",
             f"upper_digit_rule: {best_condition['upper_mode']}",
             f"duration_ticks: {best_condition['duration_ticks']}",
-            f"payout_assumption: {best_condition['payout_ratio']}",
+            f"payout_assumption: {settings.get('payout_ratio', best_condition.get('payout_ratio', ''))}",
+            "",
+            "bot_lifecycle_settings:",
+            f"  initial_stake: {settings.get('initial_stake', '')}",
+            f"  recovery_multiplier: {settings.get('martingale_multiplier', '')}",
+            f"  max_recovery_steps: {settings.get('max_martingale_steps', '')}",
+            f"  daily_cap: {settings.get('daily_cap', '')}",
+            f"  take_profit_target: {settings.get('take_profit_target', '')}",
+            f"  cooldown_enabled: {settings.get('use_cooldown', '')}",
+            f"  warmup_seconds: {settings.get('warmup_seconds', '')}",
             "",
             f"observed_trades: {best_condition['trades']}",
             f"observed_wins: {best_condition['wins']}",
@@ -794,6 +866,8 @@ with tab_advisor:
             f"observed_win_rate_pct: {best_condition['win_rate_pct']}",
             f"observed_net_paper_pnl: {best_condition['net_pnl']}",
             f"observed_expectancy: {best_condition['expectancy']}",
+            f"observed_max_drawdown: {best_condition.get('max_drawdown', '')}",
+            f"stopped_by: {best_condition.get('stopped_by', '')}",
             "",
             "Forward-test on demo before considering any manual opt-in.",
         ]
@@ -805,7 +879,7 @@ with tab_advisor:
         st.download_button(
             "Download advisor preset",
             data=preset_text.encode("utf-8"),
-            file_name="digit_research_advisor_preset.txt",
+            file_name="digit_full_bot_advisor_preset.txt",
             mime="text/plain",
             use_container_width=True,
         )
@@ -815,10 +889,6 @@ with tab_advisor:
             "It is an observation from collected evidence and simulated paper trades."
         )
 
-
-# ---------------------------------------------------------------------------
-# Backup
-# ---------------------------------------------------------------------------
 
 with tab_backup:
     st.markdown(
