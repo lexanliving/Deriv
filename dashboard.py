@@ -1,4 +1,4 @@
-"""MomentumMaster Digit — Streamlit terminal for 1–2 tick Over 6 contracts."""
+"""MomentumMaster Digit — final Streamlit terminal."""
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +34,9 @@ from config import (
     DIGIT_DEFAULT_PROFIT_TARGET,
     DIGIT_MAX_RECOVERY_STEPS,
     DIGIT_LOWER_CONFIRM_MAX,
+    DIGIT_LOWER_CONFIRMATION_MAX,
     DIGIT_MIN_OVER6_SHARE,
+    DIGIT_MIN_OVER6_SHARES,
     DIGIT_REVIEW_INTERVAL_SECONDS,
     DIGIT_TICK_DURATION_OPTIONS,
     DIGIT_WINDOWS,
@@ -217,8 +219,6 @@ def _is_derived_index(item: Dict[str, Any]) -> bool:
 
 @st.cache_data(ttl=180, show_spinner=False)
 def _load_live_digit_markets(app_id: str, token: str, account_id: str):
-    """Load all symbols the selected account/API currently exposes for digits."""
-
     async def fetch():
         client = DerivAPIClient(token, app_id, account_id)
         if not await client.connect():
@@ -290,6 +290,7 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
             martingale_multiplier=config["martingale_multiplier"],
             quote_precision=config.get("quote_precision", 2),
             min_over6_share=config["min_over6_share"],
+            min_over6_shares=config.get("min_over6_shares"),
             lower_tick_max=config["lower_tick_max"],
             review_interval_seconds=config["review_interval_seconds"],
             required_lower_confirmations=config.get("required_lower_confirmations", 1),
@@ -330,43 +331,47 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
     return True
 
 
-RESTART_COOLDOWN_SECONDS = 20.0
-MAX_AUTO_RESTARTS = 5
-HEALTHY_WINDOW_SECONDS = 120.0
+RESTART_COOLDOWN_SECONDS = 3.0
+MAX_AUTO_RESTARTS = 0
+HEALTHY_WINDOW_SECONDS = 180.0
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def watchdog_fragment():
+    thread = st.session_state.get("engine_thread")
+    engine_alive = thread is not None and thread.is_alive()
+
     if not st.session_state.get("should_run", False):
+        if not engine_alive and state.is_running:
+            state.set_running(False)
         return
 
     if state.stop_requested:
-        st.session_state.should_run = False
-        state.set_running(False)
+        if not engine_alive:
+            st.session_state.should_run = False
+            state.set_running(False)
         return
 
-    thread = st.session_state.get("engine_thread")
-    now = time.monotonic()
-
-    if thread is not None and thread.is_alive():
+    if engine_alive:
         if (
             st.session_state.get("auto_restart_count", 0) > 0
-            and now - st.session_state.get("last_auto_restart", 0.0) > HEALTHY_WINDOW_SECONDS
+            and time.monotonic() - st.session_state.get("last_auto_restart", 0.0) > HEALTHY_WINDOW_SECONDS
         ):
             st.session_state.auto_restart_count = 0
         return
 
-    if now - st.session_state.get("last_auto_restart", 0.0) < RESTART_COOLDOWN_SECONDS:
+    now = time.monotonic()
+    count = int(st.session_state.get("auto_restart_count", 0))
+
+    backoff = 0.0 if count == 0 else min(30.0, RESTART_COOLDOWN_SECONDS * (2 ** min(count, 4)))
+    if now - float(st.session_state.get("last_auto_restart", 0.0)) < backoff:
         return
 
-    count = st.session_state.get("auto_restart_count", 0)
-
-    if count >= MAX_AUTO_RESTARTS:
+    if MAX_AUTO_RESTARTS and count >= MAX_AUTO_RESTARTS:
         st.session_state.should_run = False
         state.set_running(False)
         state.set_error(f"The engine stopped {MAX_AUTO_RESTARTS} times in a row — auto-restart paused.")
         state.set_status("Auto-restart paused.")
-        st.rerun()
         return
 
     config = st.session_state.get("engine_config")
@@ -377,7 +382,7 @@ def watchdog_fragment():
 
     st.session_state.last_auto_restart = now
     st.session_state.auto_restart_count = count + 1
-    state.set_status(f"Engine stopped unexpectedly — restarting ({count + 1}/{MAX_AUTO_RESTARTS})…")
+    state.set_status(f"Engine stopped unexpectedly — restarting ({count + 1})…")
 
     if not _launch_engine(config, reset_state=False):
         st.session_state.should_run = False
@@ -391,6 +396,7 @@ def start_bot(config: Dict[str, Any]) -> None:
     st.session_state.should_run = True
     st.session_state.auto_restart_count = 0
     st.session_state.last_auto_restart = 0.0
+    state.clear_error()
 
     if not _launch_engine(config, reset_state=True):
         st.session_state.should_run = False
@@ -402,13 +408,13 @@ def stop_bot() -> None:
     state.set_status("Stopping…")
 
 
-# ---------------------------------------------------------------------------
-# Sidebar controls
-# ---------------------------------------------------------------------------
+engine_thread = st.session_state.get("engine_thread")
+engine_busy = state.is_running or (engine_thread is not None and engine_thread.is_alive())
+
 
 with st.sidebar:
     st.markdown("### Digit terminal")
-    st.caption("Rolling last-digit reviews · Over 6 · 1–2 ticks")
+    st.caption("Final build · rolling digit reviews · strict lower sequence · no reset on upper digit")
 
     accounts: List[Dict[str, Any]] = []
     account_error = ""
@@ -441,7 +447,7 @@ with st.sidebar:
         picked = st.selectbox(
             "Account",
             options=options,
-            disabled=state.is_running,
+            disabled=engine_busy,
             format_func=lambda value: (
                 f"{normalize_account_type(account_map[value].get('account_type', 'UNKNOWN'))} · {value} · "
                 f"{account_map[value].get('currency', 'USD')} {float(account_map[value].get('balance', 0) or 0):,.2f}"
@@ -480,7 +486,7 @@ with st.sidebar:
         "Market",
         options=labels,
         index=labels.index(default_label),
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
     selected_symbol = market_catalog[market_display]
 
@@ -495,83 +501,103 @@ with st.sidebar:
         "Contract duration",
         options=list(DIGIT_TICK_DURATION_OPTIONS),
         value=DIGIT_DEFAULT_TICK_DURATION,
-        disabled=state.is_running,
+        disabled=engine_busy,
         format_func=lambda value: f"{value} tick" if value == 1 else f"{value} ticks",
     )
 
-    lower_confirmations = st.select_slider(
+    lower_confirmations = st.number_input(
         "Lower-tick confirmations before entry",
-        options=[1, 2, 3],
+        min_value=1,
+        max_value=int(DIGIT_LOWER_CONFIRMATION_MAX),
         value=1,
-        disabled=state.is_running,
-        format_func=lambda value: f"{value} lower tick" if value == 1 else f"{value} consecutive lower ticks",
+        step=1,
+        disabled=engine_busy,
+        help=(
+            "The bot waits for this many consecutive lower digits 0–6 after the qualifying review boundary. "
+            "If any 7–9 digit appears before the sequence completes, the signal is killed completely."
+        ),
     )
 
     st.caption(
-        "This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. "
-        "The final required lower digit itself triggers entry; a higher digit resets the sequence. "
-        "Default: 1 lower 0–6 tick, then immediate entry on that same tick."
+        "Strict sequence rule: the exact lower sequence must complete. "
+        "If an upper digit 7–9 appears before completion, the signal dies for that review window. "
+        "No reset and no delayed retry."
     )
 
     st.divider()
 
-    st.markdown("#### Strategy rule")
-
-    min_over6_share_pct = st.slider(
-        "Minimum recent 7–9 share (%)",
-        30,
-        60,
-        int(round(DIGIT_MIN_OVER6_SHARE * 100)),
-        1,
-        disabled=state.is_running,
-    )
-    min_over6_share = min_over6_share_pct / 100.0
-
     st.markdown("#### Rolling digit windows")
 
+    st.markdown("##### Fast window")
     use_fast = st.checkbox(
-        "Use fast window gate",
+        "Use fast window",
         value=bool(DIGIT_WINDOW_ENABLED.get("fast", True)),
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
-
-    fast_window = st.number_input(
-        "Fast window (ticks)",
+    fast_col_1, fast_col_2 = st.columns(2)
+    fast_window = fast_col_1.number_input(
+        "Fast ticks",
         min_value=5,
         max_value=10000,
         value=int(DIGIT_WINDOWS.get("fast", 20)),
         step=1,
-        disabled=state.is_running or not use_fast,
+        disabled=engine_busy or not use_fast,
+    )
+    fast_share_pct = fast_col_2.slider(
+        "Fast 7–9 %",
+        0,
+        100,
+        int(round(float(DIGIT_MIN_OVER6_SHARES.get("fast", DIGIT_MIN_OVER6_SHARE)) * 100)),
+        1,
+        disabled=engine_busy or not use_fast,
     )
 
+    st.markdown("##### Medium window")
     use_medium = st.checkbox(
-        "Use medium window gate",
+        "Use medium window",
         value=bool(DIGIT_WINDOW_ENABLED.get("medium", True)),
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
-
-    medium_window = st.number_input(
-        "Medium window (ticks)",
+    medium_col_1, medium_col_2 = st.columns(2)
+    medium_window = medium_col_1.number_input(
+        "Medium ticks",
         min_value=5,
         max_value=10000,
         value=int(DIGIT_WINDOWS.get("medium", 50)),
         step=1,
-        disabled=state.is_running or not use_medium,
+        disabled=engine_busy or not use_medium,
+    )
+    medium_share_pct = medium_col_2.slider(
+        "Medium 7–9 %",
+        0,
+        100,
+        int(round(float(DIGIT_MIN_OVER6_SHARES.get("medium", DIGIT_MIN_OVER6_SHARE)) * 100)),
+        1,
+        disabled=engine_busy or not use_medium,
     )
 
+    st.markdown("##### Slow window")
     use_slow = st.checkbox(
-        "Use slow window support",
+        "Use slow window",
         value=bool(DIGIT_WINDOW_ENABLED.get("slow", True)),
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
-
-    slow_window = st.number_input(
-        "Slow window (ticks)",
+    slow_col_1, slow_col_2 = st.columns(2)
+    slow_window = slow_col_1.number_input(
+        "Slow ticks",
         min_value=5,
         max_value=10000,
         value=int(DIGIT_WINDOWS.get("slow", 200)),
         step=1,
-        disabled=state.is_running or not use_slow,
+        disabled=engine_busy or not use_slow,
+    )
+    slow_share_pct = slow_col_2.slider(
+        "Slow 7–9 %",
+        0,
+        100,
+        int(round(float(DIGIT_MIN_OVER6_SHARES.get("slow", max(0.30, DIGIT_MIN_OVER6_SHARE - 0.01))) * 100)),
+        1,
+        disabled=engine_busy or not use_slow,
     )
 
     digit_windows = {
@@ -586,19 +612,26 @@ with st.sidebar:
         "slow": bool(use_slow),
     }
 
+    min_over6_shares = {
+        "fast": float(fast_share_pct) / 100.0,
+        "medium": float(medium_share_pct) / 100.0,
+        "slow": float(slow_share_pct) / 100.0,
+    }
+
+    min_over6_share = float(medium_share_pct) / 100.0
+
     windows_enabled = any(digit_window_enabled.values())
 
     if not windows_enabled:
         st.error("Enable at least one rolling window. If all windows are disabled, the bot can never arm.")
 
     enabled_names = [name for name, enabled in digit_window_enabled.items() if enabled]
+
     st.caption(
-        f"{min_over6_share_pct}% means at least that share of recent ticks ends in 7, 8, or 9. "
-        "Because the groups contain 3 versus 6 digits, the rule compares average frequency per digit: "
-        "(7–9 share ÷ 3) > (1–6 share ÷ 6). "
         f"Enabled windows: {', '.join(enabled_names) if enabled_names else 'none'}. "
-        "Disabled windows are ignored completely. All enabled windows must qualify. "
-        f"Lower confirmation is separate and currently set to {lower_confirmations}."
+        f"Fast threshold: {fast_share_pct}%. Medium threshold: {medium_share_pct}%. Slow threshold: {slow_share_pct}%. "
+        "Disabled windows are ignored completely. All enabled windows must pass their own 7–9 threshold "
+        "and the average 7–9 digit frequency must exceed the average 1–6 digit frequency."
     )
 
     st.divider()
@@ -606,7 +639,7 @@ with st.sidebar:
     st.markdown("#### Account safety")
 
     if selected_account and account_type == "REAL":
-        live_text = st.text_input("Type LIVE to enable real orders", max_chars=4, disabled=state.is_running)
+        live_text = st.text_input("Type LIVE to enable real orders", max_chars=4, disabled=engine_busy)
         real_execution_confirmed = live_text == "LIVE"
         st.warning(
             "Real-money orders are ON."
@@ -627,13 +660,13 @@ with st.sidebar:
         value=float(DEFAULT_INITIAL_STAKE),
         step=0.5,
         format="%.2f",
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
 
     use_martingale = st.checkbox(
         "Enable recovery multiplier",
         value=bool(DIGIT_DEFAULT_RECOVERY_ENABLED),
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
 
     martingale_multiplier = st.number_input(
@@ -643,7 +676,7 @@ with st.sidebar:
         value=float(DIGIT_DEFAULT_RECOVERY_MULTIPLIER),
         step=0.01,
         format="%.2f",
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
 
     max_steps = st.slider(
@@ -651,7 +684,7 @@ with st.sidebar:
         0,
         int(DIGIT_MAX_RECOVERY_STEPS),
         int(DIGIT_MAX_RECOVERY_STEPS if use_martingale else 0),
-        disabled=state.is_running,
+        disabled=engine_busy,
     )
     if not use_martingale:
         max_steps = 0
@@ -663,7 +696,7 @@ with st.sidebar:
         value=float(DIGIT_DEFAULT_PROFIT_TARGET),
         step=1.0,
         format="%.2f",
-        disabled=state.is_running,
+        disabled=engine_busy,
         help="0 disables the target. When session P&L reaches this positive amount, the bot stops before a new entry.",
     )
 
@@ -676,9 +709,9 @@ with st.sidebar:
 
     c1, c2 = st.columns(2)
     with c1:
-        start_pressed = st.button("Start", type="primary", use_container_width=True, disabled=state.is_running)
+        start_pressed = st.button("Start", type="primary", use_container_width=True, disabled=engine_busy)
     with c2:
-        stop_pressed = st.button("Stop", use_container_width=True, disabled=not state.is_running)
+        stop_pressed = st.button("Stop", use_container_width=True, disabled=not engine_busy)
 
     if start_pressed:
         if not selected_account:
@@ -703,6 +736,7 @@ with st.sidebar:
                     "duration_ticks": int(duration_ticks),
                     "quote_precision": 2,
                     "min_over6_share": float(min_over6_share),
+                    "min_over6_shares": min_over6_shares,
                     "lower_tick_max": DIGIT_LOWER_CONFIRM_MAX,
                     "required_lower_confirmations": int(lower_confirmations),
                     "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
@@ -717,10 +751,6 @@ with st.sidebar:
         st.rerun()
 
 
-# ---------------------------------------------------------------------------
-# Main terminal
-# ---------------------------------------------------------------------------
-
 ctx = state.get_execution_context()
 mode = ctx.get("execution_mode", "UNCONFIGURED")
 mode_color = "#34d399" if mode == "DEMO" else "#fbbf24" if mode == "REAL" else "#8294b0"
@@ -730,11 +760,11 @@ st.markdown(
     <div class="mm-head">
         <div>
             <div class="mm-logo">Momentum<b>·</b>Master DIGIT</div>
-            <div class="mm-sub">Manual-market selection · rolling 7–9 frequency · Over 6 · 1–2 tick settlement</div>
+            <div class="mm-sub">Final build · strict lower sequence · no upper-digit reset · per-window thresholds</div>
         </div>
         <div style="text-align:right">
             <b style="color:{mode_color}">{html.escape(str(mode))}</b><br>
-            <span class="muted">{html.escape(str(ctx.get("account_id", "")[:12]))}</span>
+            <span class="muted">{html.escape(str(ctx.get('account_id', '')[:12]))}</span>
         </div>
     </div>
     """,
@@ -742,7 +772,7 @@ st.markdown(
 )
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def status_fragment():
     message = state.error_message or state.status_message
     color = "#fb7185" if state.error_message else "#34d399" if state.is_running else "#8294b0"
@@ -752,7 +782,7 @@ def status_fragment():
     )
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def metrics_fragment():
     stats = state.get_performance_stats()
     mart = state.get_martingale_state()
@@ -776,7 +806,7 @@ def metrics_fragment():
             f"{medium_high}/{medium_count} = {float(medium.get('p_over6', 0) or 0) * 100:.1f}%",
             "medium window",
         ),
-        ("Digit state", digit_state, "lower tick confirmation"),
+        ("Digit state", digit_state, "strict lower sequence"),
         ("Session P&L", f"{stats['total_pnl']:+.2f}", f"{wins}W · {losses}L"),
         ("Next stake", f"{mart['stake']:.2f}", f"recovery step {mart['step']}"),
     ]
@@ -795,7 +825,7 @@ def metrics_fragment():
             )
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def digit_panel_fragment():
     s = state.get_strategy_state()
     windows = s.get("digit_windows") or {}
@@ -826,13 +856,6 @@ def digit_panel_fragment():
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        st.caption(
-            "Example: 60.0% in a 20-tick window means 12 of 20 ticks ended in 7, 8, or 9. "
-            "The strategy compares average frequency per digit as well: 60% ÷ 3 = 20% for each 7–9 digit group, "
-            "versus the 1–6 average. Disabled windows are still shown for diagnostics if enough ticks exist, "
-            "but they are not used as entry gates."
-        )
-
         armed = bool(s.get("digit_armed"))
         confirmed = bool(s.get("digit_lower_confirmed"))
         required_lower = int(s.get("digit_required_lower_confirmations", 1) or 1)
@@ -845,7 +868,8 @@ def digit_panel_fragment():
                 st.success(f"Lower sequence confirmed ({lower_count}/{required_lower}); entry trigger recorded.")
         elif armed:
             st.warning(
-                f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive."
+                f"7–9 condition is armed. Waiting for lower digits from 0 to 6: {lower_count}/{required_lower} consecutive. "
+                "Any 7–9 digit before completion kills this signal."
             )
         else:
             st.info(str(s.get("digit_last_rejection") or "Collecting digit history…"))
@@ -857,13 +881,12 @@ def digit_panel_fragment():
         st.dataframe(pd.DataFrame(data), use_container_width=True, height=250, hide_index=True)
 
         st.caption(
-            "Numeric counts only; no extra chart is rendered. A trade is sent only after the strategy condition, "
-            "lower-tick confirmation, account safeguards, and a valid Deriv proposal all pass. "
-            "Proposal payout is recorded but is not used as a guessed edge signal."
+            "Numeric counts only. A trade is sent only after the strategy condition, strict lower-tick confirmation, "
+            "account safeguards, and a valid Deriv proposal all pass."
         )
 
 
-@st.fragment(run_every=8.0)
+@st.fragment(run_every=2.0)
 def ledger_fragment():
     st.markdown('<div class="mm-section">Trades</div>', unsafe_allow_html=True)
 
@@ -890,7 +913,7 @@ def ledger_fragment():
     st.dataframe(pd.DataFrame(records), use_container_width=True, height=300, hide_index=True)
 
 
-@st.fragment(run_every=15.0)
+@st.fragment(run_every=10.0)
 def journal_fragment():
     journal = get_journal()
 
