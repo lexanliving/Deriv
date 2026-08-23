@@ -4,8 +4,10 @@ Each account/symbol pair gets its own advisory file lock and small JSON state
 file. This prevents two browser sessions running the same market from taking
 close-together entries with stale cooldown or recovery state, while preserving
 parallel operation across different markets.
-"""
 
+Daily trade cap behavior:
+If daily_cap is zero or negative, the daily cap is disabled.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -21,9 +23,8 @@ from typing import Any, Dict, Optional
 
 from config import LOG_DIR
 
-
 _THREAD_LOCKS_GUARD = threading.Lock()
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS: Dict[str, threading.Lock] = {}
 
 
 class SharedMarketCoordinator:
@@ -38,12 +39,16 @@ class SharedMarketCoordinator:
     ) -> None:
         identity = f"{str(account_id).strip()}\0{str(symbol).strip()}".encode("utf-8")
         digest = hashlib.sha256(identity).hexdigest()[:24]
+
         directory = Path(storage_dir or LOG_DIR)
         directory.mkdir(parents=True, exist_ok=True)
+
         self._lock_path = directory / f".digit_coord_{digest}.lock"
         self._state_path = directory / f".digit_coord_{digest}.json"
+
         with _THREAD_LOCKS_GUARD:
             self._thread_lock = _THREAD_LOCKS.setdefault(str(self._lock_path), threading.Lock())
+
         self.account_id = str(account_id).strip()
         self.symbol = str(symbol).strip()
         self.initial_stake = round(float(initial_stake), 2)
@@ -57,18 +62,22 @@ class SharedMarketCoordinator:
         """Acquire the shared lock without blocking the engine event loop."""
         if self._handle is not None:
             return True
+
         return await asyncio.to_thread(self._acquire_sync, float(timeout_seconds))
 
     def _acquire_sync(self, timeout_seconds: float) -> bool:
         deadline = time.monotonic() + max(0.1, timeout_seconds)
         remaining = max(0.1, deadline - time.monotonic())
+
         if not self._thread_lock.acquire(timeout=remaining):
             return False
+
         try:
             handle = self._lock_path.open("a+")
         except OSError:
             self._thread_lock.release()
             return False
+
         while True:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -88,8 +97,10 @@ class SharedMarketCoordinator:
     def release(self) -> None:
         handle = self._handle
         self._handle = None
+
         if handle is None:
             return
+
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
@@ -130,8 +141,10 @@ class SharedMarketCoordinator:
 
     def _read_state(self) -> Dict[str, Any]:
         self._require_lock()
+
         if not self._state_path.exists():
             return self._default_state()
+
         try:
             raw = json.loads(self._state_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
@@ -143,37 +156,48 @@ class SharedMarketCoordinator:
                 "blocked": True,
                 "blocked_reason": "shared coordination state is unreadable; inspect the journal/state file",
             }
+
         state = self._default_state()
         state.update(raw)
         return state
 
     def _write_state(self, state: Dict[str, Any]) -> None:
         self._require_lock()
+
         temporary = self._state_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(temporary, self._state_path)
 
     def snapshot(self) -> Dict[str, Any]:
         state = self._read_state()
+
         if state.get("daily_date") != self._today():
             state["daily_date"] = self._today()
             state["daily_filled"] = 0
             self._write_state(state)
+
         return dict(state)
 
     def claim_entry(
         self,
         trade_id: str,
         now: Optional[float] = None,
-        daily_cap: int = 10,
+        daily_cap: int = 0,
     ) -> Dict[str, Any]:
         """Reserve an entry after checking the latest shared risk state."""
+
         state = self.snapshot()
         current = float(now if now is not None else time.time())
+
         if state.get("blocked"):
-            return {"allowed": False, "reason": state.get("blocked_reason") or "shared market state is blocked for manual review"}
+            return {
+                "allowed": False,
+                "reason": state.get("blocked_reason") or "shared market state is blocked for manual review",
+            }
+
         if state.get("in_flight"):
             age = current - float(state.get("claimed_at", 0.0) or 0.0)
+
             if not state.get("bought") and age > 180.0:
                 # A proposal reservation that never bought can be released after
                 # a process crash; a bought contract must never be guessed away.
@@ -186,17 +210,37 @@ class SharedMarketCoordinator:
                 state["blocked"] = True
                 state["blocked_reason"] = "possible orphaned bought contract; verify the Deriv statement"
                 self._write_state(state)
-                return {"allowed": False, "reason": state["blocked_reason"]}
+                return {
+                    "allowed": False,
+                    "reason": state["blocked_reason"],
+                }
             else:
-                return {"allowed": False, "reason": "another session has an unresolved trade for this market"}
+                return {
+                    "allowed": False,
+                    "reason": "another session has an unresolved trade for this market",
+                }
+
         current_minute = self._minute_key(current)
+
         if state.get("last_attempt_minute") == current_minute:
-            return {"allowed": False, "reason": "same-market same-minute attempt already sent; duplicate blocked"}
+            return {
+                "allowed": False,
+                "reason": "same-market same-minute attempt already sent; duplicate blocked",
+            }
+
         cooldown = max(0.0, float(state.get("cooldown_until", 0.0)) - current)
         if cooldown > 0:
-            return {"allowed": False, "reason": f"shared cooldown active for {cooldown:.0f}s"}
-        if int(state.get("daily_filled", 0)) >= int(daily_cap):
-            return {"allowed": False, "reason": f"shared daily trade cap ({daily_cap}) reached"}
+            return {
+                "allowed": False,
+                "reason": f"shared cooldown active for {cooldown:.0f}s",
+            }
+
+        # Daily cap is disabled when daily_cap is zero or negative.
+        if int(daily_cap) > 0 and int(state.get("daily_filled", 0)) >= int(daily_cap):
+            return {
+                "allowed": False,
+                "reason": f"shared daily trade cap ({daily_cap}) reached",
+            }
 
         state["in_flight"] = True
         state["trade_id"] = str(trade_id)
@@ -205,7 +249,9 @@ class SharedMarketCoordinator:
         state["last_attempt_minute"] = current_minute
         state["bought_at"] = 0.0
         state["bought"] = False
+
         self._write_state(state)
+
         return {
             "allowed": True,
             "stake": round(float(state.get("next_stake", self.initial_stake)), 2),
@@ -217,24 +263,31 @@ class SharedMarketCoordinator:
 
     def mark_bought(self, now: Optional[float] = None) -> None:
         state = self._read_state()
+
         if not state.get("in_flight"):
             raise RuntimeError("Cannot mark a shared entry bought without a reservation.")
+
         bought_at = float(now if now is not None else time.time())
+
         state["bought"] = True
         state["bought_at"] = bought_at
         state["last_filled_minute"] = state.get("entry_minute") or self._minute_key(bought_at)
         state["daily_filled"] = int(state.get("daily_filled", 0)) + 1
+
         self._write_state(state)
 
     def abort_entry(self) -> None:
         """Release a reservation that never reached a confirmed buy."""
+
         state = self._read_state()
+
         state["in_flight"] = False
         state["trade_id"] = ""
         state["claimed_at"] = 0.0
         state["entry_minute"] = ""
         state["bought_at"] = 0.0
         state["bought"] = False
+
         self._write_state(state)
 
     def complete_entry(
@@ -245,9 +298,12 @@ class SharedMarketCoordinator:
         max_steps: int = 10,
     ) -> Dict[str, Any]:
         """Apply the settled result once, then publish cooldown/recovery state."""
+
         state = self._read_state()
         current = float(now if now is not None else time.time())
+
         normalized = str(outcome or "").upper()
+
         if normalized == "UNKNOWN":
             state["blocked"] = True
             state["blocked_reason"] = "unknown settlement in another session; verify the Deriv statement"
@@ -257,19 +313,26 @@ class SharedMarketCoordinator:
             state["next_stake"] = round(float(state.get("initial_stake", self.initial_stake)), 2)
         elif normalized == "LOST":
             state["consecutive_losses"] = int(state.get("consecutive_losses", 0)) + 1
+
             step = int(state.get("recovery_step", 0))
+
             if step < int(max_steps):
                 step += 1
                 state["recovery_step"] = step
-                state["next_stake"] = round(float(state.get("next_stake", self.initial_stake)) * float(multiplier), 2)
+                state["next_stake"] = round(
+                    float(state.get("next_stake", self.initial_stake)) * float(multiplier),
+                    2,
+                )
             else:
                 state["recovery_step"] = 0
                 state["next_stake"] = round(float(state.get("initial_stake", self.initial_stake)), 2)
 
         if normalized in {"WON", "LOST"}:
             consecutive = int(state.get("consecutive_losses", 0))
+
             required = 180.0 if consecutive >= 2 else 90.0 if consecutive >= 1 else 30.0
             bought_at = float(state.get("bought_at", 0.0) or 0.0)
+
             state["cooldown_until"] = max(current, bought_at) + required
         elif normalized == "CANCELLED":
             state["cooldown_until"] = float(state.get("cooldown_until", 0.0))
@@ -282,5 +345,7 @@ class SharedMarketCoordinator:
         state["bought"] = False
         state["last_outcome"] = normalized
         state["last_outcome_at"] = current
+
         self._write_state(state)
+
         return dict(state)
