@@ -1,4 +1,4 @@
-"""src/api_client.py — Deriv Options API client (PAT -> account OTP WebSocket)."""
+"""src/api_client.py — Deriv Options API client."""
 from __future__ import annotations
 
 import asyncio
@@ -18,8 +18,8 @@ logger = get_logger("api_client")
 
 OPTIONS_API_BASE = "https://api.derivws.com/trading/v1/options"
 
-# Proposal execution must remain fresh. Transport retries are intentionally
-# avoided at signal time because a delayed proposal can become a stale entry.
+# Fast, single-attempt proposal behavior.
+# We do not retry the same signal with delayed proposal requests.
 PROPOSAL_REQUEST_TIMEOUT = 2.0
 
 
@@ -34,7 +34,7 @@ class DerivAPIError(Exception):
 
 
 class DerivAPIClient:
-    REQUEST_TIMEOUT = 5.0
+    REQUEST_TIMEOUT = 4.0
     REST_TIMEOUT = 15.0
     PING_INTERVAL_SECONDS = 30.0
 
@@ -50,15 +50,12 @@ class DerivAPIClient:
 
         self._tick_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._tick_callback_tasks: Set[asyncio.Task] = set()
-        # Tick callbacks update the strategy state and must run in arrival order.
         self._tick_callback_lock = asyncio.Lock()
 
         self._tick_subscription_id: Optional[str] = None
         self._req_id = 0
         self._connected = False
         self.last_error = ""
-
-    # ------------------------------------------------------------------ auth
 
     @staticmethod
     def _headers(api_token: str, app_id: str) -> Dict[str, str]:
@@ -104,8 +101,6 @@ class DerivAPIClient:
                 return str(error.get("code") or fallback)
 
         return fallback
-
-    # ------------------------------------------------------------------ REST
 
     @classmethod
     async def _rest_request(cls, method, url, api_token, app_id) -> tuple:
@@ -182,8 +177,6 @@ class DerivAPIClient:
             raise DerivAPIError("Deriv did not return a valid account WebSocket URL.", "INVALID_OTP_RESPONSE")
 
         return url
-
-    # ------------------------------------------------------------- WebSocket
 
     async def connect(self) -> bool:
         if self._ws is not None or self._listener_task is not None:
@@ -391,8 +384,6 @@ class DerivAPIClient:
             self._pending_requests.pop(request_id, None)
             raise DerivAPIError("The Deriv request could not be encoded.", "INVALID_REQUEST") from exc
 
-    # -------------------------------------------------------------- helpers
-
     @staticmethod
     def _require_object(response, key, required_fields: tuple = ()) -> Dict[str, Any]:
         value = response.get(key)
@@ -410,8 +401,6 @@ class DerivAPIClient:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise DerivAPIError(f"Deriv returned an invalid numeric '{field}' value.", "INVALID_RESPONSE")
         return float(value)
-
-    # ---------------------------------------------------------------- market
 
     async def get_active_symbols(self, full: bool = False, contract_types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         payload: Dict[str, Any] = {"active_symbols": "full" if full else "brief"}
@@ -482,8 +471,6 @@ class DerivAPIClient:
             except DerivAPIError as exc:
                 logger.debug("Tick unsubscribe could not be confirmed: %s", exc)
 
-    # -------------------------------------------------------------- trading
-
     async def get_proposal(
         self,
         symbol: str,
@@ -497,10 +484,9 @@ class DerivAPIClient:
         """
         Single-attempt proposal request.
 
-        This is intentional: the strategy signal is only valid at the moment it
-        is produced. If the proposal cannot be obtained immediately, the engine
-        cancels that signal and waits for a new signal. It does not retry the
-        same signal after a delay.
+        The strategy signal is fresh and must not be retried later with a
+        delayed proposal. If the proposal cannot be obtained immediately,
+        the engine cancels that signal.
         """
         payload = {
             "proposal": 1,
