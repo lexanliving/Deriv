@@ -8,7 +8,8 @@ threshold and their average per-digit frequency exceeds the 1–6 average
 in both fast and medium windows, with slow-window support;
 after a qualifying review, the configured consecutive digits 0-6 themselves
 trigger a one- or two-tick DIGITOVER contract on the final lower tick;
-a higher digit resets the lower-confirmation sequence;
+if any higher digit 7-9 appears before the lower sequence completes,
+the signal is killed completely for that review window and is not retried;
 no martingale or candle/AI decision is involved here.
 
 The trading engine requests a live proposal for execution and audit, but no
@@ -96,9 +97,6 @@ class DigitStrategyEngine:
 
     # ------------------------------------------------------------------ utils
 
-    def _bucket(self, epoch: float) -> int:
-        return int(float(epoch) // max(1.0, float(self.review_interval_seconds)))
-
     def _digit_from_price(self, price: float) -> int:
         scaled = Decimal(str(price)) * (Decimal(10) ** self.quote_precision)
         integer = int(scaled.to_integral_value(rounding=ROUND_HALF_UP))
@@ -137,11 +135,12 @@ class DigitStrategyEngine:
         self._digits.append(digit)
 
         if allow_signal and self._armed and self._pending_signal is None:
-            tick_bucket = self._bucket(tick_epoch)
+            tick_bucket = int(tick_epoch // self.review_interval_seconds)
 
-            # Strict bucket rule:
-            # only ticks belonging to the same review bucket can confirm.
-            if self._last_review_bucket is None or tick_bucket != self._last_review_bucket:
+            # Strict bucket/boundary rule:
+            # only ticks belonging to the reviewed bucket and strictly after
+            # the actual review boundary may participate.
+            if self._last_review_bucket is None or tick_bucket > self._last_review_bucket:
                 self._last_rejection = "waiting for the current minute review before confirmation"
             elif self._confirmation_boundary_epoch is None or tick_epoch <= self._confirmation_boundary_epoch:
                 self._last_rejection = "waiting for first tick after the minute review boundary"
@@ -162,15 +161,66 @@ class DigitStrategyEngine:
                             f"lower-tick confirmation {self._lower_confirmation_count}/{self.required_lower_confirmations} received ({digit})"
                         )
                 else:
-                    self._lower_confirmation_count = 0
-                    self._confirmation_digit = None
-                    self._confirmation_epoch = None
-                    self._last_rejection = f"higher digit {digit} reset lower-tick confirmation sequence"
+                    # Requested behavior:
+                    # any 7-9 digit before the required lower sequence completes
+                    # kills the signal completely for this review window.
+                    self._kill_signal_for_review_window(
+                        digit=digit,
+                        reason=(
+                            f"higher digit {digit} appeared before "
+                            f"{self.required_lower_confirmations} lower ticks completed — "
+                            "signal killed for this review window"
+                        ),
+                    )
             else:
-                self._queue_signal(digit, tick_epoch)
+                # This path should normally not be reached because completion
+                # immediately queues the pending signal. Keep it conservative.
+                if digit <= self.low_digit_max:
+                    self._queue_signal(digit, tick_epoch)
+                else:
+                    self._kill_signal_for_review_window(
+                        digit=digit,
+                        reason=(
+                            f"higher digit {digit} appeared after confirmation state — "
+                            "signal killed for this review window"
+                        ),
+                    )
 
         self._sync_state_version()
         return self._pending_signal
+
+    def _kill_signal_for_review_window(self, digit: Optional[int] = None, reason: str = "") -> None:
+        """Kill the current setup completely.
+
+        This is stronger than a simple sequence reset:
+        the condition is marked invalid until the next qualifying minute review.
+        """
+        self._armed = False
+        self._condition_valid = False
+        self._armed_context = None
+        self._last_qualifying_context = None
+
+        self._confirmation_seen = False
+        self._lower_confirmation_count = 0
+        self._confirmation_digit = None
+        self._confirmation_epoch = None
+        self._confirmation_boundary_epoch = None
+
+        self._pending_signal = None
+        self._pending_signal_id = None
+        self._entry_evaluation = None
+
+        if reason:
+            self._last_rejection = reason
+        elif digit is not None:
+            self._last_rejection = (
+                f"higher digit {digit} appeared before required lower ticks completed — "
+                "signal killed for this review window"
+            )
+        else:
+            self._last_rejection = "signal killed for this review window"
+
+        self._sync_state_version()
 
     # ---------------------------------------------------------------- review
 
@@ -236,7 +286,7 @@ class DigitStrategyEngine:
 
     def review_if_due(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         current = float(now if now is not None else time.time())
-        bucket = self._bucket(current)
+        bucket = int(current // self.review_interval_seconds)
 
         if self._last_review_bucket == bucket:
             return None
@@ -291,7 +341,8 @@ class DigitStrategyEngine:
                 self._lower_confirmation_count = 0
                 self._armed_context = dict(self._last_qualifying_context)
                 self._last_rejection = (
-                    f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) after the review boundary"
+                    f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) "
+                    "after the review boundary; any 7–9 digit before completion kills the signal"
                 )
         else:
             self._condition_valid = False
@@ -338,7 +389,8 @@ class DigitStrategyEngine:
             "executed": "FALSE",
             "rejection_reason": "" if qualifies else reason,
             "note": (
-                f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks"
+                f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks; "
+                "any 7–9 before completion kills the signal"
                 if qualifies
                 else ""
             ),
@@ -394,7 +446,12 @@ class DigitStrategyEngine:
         if not self._armed or not self._confirmation_seen:
             return
 
+        self._pending_signal = "OVER6"
+        self._pending_signal_id = uuid.uuid4().hex[:10]
+        self._pending_signal_time = time.time()
+
         base = dict(self._armed_context or {})
+        stats = base.get("stats") or {}
         review_epoch = float(
             base.get(
                 "review_epoch",
@@ -402,20 +459,6 @@ class DigitStrategyEngine:
             )
         )
 
-        # Strict safety: the entry tick must belong to the same review bucket.
-        if self._bucket(epoch) != self._bucket(review_epoch):
-            self._last_rejection = "signal blocked: entry tick crossed review-minute boundary"
-            return
-
-        if self._last_review_bucket is not None and self._bucket(epoch) != self._last_review_bucket:
-            self._last_rejection = "signal blocked: entry tick is outside the active review bucket"
-            return
-
-        self._pending_signal = "OVER6"
-        self._pending_signal_id = uuid.uuid4().hex[:10]
-        self._pending_signal_time = time.time()
-
-        stats = base.get("stats") or {}
         record = self._review_record(stats, True, "", epoch, review_epoch=review_epoch)
         record.update(
             {
@@ -462,22 +505,6 @@ class DigitStrategyEngine:
         if signal is None:
             return None
 
-        current_time = time.time()
-        current_bucket = self._bucket(current_time)
-
-        # If the current bucket has moved beyond the review bucket, discard.
-        if self._last_review_bucket is None or current_bucket != self._last_review_bucket:
-            self._armed = False
-            self._armed_context = None
-            self._confirmation_seen = False
-            self._lower_confirmation_count = 0
-            self._confirmation_digit = None
-            self._confirmation_epoch = None
-            self._entry_evaluation = None
-            self._last_rejection = "stale digit signal discarded after minute boundary"
-            self._sync_state_version()
-            return None
-
         try:
             signal_boundary = float(pending_record.get("confirmation_boundary_epoch"))
         except (TypeError, ValueError):
@@ -490,6 +517,8 @@ class DigitStrategyEngine:
         ):
             self._armed = False
             self._armed_context = None
+            self._condition_valid = False
+            self._last_qualifying_context = None
             self._confirmation_seen = False
             self._lower_confirmation_count = 0
             self._confirmation_digit = None
@@ -500,10 +529,16 @@ class DigitStrategyEngine:
             self._sync_state_version()
             return None
 
-        if current_time - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
+        if time.time() - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
             self._armed = False
+            self._armed_context = None
+            self._condition_valid = False
+            self._last_qualifying_context = None
             self._confirmation_seen = False
             self._lower_confirmation_count = 0
+            self._confirmation_digit = None
+            self._confirmation_epoch = None
+            self._entry_evaluation = None
             self._last_rejection = "stale digit signal discarded"
             self._sync_state_version()
             return None
@@ -564,7 +599,8 @@ class DigitStrategyEngine:
             self._confirmation_boundary_epoch = time.time()
 
             self._last_rejection = (
-                f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks after the new entry boundary"
+                f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks "
+                "after the new entry boundary; any 7–9 before completion kills the signal"
             )
         else:
             self._armed = False
@@ -583,13 +619,16 @@ class DigitStrategyEngine:
     def on_signal_skipped(self) -> None:
         self._armed = False
         self._armed_context = None
+        self._condition_valid = False
+        self._last_qualifying_context = None
         self._confirmation_seen = False
         self._confirmation_digit = None
         self._confirmation_epoch = None
+        self._confirmation_boundary_epoch = None
         self._lower_confirmation_count = 0
         self._pending_signal = None
         self._pending_signal_id = None
-        self._last_rejection = "signal skipped by execution gate"
+        self._last_rejection = "signal skipped by execution gate — signal killed, not retried"
         self._sync_state_version()
 
     def get_last_evaluation(self) -> Optional[Dict[str, Any]]:
