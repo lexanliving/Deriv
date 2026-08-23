@@ -51,7 +51,6 @@ class DerivAPIClient:
         self._tick_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
         self._tick_callback_tasks: Set[asyncio.Task] = set()
         # Tick callbacks update the strategy state and must run in arrival order.
-        # A lock keeps rapid WebSocket ticks from overlapping those transitions.
         self._tick_callback_lock = asyncio.Lock()
 
         self._tick_subscription_id: Optional[str] = None
@@ -109,7 +108,7 @@ class DerivAPIClient:
     # ------------------------------------------------------------------ REST
 
     @classmethod
-    async def _rest_request(cls, method, url, api_token: str, app_id: str) -> tuple:
+    async def _rest_request(cls, method, url, api_token, app_id) -> tuple:
         headers = cls._headers(api_token, app_id)
 
         def decode(raw: str) -> Any:
@@ -203,7 +202,6 @@ class DerivAPIClient:
                 open_timeout=20,
                 close_timeout=10,
                 max_size=2**20,
-                compression=None,
             )
 
             self._connected = True
@@ -523,8 +521,6 @@ class DerivAPIClient:
 
         response = await self._send_request(payload, timeout=PROPOSAL_REQUEST_TIMEOUT)
 
-        # Deriv may omit informational spot fields from a valid proposal.
-        # The engine separately requires numeric ask_price and payout before buy.
         proposal = self._require_object(response, "proposal", ("id",))
         proposal_id = proposal.get("id")
 
