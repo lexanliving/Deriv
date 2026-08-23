@@ -1,21 +1,19 @@
 """Rolling last-digit strategy for short Deriv Over/Under contracts.
 
 This module deliberately keeps the live rule small and inspectable:
-
-* the selected symbol's quoted last digit is counted from raw ticks;
-* reviews occur once per minute;
-* Over 6 is considered only when 7/8/9 meet the configured total-share
-  threshold and their average per-digit frequency exceeds the 1–6 average
-  in both fast and medium windows, with slow-window support;
-* after a qualifying review, the configured consecutive digits 0-6 themselves
-  trigger a one- or two-tick DIGITOVER contract on the final lower tick;
-* a higher digit resets the lower-confirmation sequence;
-* no martingale or candle/AI decision is involved here.
+the selected symbol's quoted last digit is counted from raw ticks;
+reviews occur once per minute;
+Over 6 is considered only when 7/8/9 meet the configured total-share
+threshold and their average per-digit frequency exceeds the 1–6 average
+in both fast and medium windows, with slow-window support;
+after a qualifying review, the configured consecutive digits 0-6 themselves
+trigger a one- or two-tick DIGITOVER contract on the final lower tick;
+a higher digit resets the lower-confirmation sequence;
+no martingale or candle/AI decision is involved here.
 
 The trading engine requests a live proposal for execution and audit, but no
 estimated-edge or guessed-probability check is used as an entry gate.
 """
-
 from __future__ import annotations
 
 import time
@@ -58,15 +56,15 @@ class DigitStrategyEngine:
         self.low_digit_max = int(low_digit_max)
         self.review_interval_seconds = float(review_interval_seconds)
         self.required_lower_confirmations = max(1, min(3, int(required_lower_confirmations)))
-        self._max_buffer = max(self.windows.values()) * 5
 
+        self._max_buffer = max(self.windows.values()) * 5
         self._digits: Deque[int] = deque(maxlen=self._max_buffer)
         self._prices: Deque[float] = deque(maxlen=self._max_buffer)
         self._epochs: Deque[float] = deque(maxlen=self._max_buffer)
+
         self._current_price = 0.0
         self._last_digit: Optional[int] = None
         self._last_tick_epoch: Optional[float] = None
-
         self._last_review_bucket: Optional[int] = None
         self._last_review: Optional[Dict[str, Any]] = None
         self._last_evaluation: Optional[Dict[str, Any]] = None
@@ -80,20 +78,27 @@ class DigitStrategyEngine:
         self._condition_valid = False
         self._armed_context: Optional[Dict[str, Any]] = None
         self._last_qualifying_context: Optional[Dict[str, Any]] = None
+
         self._confirmation_seen = False
         self._lower_confirmation_count = 0
         self._confirmation_digit: Optional[int] = None
         self._confirmation_epoch: Optional[float] = None
         self._confirmation_boundary_epoch: Optional[float] = None
+
         self._pending_signal: Optional[str] = None
         self._pending_signal_id: Optional[str] = None
         self._pending_signal_time = 0.0
         self._last_consumed_signal_id: Optional[str] = None
+
         self._trades_in_trend = 0
         self._state_version = 0
         self._state_signature: Optional[Tuple[Any, ...]] = None
 
-    # ------------------------------------------------------------------ digits
+    # ------------------------------------------------------------------ utils
+
+    def _bucket(self, epoch: float) -> int:
+        return int(float(epoch) // max(1.0, float(self.review_interval_seconds)))
+
     def _digit_from_price(self, price: float) -> int:
         scaled = Decimal(str(price)) * (Decimal(10) ** self.quote_precision)
         integer = int(scaled.to_integral_value(rounding=ROUND_HALF_UP))
@@ -109,28 +114,34 @@ class DigitStrategyEngine:
                 continue
         self._sync_state_version()
 
+    # ------------------------------------------------------------------- tick
+
     def process_tick(self, price: float, epoch: Optional[float] = None, allow_signal: bool = True) -> Optional[str]:
         try:
             price = float(price)
         except (TypeError, ValueError):
             return None
+
         if price <= 0:
             return None
+
         tick_epoch = float(epoch if epoch is not None else time.time())
         digit = self._digit_from_price(price)
+
         self._current_price = price
         self._last_digit = digit
         self._last_tick_epoch = tick_epoch
+
         self._prices.append(price)
         self._epochs.append(tick_epoch)
         self._digits.append(digit)
 
         if allow_signal and self._armed and self._pending_signal is None:
-            # A minute review establishes the boundary; never count the review
-            # tick itself, a tick from an unreviewed new bucket, or any delayed/
-            # pre-review tick as confirmation.
-            tick_bucket = int(tick_epoch // self.review_interval_seconds)
-            if self._last_review_bucket is None or tick_bucket > self._last_review_bucket:
+            tick_bucket = self._bucket(tick_epoch)
+
+            # Strict bucket rule:
+            # only ticks belonging to the same review bucket can confirm.
+            if self._last_review_bucket is None or tick_bucket != self._last_review_bucket:
                 self._last_rejection = "waiting for the current minute review before confirmation"
             elif self._confirmation_boundary_epoch is None or tick_epoch <= self._confirmation_boundary_epoch:
                 self._last_rejection = "waiting for first tick after the minute review boundary"
@@ -139,6 +150,7 @@ class DigitStrategyEngine:
                     self._lower_confirmation_count += 1
                     self._confirmation_digit = digit
                     self._confirmation_epoch = tick_epoch
+
                     if self._lower_confirmation_count >= self.required_lower_confirmations:
                         self._confirmation_seen = True
                         self._last_rejection = (
@@ -156,23 +168,30 @@ class DigitStrategyEngine:
                     self._last_rejection = f"higher digit {digit} reset lower-tick confirmation sequence"
             else:
                 self._queue_signal(digit, tick_epoch)
+
         self._sync_state_version()
         return self._pending_signal
 
-    # -------------------------------------------------------------- review rule
+    # ---------------------------------------------------------------- review
+
     def _window_stats(self, window: int) -> Optional[Dict[str, Any]]:
         if len(self._digits) < window:
             return None
+
         values = list(self._digits)[-window:]
         counts = Counter(values)
+
         over_count = sum(counts[d] for d in (7, 8, 9))
         low_count = sum(counts[d] for d in range(0, 7))
         comparison_count = sum(counts[d] for d in COMPARISON_LOW_DIGITS)
+
         p_over6 = over_count / window
         p_low = low_count / window
         p_1to6 = comparison_count / window
+
         p_over6_avg = p_over6 / 3.0
         p_1to6_avg = p_1to6 / 6.0
+
         return {
             "window": window,
             "count": window,
@@ -193,36 +212,43 @@ class DigitStrategyEngine:
         fast = stats.get("fast")
         medium = stats.get("medium")
         slow = stats.get("slow")
+
         if not fast or not medium or not slow:
             return False, f"warming up — need {max(self.windows.values())} ticks"
+
         if fast["p_over6"] < self.min_over6_share:
             return False, f"7–9 share {fast['p_over6']:.1%} below {self.min_over6_share:.1%}"
+
         if medium["p_over6"] < self.min_over6_share:
             return False, f"medium 7–9 share {medium['p_over6']:.1%} below {self.min_over6_share:.1%}"
+
         if fast["p_over6_avg"] <= fast["p_1to6_avg"]:
             return False, "average 7–9 digit share does not exceed average 1–6 digit share in the fast window"
+
         if medium["p_over6_avg"] <= medium["p_1to6_avg"]:
             return False, "average 7–9 digit share does not exceed average 1–6 digit share in the medium window"
+
         slow_min_share = max(0.30, self.min_over6_share - 0.01)
         if slow["p_over6"] < slow_min_share or slow["p_over6_avg"] <= slow["p_1to6_avg"]:
             return False, f"slow window does not support the rule (needs at least {slow_min_share:.1%} 7–9)"
+
         return True, "average 7–9 digit frequency dominates average 1–6 frequency across fast and medium windows"
 
     def review_if_due(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         current = float(now if now is not None else time.time())
-        bucket = int(current // self.review_interval_seconds)
+        bucket = self._bucket(current)
+
         if self._last_review_bucket == bucket:
             return None
+
         self._last_review_bucket = bucket
+
         # The boundary is the actual qualifying-review execution timestamp.
-        # Using `current` prevents a tick received before a delayed review
-        # callback from being counted merely because it shares the same minute.
         review_boundary_epoch = current
         self._confirmation_boundary_epoch = review_boundary_epoch
 
         # A signal from the preceding review window must never be executed
-        # after this new boundary. This closes the scheduling gap where the
-        # main loop reviews first and consumes a delayed old signal at :00.
+        # after this new boundary.
         if self._pending_signal is not None:
             self._pending_signal = None
             self._pending_signal_id = None
@@ -231,6 +257,7 @@ class DigitStrategyEngine:
 
         stats = {name: self._window_stats(size) for name, size in self.windows.items()}
         qualifies, reason = self._candidate(stats)
+
         self._last_signal_score = int(round((stats.get("medium") or {}).get("p_over6", 0.0) * 100))
         self._last_signal_score_breakdown = {
             "fast_over6_pct": round((stats.get("fast") or {}).get("p_over6", 0.0) * 100, 2),
@@ -252,20 +279,24 @@ class DigitStrategyEngine:
                 "review_epoch": current,
                 "stats": stats,
             }
+
             if not self._armed and self._pending_signal is None:
                 self._armed = True
+
             if self._armed and self._pending_signal is None:
-                # Every qualifying minute review starts a fresh sequence. A
-                # partial sequence from the prior minute must never carry over.
+                # Every qualifying minute review starts a fresh sequence.
                 self._confirmation_seen = False
                 self._confirmation_digit = None
                 self._confirmation_epoch = None
                 self._lower_confirmation_count = 0
                 self._armed_context = dict(self._last_qualifying_context)
-                self._last_rejection = f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) after the review boundary"
+                self._last_rejection = (
+                    f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) after the review boundary"
+                )
         else:
             self._condition_valid = False
             self._last_qualifying_context = None
+
             if self._armed and self._pending_signal is None:
                 self._armed = False
                 self._confirmation_seen = False
@@ -273,6 +304,7 @@ class DigitStrategyEngine:
                 self._confirmation_digit = None
                 self._confirmation_epoch = None
                 self._armed_context = None
+
             self._last_rejection = reason
 
         record = self._review_record(stats, qualifies, reason, current, review_epoch=current)
@@ -290,9 +322,13 @@ class DigitStrategyEngine:
         review_epoch: Optional[float] = None,
     ) -> Dict[str, Any]:
         fast = stats.get("fast") or {}
-        review_epoch_value = float(review_epoch if review_epoch is not None else (self._armed_context or {}).get("review_epoch", timestamp))
         medium = stats.get("medium") or {}
         slow = stats.get("slow") or {}
+
+        review_epoch_value = float(
+            review_epoch if review_epoch is not None else (self._armed_context or {}).get("review_epoch", timestamp)
+        )
+
         return {
             "signal_id": "",
             "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(timestamp)),
@@ -301,7 +337,11 @@ class DigitStrategyEngine:
             "taken": "FALSE",
             "executed": "FALSE",
             "rejection_reason": "" if qualifies else reason,
-            "note": (f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks" if qualifies else ""),
+            "note": (
+                f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks"
+                if qualifies
+                else ""
+            ),
             "score": self._last_signal_score,
             "threshold": round(self.min_over6_share * 100, 2),
             "regime": "DIGIT",
@@ -334,9 +374,12 @@ class DigitStrategyEngine:
             "per_digit_dominance_medium": medium.get("per_digit_dominance", ""),
             "per_digit_dominance_slow": slow.get("per_digit_dominance", ""),
             "review_timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(review_epoch_value)),
-            "confirmation_boundary_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else timestamp)),
+            "confirmation_boundary_utc": time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.gmtime(self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else timestamp),
+            ),
             "review_epoch": review_epoch_value,
-            "confirmation_boundary_epoch": self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else "", 
+            "confirmation_boundary_epoch": self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else "",
             "entry_tick_epoch": "",
             "lower_confirmation_digit": self._confirmation_digit if self._confirmation_digit is not None else "",
             "lower_confirmation_required": self.required_lower_confirmations,
@@ -350,52 +393,101 @@ class DigitStrategyEngine:
     def _queue_signal(self, entry_digit: int, epoch: float) -> None:
         if not self._armed or not self._confirmation_seen:
             return
+
+        base = dict(self._armed_context or {})
+        review_epoch = float(
+            base.get(
+                "review_epoch",
+                self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else epoch,
+            )
+        )
+
+        # Strict safety: the entry tick must belong to the same review bucket.
+        if self._bucket(epoch) != self._bucket(review_epoch):
+            self._last_rejection = "signal blocked: entry tick crossed review-minute boundary"
+            return
+
+        if self._last_review_bucket is not None and self._bucket(epoch) != self._last_review_bucket:
+            self._last_rejection = "signal blocked: entry tick is outside the active review bucket"
+            return
+
         self._pending_signal = "OVER6"
         self._pending_signal_id = uuid.uuid4().hex[:10]
         self._pending_signal_time = time.time()
-        base = dict(self._armed_context or {})
+
         stats = base.get("stats") or {}
-        review_epoch = (self._armed_context or {}).get("review_epoch", self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else epoch)
         record = self._review_record(stats, True, "", epoch, review_epoch=review_epoch)
-        record.update({
-            "signal_id": self._pending_signal_id,
-            "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch)),
-            "taken": "TRUE",
-            "note": f"{self.required_lower_confirmations} consecutive lower ticks confirmed; entered on the confirmation digit",
-            "rejection_reason": "",
-            "review_timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime((self._armed_context or {}).get("review_epoch", epoch))),
-            "confirmation_boundary_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else epoch)),
-            "review_epoch": float(review_epoch),
-            "confirmation_boundary_epoch": self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else "",
-            "entry_tick_epoch": float(epoch),
-            "lower_confirmation_digit": self._confirmation_digit,
-            "entry_digit": entry_digit,
-        })
+        record.update(
+            {
+                "signal_id": self._pending_signal_id,
+                "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch)),
+                "taken": "TRUE",
+                "note": f"{self.required_lower_confirmations} consecutive lower ticks confirmed; entered on the confirmation digit",
+                "rejection_reason": "",
+                "review_timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(review_epoch)),
+                "confirmation_boundary_utc": time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.gmtime(self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else epoch),
+                ),
+                "review_epoch": float(review_epoch),
+                "confirmation_boundary_epoch": self._confirmation_boundary_epoch if self._confirmation_boundary_epoch is not None else "",
+                "entry_tick_epoch": float(epoch),
+                "lower_confirmation_digit": self._confirmation_digit,
+                "entry_digit": entry_digit,
+            }
+        )
+
         self._entry_evaluation = record
         self._last_rejection = "signal queued — Over 6 entry"
+
         logger.info(
             "DIGIT OVER6 signal | id=%s | entry_digit=%d | lower_confirmation=%s",
             self._pending_signal_id,
             entry_digit,
             self._confirmation_digit,
         )
+
         self._sync_state_version()
 
     # ---------------------------------------------------------------- signals
+
     def consume_signal(self) -> Optional[str]:
         signal = self._pending_signal
         self._last_consumed_signal_id = self._pending_signal_id
         pending_record = self._entry_evaluation or {}
+
         self._pending_signal = None
         self._pending_signal_id = None
+
         if signal is None:
             return None
+
+        current_time = time.time()
+        current_bucket = self._bucket(current_time)
+
+        # If the current bucket has moved beyond the review bucket, discard.
+        if self._last_review_bucket is None or current_bucket != self._last_review_bucket:
+            self._armed = False
+            self._armed_context = None
+            self._confirmation_seen = False
+            self._lower_confirmation_count = 0
+            self._confirmation_digit = None
+            self._confirmation_epoch = None
+            self._entry_evaluation = None
+            self._last_rejection = "stale digit signal discarded after minute boundary"
+            self._sync_state_version()
+            return None
+
         try:
             signal_boundary = float(pending_record.get("confirmation_boundary_epoch"))
         except (TypeError, ValueError):
             signal_boundary = None
-        if (self._confirmation_boundary_epoch is not None and signal_boundary is not None
-                and signal_boundary < self._confirmation_boundary_epoch):
+
+        if (
+            self._confirmation_boundary_epoch is not None
+            and signal_boundary is not None
+            and signal_boundary < self._confirmation_boundary_epoch
+        ):
             self._armed = False
             self._armed_context = None
             self._confirmation_seen = False
@@ -407,15 +499,16 @@ class DigitStrategyEngine:
             self._last_rejection = "stale digit signal discarded after a newer minute review boundary"
             self._sync_state_version()
             return None
-        if time.time() - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
+
+        if current_time - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
             self._armed = False
             self._confirmation_seen = False
             self._lower_confirmation_count = 0
             self._last_rejection = "stale digit signal discarded"
             self._sync_state_version()
             return None
+
         # Consuming a signal reserves the strategy state for this execution.
-        # Do not leave it armed while proposal/buy is still in progress.
         self._armed = False
         self._armed_context = None
         self._confirmation_seen = False
@@ -424,6 +517,7 @@ class DigitStrategyEngine:
         self._confirmation_epoch = None
         self._last_rejection = "signal consumed — execution in progress"
         self._sync_state_version()
+
         return signal
 
     def get_entry_evaluation(self) -> Optional[Dict[str, Any]]:
@@ -463,9 +557,15 @@ class DigitStrategyEngine:
             self._confirmation_seen = False
             self._confirmation_digit = None
             self._confirmation_epoch = None
-            self._confirmation_boundary_epoch = self._last_tick_epoch if self._last_tick_epoch is not None else time.time()
             self._lower_confirmation_count = 0
-            self._last_rejection = f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks after the new entry boundary"
+
+            # Strict post-settlement boundary:
+            # only ticks after this exact time may form the next sequence.
+            self._confirmation_boundary_epoch = time.time()
+
+            self._last_rejection = (
+                f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks after the new entry boundary"
+            )
         else:
             self._armed = False
             self._armed_context = None
@@ -474,8 +574,10 @@ class DigitStrategyEngine:
             self._confirmation_epoch = None
             self._confirmation_boundary_epoch = None
             self._lower_confirmation_count = 0
+
             if not allow_rearm and self._condition_valid:
                 self._last_rejection = "trade finished — re-entry disabled because stopping was requested"
+
         self._sync_state_version()
 
     def on_signal_skipped(self) -> None:
@@ -498,6 +600,7 @@ class DigitStrategyEngine:
     def get_state(self) -> Dict[str, Any]:
         stats = {name: self._window_stats(size) for name, size in self.windows.items()}
         counts = Counter(self._digits)
+
         return {
             "trend_direction": "UP" if self._armed else None,
             "trend_tick_count": len(self._digits),
@@ -508,7 +611,14 @@ class DigitStrategyEngine:
             "pattern_stage": "SIGNAL" if self._pending_signal else ("PULLBACK" if self._confirmation_seen else ("TREND" if self._armed else "IDLE")),
             "mtf_bias": "UP" if self._armed else None,
             "mtf_agreement": 2 if self._armed else 0,
-            "mtf_tf_biases": {name: ("UP" if (stats.get(name) or {}).get("p_over6_avg", 0) > (stats.get(name) or {}).get("p_1to6_avg", 1) else "FLAT") for name in self.windows},
+            "mtf_tf_biases": {
+                name: (
+                    "UP"
+                    if (stats.get(name) or {}).get("p_over6_avg", 0) > (stats.get(name) or {}).get("p_1to6_avg", 1)
+                    else "FLAT"
+                )
+                for name in self.windows
+            },
             "micro_bias": "UP" if self._last_digit is not None and self._last_digit >= 7 else "DOWN",
             "last_entry_mode": self._last_entry_mode,
             "last_signal_score": self._last_signal_score,
@@ -522,7 +632,9 @@ class DigitStrategyEngine:
             "last_digit": self._last_digit,
             "digit_counts": {str(d): int(counts[d]) for d in range(10)},
             "digit_windows": stats,
-            "digit_armed": self._armed, "digit_condition_valid": self._condition_valid, "digit_lower_confirmed": self._confirmation_seen,
+            "digit_armed": self._armed,
+            "digit_condition_valid": self._condition_valid,
+            "digit_lower_confirmed": self._confirmation_seen,
             "digit_lower_confirmation": self._confirmation_digit,
             "digit_lower_confirmation_count": self._lower_confirmation_count,
             "digit_required_lower_confirmations": self.required_lower_confirmations,
@@ -550,11 +662,13 @@ class DigitStrategyEngine:
         )
 
     # --------------------------------------------------------------- internals
+
     def _sync_state_version(self) -> None:
         stats = tuple(
             round((self._window_stats(size) or {}).get("p_over6", -1.0), 4)
             for size in self.windows.values()
         )
+
         signature = (
             self._armed,
             self._confirmation_seen,
@@ -563,6 +677,7 @@ class DigitStrategyEngine:
             stats,
             self._last_rejection,
         )
+
         if signature != self._state_signature:
             self._state_signature = signature
             self._state_version += 1
