@@ -31,7 +31,7 @@ from src.state_manager import StateManager, TradeRecord
 logger = get_logger("trading_engine")
 
 INITIAL_WARMUP_COOLDOWN_SECONDS = 10.0
-MAIN_LOOP_INTERVAL = 0.02
+MAIN_LOOP_INTERVAL = 0.05
 CONTRACT_POLL_INTERVAL_FAST = 0.10
 CONTRACT_POLL_INTERVAL_SLOW = 0.25
 
@@ -179,9 +179,6 @@ class TradingEngine:
                     return max(0, min(10, -exponent))
 
             if numeric.is_integer() and 0 <= numeric <= 10:
-                # Some Deriv responses expose the number of decimal places;
-                # others expose pip itself. This is the useful interpretation
-                # for digit extraction and is checked against live quotes.
                 return int(numeric)
 
         return fallback
@@ -302,14 +299,32 @@ class TradingEngine:
         try:
             boundary_epoch = float(entry_record.get("confirmation_boundary_epoch"))
             entry_epoch = float(entry_record.get("entry_tick_epoch"))
+            review_epoch = float(entry_record.get("review_epoch") or boundary_epoch)
         except (TypeError, ValueError):
             return False, "review-boundary timing evidence missing"
 
-        if not math.isfinite(boundary_epoch) or not math.isfinite(entry_epoch):
+        if not math.isfinite(boundary_epoch) or not math.isfinite(entry_epoch) or not math.isfinite(review_epoch):
             return False, "review-boundary timing evidence invalid"
 
         if entry_epoch <= boundary_epoch:
             return False, "entry tick was not strictly after the minute review boundary"
+
+        interval = max(1.0, float(self.review_interval_seconds))
+
+        # Strict bucket rule:
+        # review, confirmation boundary, entry tick, and current execution time
+        # must all belong to the same review bucket. This prevents a pending
+        # signal from the previous minute being executed at the new minute open.
+        boundary_bucket = int(boundary_epoch // interval)
+        entry_bucket = int(entry_epoch // interval)
+        review_bucket = int(review_epoch // interval)
+        current_bucket = int(time.time() // interval)
+
+        if entry_bucket != boundary_bucket or review_bucket != boundary_bucket:
+            return False, "entry tick is not in the same review bucket as the qualifying review"
+
+        if current_bucket != boundary_bucket:
+            return False, "signal crossed the minute review boundary before execution"
 
         return True, "lower-digit confirmation and post-review timing verified"
 
@@ -378,12 +393,11 @@ class TradingEngine:
         await self._seed_history()
 
         self._engine_ready_monotonic = time.monotonic()
-        self.state.heartbeat()
 
         target_text = f" · take-profit {self.take_profit_target:.2f}" if self.take_profit_target > 0 else ""
         self.state.set_status(
             f"Live digit review on {self.symbol_display}. Reviewing every minute; lower confirmation N="
-            f"{self.required_lower_confirmations}; first eligible tick must be strictly after the review timestamp; "
+            f"{self.required_lower_confirmations}; lower sequence must occur strictly after the review boundary; "
             f"first entry possible in {INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s{target_text}."
         )
 
@@ -404,7 +418,6 @@ class TradingEngine:
             while not self.state.stop_requested:
                 try:
                     await asyncio.sleep(MAIN_LOOP_INTERVAL)
-                    self.state.heartbeat()
 
                     if not self._client.connected:
                         if not await self._reconnect():
@@ -424,7 +437,6 @@ class TradingEngine:
                             f"Digit review · 7–9 {fast:.1f}% fast / {medium:.1f}% medium; "
                             f"per-digit comparison active · {review.get('rejection_reason') or 'armed for lower-tick confirmation'}"
                         )
-                        self._push_strategy_state()
 
                     if self._strategy.state_version != self._last_strategy_state_version:
                         self._push_strategy_state()
@@ -550,7 +562,6 @@ class TradingEngine:
 
             self._strategy.process_tick(price, epoch)
             self._push_strategy_state(price, epoch)
-            self.state.heartbeat()
         except Exception as exc:
             logger.exception("Error processing digit tick: %s", exc)
 
@@ -736,10 +747,6 @@ class TradingEngine:
             if not proposal_id or ask_price <= 0 or payout <= 0:
                 raise DerivAPIError("Deriv returned an invalid digit proposal.", "INVALID_RESPONSE")
 
-            # The proposal is required for the actual stake/price, but the
-            # previous estimated-edge heuristic is intentionally not a gate.
-            # The digit condition itself controls qualification; ask and payout
-            # remain in the journal for audit and settlement reconciliation.
             self._record_entry_decision(entry_record, True, "", ask_price, payout)
 
             if self.state.stop_requested:
@@ -803,8 +810,6 @@ class TradingEngine:
                 self.state.on_trade_loss(self.martingale_multiplier, self.max_martingale_steps)
                 self.state.set_status(f"Over 6 LOST · next stake {self.state.get_martingale_state()['stake']:.2f}")
 
-            self.state.update_trade_pacing()
-
             self._journal.record_outcome(
                 signal_id,
                 outcome,
@@ -818,9 +823,6 @@ class TradingEngine:
         except DerivAPIError as exc:
             reason = f"Digit order failed: {exc.message} ({exc.code})."
 
-            # If a buy attempt was already sent and the failure is transport-
-            # uncertain, treat it as UNKNOWN and stop for manual verification.
-            # This prevents silently missing a real Deriv contract.
             transport_uncertain = self._buy_attempted and exc.code in _BUY_UNCERTAIN_CODES
 
             if self._active_contract_id is not None or transport_uncertain:
@@ -858,8 +860,6 @@ class TradingEngine:
         except Exception as exc:
             reason = f"Unexpected digit execution failure: {exc}"
 
-            # If a buy attempt was already sent and an unexpected failure occurs,
-            # be conservative: a real contract may exist.
             if self._active_contract_id is not None or self._buy_attempted:
                 self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                 self.state.request_stop()
@@ -898,7 +898,6 @@ class TradingEngine:
             self._trade_in_progress = False
             self._strategy.on_trade_finished(allow_rearm=not self.state.stop_requested)
             self._push_strategy_state()
-            self.state.heartbeat()
 
     async def _monitor_contract(self, contract_id: int, buy_price: float, payout: float) -> Tuple[str, float]:
         expected = self._contract_duration_seconds()
