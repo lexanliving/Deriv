@@ -139,6 +139,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+configured_pat = DERIV_API_TOKEN.strip()
+
+# ---------------------------------------------------------------------------
+# Per-session state.
+# This is intentional: each browser tab/session can run one market.
+# To run multiple markets, open multiple tabs.
+# ---------------------------------------------------------------------------
+
+if "state_manager" not in st.session_state:
+    st.session_state.state_manager = StateManager()
+if "engine_thread" not in st.session_state:
+    st.session_state.engine_thread = None
+if "engine_loop" not in st.session_state:
+    st.session_state.engine_loop = None
+if "engine_instance" not in st.session_state:
+    st.session_state.engine_instance = None
+if "should_run" not in st.session_state:
+    st.session_state.should_run = False
+if "engine_config" not in st.session_state:
+    st.session_state.engine_config = None
+if "auto_restart_count" not in st.session_state:
+    st.session_state.auto_restart_count = 0
+if "last_auto_restart" not in st.session_state:
+    st.session_state.last_auto_restart = 0.0
+
+state: StateManager = st.session_state.state_manager
+
 
 def _run_engine_in_thread(engine: TradingEngine, loop: asyncio.AbstractEventLoop) -> None:
     asyncio.set_event_loop(loop)
@@ -157,225 +184,6 @@ def _run_engine_in_thread(engine: TradingEngine, loop: asyncio.AbstractEventLoop
             loop.close()
         except Exception:
             pass
-
-
-def _today_filled_trade_count(state_obj: StateManager) -> int:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return sum(
-        1
-        for trade in state_obj.get_trade_history()
-        if getattr(trade, "contract_id", None) is not None and str(trade.timestamp).startswith(today)
-    )
-
-
-class EngineSupervisor:
-    """Keeps the engine alive independently of Streamlit fragment scheduling."""
-
-    RESTART_COOLDOWN_SECONDS = 3.0
-    HEALTHY_WINDOW_SECONDS = 180.0
-    MAX_BACKOFF_SECONDS = 30.0
-
-    def __init__(self, state: StateManager) -> None:
-        self.state = state
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._engine_thread: threading.Thread | None = None
-        self._engine: TradingEngine | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._config: Dict[str, Any] | None = None
-        self._should_run = threading.Event()
-        self._next_reset = True
-        self._restart_count = 0
-        self._last_restart = 0.0
-
-    @property
-    def active(self) -> bool:
-        return self._should_run.is_set()
-
-    def engine_alive(self) -> bool:
-        return self._engine_thread is not None and self._engine_thread.is_alive()
-
-    def ensure_alive(self) -> None:
-        if self._should_run.is_set() or self.engine_alive():
-            self._ensure_supervisor_thread()
-
-    def start(self, config: Dict[str, Any], reset_state: bool = True) -> None:
-        with self._lock:
-            self._config = dict(config)
-            self._next_reset = bool(reset_state)
-            self._restart_count = 0
-            self._last_restart = 0.0
-            self.state.clear_error()
-            self.state.clear_stop_request()
-            self._should_run.set()
-            self._ensure_supervisor_thread()
-
-    def stop(self) -> None:
-        with self._lock:
-            self._should_run.clear()
-        self.state.request_stop()
-        self.state.set_status("Stopping…")
-
-    def acknowledge_stop(self) -> None:
-        with self._lock:
-            self._should_run.clear()
-        self.state.set_running(False)
-        self.state.set_status("Stopped.")
-
-    def _ensure_supervisor_thread(self) -> None:
-        if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(
-                target=self._supervisor_loop,
-                daemon=True,
-                name="DigitEngineSupervisor",
-            )
-            self._thread.start()
-
-    def _supervisor_loop(self) -> None:
-        while self._should_run.is_set() or self.engine_alive():
-            try:
-                if not self._should_run.is_set():
-                    # Waiting for the engine to finish an open contract / shutdown.
-                    time.sleep(0.5)
-                    continue
-
-                if not self._config:
-                    self._should_run.clear()
-                    self.state.set_running(False)
-                    self.state.set_error("Engine configuration was lost.")
-                    self.state.set_status("Stopped.")
-                    continue
-
-                if self.state.stop_requested and not self.engine_alive():
-                    self._should_run.clear()
-                    self.state.set_running(False)
-                    self.state.set_status("Stopped.")
-                    continue
-
-                if not self.engine_alive():
-                    now = time.monotonic()
-
-                    if self._restart_count > 0 and now - self._last_restart > self.HEALTHY_WINDOW_SECONDS:
-                        self._restart_count = 0
-
-                    backoff = (
-                        0.0
-                        if self._restart_count == 0
-                        else min(
-                            self.MAX_BACKOFF_SECONDS,
-                            self.RESTART_COOLDOWN_SECONDS * (2 ** min(self._restart_count, 4)),
-                        )
-                    )
-
-                    if now - self._last_restart < backoff:
-                        time.sleep(0.5)
-                        continue
-
-                    self._restart_count += 1
-                    self._last_restart = now
-
-                    reset = self._next_reset
-                    self._next_reset = False
-
-                    self.state.set_status(f"Engine starting ({self._restart_count})…")
-                    if not self._launch_engine(reset_state=reset):
-                        time.sleep(2.0)
-
-                time.sleep(0.5)
-            except Exception:
-                time.sleep(1.0)
-
-        self.state.set_running(False)
-
-    def _launch_engine(self, reset_state: bool) -> bool:
-        try:
-            config = self._config
-            if not config:
-                return False
-
-            if reset_state:
-                self.state.reset_for_new_session(float(config["initial_stake"]))
-            else:
-                self.state.clear_error()
-
-            history = self.state.get_trade_history()
-            if history and history[0].status == "OPEN":
-                self.state.update_trade_outcome(
-                    history[0].trade_id,
-                    "UNKNOWN",
-                    0.0,
-                    "The engine restarted while a contract was open — check the Deriv statement.",
-                )
-
-            engine = TradingEngine(
-                api_token=config["api_token"],
-                app_id=config["app_id"],
-                account_id=config["account_id"],
-                account_currency=config["account_currency"],
-                state=self.state,
-                initial_stake=config["initial_stake"],
-                max_martingale_steps=config["max_steps"],
-                symbol=config["symbol"],
-                symbol_display=config["symbol_display"],
-                contract_duration=config["duration_ticks"],
-                contract_duration_unit="t",
-                account_type=config["account_type"],
-                real_execution_confirmed=config["real_execution_confirmed"],
-                martingale_multiplier=config["martingale_multiplier"],
-                quote_precision=config.get("quote_precision", 2),
-                min_over6_share=config["min_over6_share"],
-                lower_tick_max=config["lower_tick_max"],
-                review_interval_seconds=config["review_interval_seconds"],
-                required_lower_confirmations=config.get("required_lower_confirmations", 1),
-                digit_windows=config["digit_windows"],
-                take_profit_target=config.get("take_profit_target", 0.0),
-            )
-
-            if not reset_state:
-                engine._daily_trade_count = _today_filled_trade_count(self.state)
-                engine._daily_date = datetime.now(timezone.utc).date()
-
-            self._engine = engine
-            self.state.set_running(True)
-
-            loop = asyncio.new_event_loop()
-            self._loop = loop
-
-            thread = threading.Thread(
-                target=_run_engine_in_thread,
-                args=(engine, loop),
-                daemon=True,
-                name="DigitTradingEngineThread",
-            )
-            try:
-                add_script_run_ctx(thread)
-            except Exception:
-                pass
-
-            thread.start()
-            self._engine_thread = thread
-            return True
-        except Exception as exc:
-            self.state.set_running(False)
-            self.state.set_error(f"The engine could not start: {exc}")
-            self.state.set_status("Could not start.")
-            return False
-
-
-@st.cache_resource
-def get_global_state() -> StateManager:
-    return StateManager()
-
-
-@st.cache_resource
-def get_supervisor() -> EngineSupervisor:
-    return EngineSupervisor(get_global_state())
-
-
-state = get_global_state()
-supervisor = get_supervisor()
-engine_busy = state.is_running or supervisor.engine_alive()
-configured_pat = DERIV_API_TOKEN.strip()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -445,14 +253,157 @@ def _fallback_markets() -> Dict[str, str]:
     return dict(sorted(AVAILABLE_MARKETS.items(), key=lambda pair: pair[0].lower()))
 
 
-def start_bot(config: Dict[str, Any]) -> None:
-    if supervisor.engine_alive():
+def _today_filled_trade_count(state_obj: StateManager) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return sum(
+        1
+        for trade in state_obj.get_trade_history()
+        if getattr(trade, "contract_id", None) is not None and str(trade.timestamp).startswith(today)
+    )
+
+
+def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
+    try:
+        if reset_state:
+            state.reset_for_new_session(config["initial_stake"])
+        else:
+            state.clear_error()
+
+        history = state.get_trade_history()
+        if history and history[0].status == "OPEN":
+            state.update_trade_outcome(
+                history[0].trade_id,
+                "UNKNOWN",
+                0.0,
+                "The engine restarted while a contract was open — check the Deriv statement.",
+            )
+
+        engine = TradingEngine(
+            api_token=config["api_token"],
+            app_id=config["app_id"],
+            account_id=config["account_id"],
+            account_currency=config["account_currency"],
+            state=state,
+            initial_stake=config["initial_stake"],
+            max_martingale_steps=config["max_steps"],
+            symbol=config["symbol"],
+            symbol_display=config["symbol_display"],
+            contract_duration=config["duration_ticks"],
+            contract_duration_unit="t",
+            account_type=config["account_type"],
+            real_execution_confirmed=config["real_execution_confirmed"],
+            martingale_multiplier=config["martingale_multiplier"],
+            quote_precision=config.get("quote_precision", 2),
+            min_over6_share=config["min_over6_share"],
+            lower_tick_max=config["lower_tick_max"],
+            review_interval_seconds=config["review_interval_seconds"],
+            required_lower_confirmations=config.get("required_lower_confirmations", 1),
+            digit_windows=config["digit_windows"],
+            take_profit_target=config.get("take_profit_target", 0.0),
+        )
+
+        if not reset_state:
+            engine._daily_trade_count = _today_filled_trade_count(state)
+            engine._daily_date = datetime.now(timezone.utc).date()
+
+    except Exception as exc:
+        state.set_running(False)
+        state.set_error(f"The engine could not start: {exc}")
+        state.set_status("Could not start.")
+        return False
+
+    st.session_state.engine_instance = engine
+    state.set_running(True)
+
+    loop = asyncio.new_event_loop()
+    st.session_state.engine_loop = loop
+
+    thread = threading.Thread(
+        target=_run_engine_in_thread,
+        args=(engine, loop),
+        daemon=True,
+        name="DigitTradingEngineThread",
+    )
+    try:
+        add_script_run_ctx(thread)
+    except Exception:
+        pass
+
+    thread.start()
+    st.session_state.engine_thread = thread
+    return True
+
+
+RESTART_COOLDOWN_SECONDS = 3.0
+MAX_AUTO_RESTARTS = 0  # 0 = unlimited automatic restarts while should_run is True.
+HEALTHY_WINDOW_SECONDS = 180.0
+
+
+@st.fragment(run_every=1.0)
+def watchdog_fragment():
+    if not st.session_state.get("should_run", False):
         return
-    supervisor.start(config, reset_state=True)
+
+    if state.stop_requested:
+        st.session_state.should_run = False
+        state.set_running(False)
+        return
+
+    thread = st.session_state.get("engine_thread")
+    now = time.monotonic()
+
+    if thread is not None and thread.is_alive():
+        if (
+            st.session_state.get("auto_restart_count", 0) > 0
+            and now - st.session_state.get("last_auto_restart", 0.0) > HEALTHY_WINDOW_SECONDS
+        ):
+            st.session_state.auto_restart_count = 0
+        return
+
+    count = int(st.session_state.get("auto_restart_count", 0))
+
+    if MAX_AUTO_RESTARTS and count >= MAX_AUTO_RESTARTS:
+        st.session_state.should_run = False
+        state.set_running(False)
+        state.set_error(f"The engine stopped {MAX_AUTO_RESTARTS} times in a row — auto-restart paused.")
+        state.set_status("Auto-restart paused.")
+        return
+
+    backoff = 0.0 if count == 0 else min(30.0, RESTART_COOLDOWN_SECONDS * (2 ** min(count, 3)))
+    if now - float(st.session_state.get("last_auto_restart", 0.0)) < backoff:
+        return
+
+    config = st.session_state.get("engine_config")
+    if not config:
+        st.session_state.should_run = False
+        state.set_running(False)
+        return
+
+    st.session_state.last_auto_restart = now
+    st.session_state.auto_restart_count = count + 1
+    state.set_status(f"Engine stopped unexpectedly — restarting ({count + 1})…")
+
+    if not _launch_engine(config, reset_state=False):
+        st.session_state.should_run = False
+
+
+def start_bot(config: Dict[str, Any]) -> None:
+    if st.session_state.engine_thread and st.session_state.engine_thread.is_alive():
+        return
+
+    st.session_state.engine_config = config
+    st.session_state.should_run = True
+    st.session_state.auto_restart_count = 0
+    st.session_state.last_auto_restart = 0.0
+
+    if not _launch_engine(config, reset_state=True):
+        st.session_state.should_run = False
 
 
 def stop_bot() -> None:
-    supervisor.stop()
+    st.session_state.should_run = False
+    state.request_stop()
+    state.set_status("Stopping…")
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +412,7 @@ def stop_bot() -> None:
 
 with st.sidebar:
     st.markdown("### Digit terminal")
-    st.caption("Rolling last-digit reviews · Over 6 · 1–2 ticks")
+    st.caption("One market per browser tab/session. Open more tabs to run more markets.")
 
     accounts: List[Dict[str, Any]] = []
     account_error = ""
@@ -494,7 +445,7 @@ with st.sidebar:
         picked = st.selectbox(
             "Account",
             options=options,
-            disabled=engine_busy,
+            disabled=state.is_running,
             format_func=lambda value: (
                 f"{normalize_account_type(account_map[value].get('account_type', 'UNKNOWN'))} · {value} · "
                 f"{account_map[value].get('currency', 'USD')} {float(account_map[value].get('balance', 0) or 0):,.2f}"
@@ -533,7 +484,7 @@ with st.sidebar:
         "Market",
         options=labels,
         index=labels.index(default_label),
-        disabled=engine_busy,
+        disabled=state.is_running,
     )
     selected_symbol = market_catalog[market_display]
 
@@ -548,7 +499,7 @@ with st.sidebar:
         "Contract duration",
         options=list(DIGIT_TICK_DURATION_OPTIONS),
         value=DIGIT_DEFAULT_TICK_DURATION,
-        disabled=engine_busy,
+        disabled=state.is_running,
         format_func=lambda value: f"{value} tick" if value == 1 else f"{value} ticks",
     )
 
@@ -556,14 +507,14 @@ with st.sidebar:
         "Lower-tick confirmations before entry",
         options=[1, 2, 3],
         value=1,
-        disabled=engine_busy,
+        disabled=state.is_running,
         format_func=lambda value: f"{value} lower tick" if value == 1 else f"{value} consecutive lower ticks",
     )
 
     st.caption(
         "This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. "
         "The final required lower digit itself triggers entry; a higher digit resets the sequence. "
-        "Default: 1 lower 0–6 tick, then immediate entry on that same tick."
+        "The lower sequence must occur strictly after the actual minute-review boundary and inside the same minute bucket."
     )
 
     st.divider()
@@ -575,7 +526,7 @@ with st.sidebar:
         60,
         int(round(DIGIT_MIN_OVER6_SHARE * 100)),
         1,
-        disabled=engine_busy,
+        disabled=state.is_running,
     )
     min_over6_share = min_over6_share_pct / 100.0
 
@@ -592,7 +543,7 @@ with st.sidebar:
 
     st.markdown("#### Account safety")
     if selected_account and account_type == "REAL":
-        live_text = st.text_input("Type LIVE to enable real orders", max_chars=4, disabled=engine_busy)
+        live_text = st.text_input("Type LIVE to enable real orders", max_chars=4, disabled=state.is_running)
         real_execution_confirmed = live_text == "LIVE"
         st.warning(
             "Real-money orders are ON."
@@ -613,13 +564,13 @@ with st.sidebar:
         value=float(DEFAULT_INITIAL_STAKE),
         step=0.5,
         format="%.2f",
-        disabled=engine_busy,
+        disabled=state.is_running,
     )
 
     use_martingale = st.checkbox(
         "Enable recovery multiplier",
         value=bool(DIGIT_DEFAULT_RECOVERY_ENABLED),
-        disabled=engine_busy,
+        disabled=state.is_running,
     )
 
     martingale_multiplier = st.number_input(
@@ -629,7 +580,7 @@ with st.sidebar:
         value=float(DIGIT_DEFAULT_RECOVERY_MULTIPLIER),
         step=0.01,
         format="%.2f",
-        disabled=engine_busy,
+        disabled=state.is_running,
     )
 
     max_steps = st.slider(
@@ -637,7 +588,7 @@ with st.sidebar:
         0,
         int(DIGIT_MAX_RECOVERY_STEPS),
         int(DIGIT_MAX_RECOVERY_STEPS if use_martingale else 0),
-        disabled=engine_busy,
+        disabled=state.is_running,
     )
     if not use_martingale:
         max_steps = 0
@@ -649,7 +600,7 @@ with st.sidebar:
         value=float(DIGIT_DEFAULT_PROFIT_TARGET),
         step=1.0,
         format="%.2f",
-        disabled=engine_busy,
+        disabled=state.is_running,
         help="0 disables the target. When session P&L reaches this positive amount, the bot stops before a new entry.",
     )
 
@@ -662,9 +613,9 @@ with st.sidebar:
 
     c1, c2 = st.columns(2)
     with c1:
-        start_pressed = st.button("Start", type="primary", use_container_width=True, disabled=engine_busy)
+        start_pressed = st.button("Start", type="primary", use_container_width=True, disabled=state.is_running)
     with c2:
-        stop_pressed = st.button("Stop", use_container_width=True, disabled=not engine_busy)
+        stop_pressed = st.button("Stop", use_container_width=True, disabled=not state.is_running)
 
     if start_pressed:
         if not selected_account:
@@ -723,16 +674,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-@st.fragment(run_every=1.0)
-def watchdog_fragment():
-    sup = get_supervisor()
-    if sup.active or sup.engine_alive():
-        sup.ensure_alive()
-
-    if not sup.active and not sup.engine_alive() and state.is_running:
-        state.set_running(False)
 
 
 @st.fragment(run_every=1.0)
