@@ -61,16 +61,40 @@ DIGIT_TICK_DURATION_OPTIONS = [1, 2]
 DIGIT_DEFAULT_TICK_DURATION = 1
 DIGIT_REVIEW_INTERVAL_SECONDS = 60.0
 
+# Default rolling window sizes.
 DIGIT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
 
+# Default window stage switches.
 DIGIT_WINDOW_ENABLED = {
     "fast": True,
     "medium": True,
     "slow": True,
 }
 
+# Fallback global threshold.
 DIGIT_MIN_OVER6_SHARE = 0.31
+
+# Separate default threshold for each window.
+DIGIT_MIN_OVER6_SHARES = {
+    "fast": 0.31,
+    "medium": 0.31,
+    "slow": 0.30,
+}
+
+# Lower digit values are still 0 through 6 for Over 6.
 DIGIT_LOWER_CONFIRM_MAX = 6
+
+# Maximum selectable lower-tick confirmation length.
+DIGIT_LOWER_CONFIRMATION_MAX = 20
+
+# Default lower confirmation count.
+DIGIT_DEFAULT_LOWER_CONFIRMATIONS = 1
+
+# Upper-digit behavior:
+# "kill"  = any 7-9 before completion kills the signal for that review window.
+# "reset" = any 7-9 before completion resets the lower sequence.
+DIGIT_UPPER_MODE = "kill"
+
 DIGIT_DEFAULT_RECOVERY_MULTIPLIER = 1.1
 DIGIT_DEFAULT_RECOVERY_ENABLED = True
 DIGIT_MAX_RECOVERY_STEPS = 10
@@ -78,6 +102,9 @@ DIGIT_MAX_RECOVERY_STEPS = 10
 # Global app-wide take-profit target.
 # 0 disables global take-profit.
 GLOBAL_TAKE_PROFIT_TARGET = 50.0
+
+# Kept for backward compatibility only.
+DIGIT_DEFAULT_PROFIT_TARGET = 1.0
 
 # 0 disables the daily trade cap completely.
 MAX_TRADES_PER_DAY = 0
