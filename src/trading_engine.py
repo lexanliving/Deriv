@@ -1,10 +1,13 @@
 """Live execution engine for the rolling digit Over 6 strategy.
 
-Changes:
-- Window toggles are passed to the strategy.
-- Per-market take-profit is removed.
-- Global app-wide take-profit coordinates all running markets/pages.
-- Daily trade cap is disabled when MAX_TRADES_PER_DAY is zero.
+Upgrades included:
+- separate per-window thresholds
+- window enable/disable support
+- lower confirmation up to 20
+- upper-digit kill/reset support
+- global app-wide take-profit
+- per-market take-profit removed
+- daily trade cap disabled when MAX_TRADES_PER_DAY is zero
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ from src.state_manager import StateManager, TradeRecord
 logger = get_logger("trading_engine")
 
 INITIAL_WARMUP_COOLDOWN_SECONDS = 10.0
+MAIN_LOOP_INTERVAL = 0.05
 
 DIGIT_CONTRACT_TYPE_OVER = "DIGITOVER"
 DIGIT_CONTRACT_TYPE_UNDER = "DIGITUNDER"
@@ -76,12 +80,14 @@ class TradingEngine:
         martingale_multiplier: float = MARTINGALE_MULTIPLIER,
         quote_precision: int = 2,
         min_over6_share: float = 0.31,
+        min_over6_shares: Optional[Dict[str, float]] = None,
         lower_tick_max: int = 6,
         required_lower_confirmations: int = 1,
         review_interval_seconds: float = 60.0,
         take_profit_target: float = 0.0,
         digit_windows: Optional[Dict[str, int]] = None,
         digit_window_enabled: Optional[Dict[str, bool]] = None,
+        upper_mode: str = "kill",
         **_: Any,
     ) -> None:
         self.api_token = str(api_token or "").strip()
@@ -105,9 +111,11 @@ class TradingEngine:
 
         self.quote_precision = max(0, int(quote_precision))
         self.min_over6_share = float(min_over6_share)
+        self.min_over6_shares = dict(min_over6_shares or {})
         self.lower_tick_max = int(lower_tick_max)
-        self.required_lower_confirmations = max(1, min(3, int(required_lower_confirmations)))
+        self.required_lower_confirmations = max(1, int(required_lower_confirmations))
         self.review_interval_seconds = float(review_interval_seconds)
+        self.upper_mode = str(upper_mode or "kill").lower()
 
         # Per-market take-profit is intentionally ignored.
         # Global app-wide take-profit is handled by GlobalRiskCoordinator.
@@ -123,9 +131,11 @@ class TradingEngine:
             windows=self.digit_windows,
             window_enabled=self.digit_window_enabled,
             min_over6_share=self.min_over6_share,
+            min_over6_shares=self.min_over6_shares,
             low_digit_max=self.lower_tick_max,
             review_interval_seconds=self.review_interval_seconds,
             required_lower_confirmations=self.required_lower_confirmations,
+            upper_mode=self.upper_mode,
         )
 
         self._journal = get_journal()
@@ -141,6 +151,9 @@ class TradingEngine:
 
         self._daily_trade_count = 0
         self._daily_date = datetime.now(timezone.utc).date()
+
+        self._last_global_check = 0.0
+        self._last_global_state: Dict[str, Any] = {}
 
         self._reconnect_lock = asyncio.Lock()
         self._market_coordinator = SharedMarketCoordinator(
@@ -191,6 +204,15 @@ class TradingEngine:
             self._daily_date = today
             self._daily_trade_count = 0
 
+    def _get_global_state(self) -> Dict[str, Any]:
+        now = time.monotonic()
+
+        if now - self._last_global_check >= 1.0 or not self._last_global_state:
+            self._last_global_state = self._global_risk.snapshot()
+            self._last_global_check = now
+
+        return self._last_global_state
+
     def _gate_allows(self, now_mono: float) -> Tuple[bool, str]:
         if self._engine_ready_monotonic == 0.0:
             return False, "starting up"
@@ -199,7 +221,7 @@ class TradingEngine:
         if MAX_TRADES_PER_DAY > 0 and self._daily_trade_count >= MAX_TRADES_PER_DAY:
             return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
 
-        global_state = self._global_risk.snapshot()
+        global_state = self._get_global_state()
 
         if bool(global_state.get("stop_all", False)):
             self.state.request_stop()
@@ -267,10 +289,7 @@ class TradingEngine:
             return False, "lower-digit confirmation evidence missing"
 
         try:
-            required = max(
-                1,
-                min(3, int(entry_record.get("lower_confirmation_required", self.required_lower_confirmations) or 0)),
-            )
+            required = max(1, int(entry_record.get("lower_confirmation_required", self.required_lower_confirmations) or 0))
             observed = int(entry_record.get("lower_confirmation_count", 0) or 0)
             digit_value = int(entry_record.get("lower_confirmation_digit"))
             entry_digit_value = int(entry_record.get("entry_digit"))
@@ -332,11 +351,13 @@ class TradingEngine:
 
     async def run(self) -> None:
         logger.info(
-            "Digit engine start | market=%s mode=%s duration=%dt barrier=%s",
+            "Digit engine start | market=%s mode=%s duration=%dt barrier=%s lowerN=%d upper=%s",
             self.symbol,
             self.execution_mode,
             self.contract_duration,
             self.barrier,
+            self.required_lower_confirmations,
+            self.upper_mode,
         )
 
         self.state.set_execution_context(
@@ -367,13 +388,13 @@ class TradingEngine:
 
         self._engine_ready_monotonic = time.monotonic()
 
-        global_state = self._global_risk.snapshot()
+        global_state = self._get_global_state()
         target = float(global_state.get("take_profit_target", 0.0))
         target_text = f" · global take-profit {target:.2f}" if target > 0 else " · global take-profit disabled"
 
         self.state.set_status(
             f"Live digit review on {self.symbol_display}. Reviewing every minute; lower confirmation N="
-            f"{self.required_lower_confirmations}; first eligible tick must be strictly after the review timestamp; "
+            f"{self.required_lower_confirmations}; upper rule={self.upper_mode}; first eligible tick must be strictly after the review timestamp; "
             f"first entry possible in {INITIAL_WARMUP_COOLDOWN_SECONDS:.0f}s{target_text}."
         )
 
@@ -381,14 +402,14 @@ class TradingEngine:
             await self._client.subscribe_ticks(self.symbol, self._on_tick)
 
             while not self.state.stop_requested:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(MAIN_LOOP_INTERVAL)
 
                 if not self._client.connected:
                     await self._reconnect()
 
                 self._roll_daily_trade_count()
 
-                global_state = self._global_risk.snapshot()
+                global_state = self._get_global_state()
                 if bool(global_state.get("stop_all", False)):
                     self.state.request_stop()
                     self.state.set_status(str(global_state.get("stop_reason") or "Global stop active."))
@@ -403,7 +424,7 @@ class TradingEngine:
 
                     self.state.set_status(
                         f"Digit review · 7–9 {fast:.1f}% fast / {medium:.1f}% medium; "
-                        f"per-digit comparison active · {review.get('rejection_reason') or 'armed for lower-tick confirmation'}"
+                        f"per-window thresholds active · {review.get('rejection_reason') or 'armed for lower-tick confirmation'}"
                     )
 
                 self._push_strategy_state()
@@ -715,8 +736,9 @@ class TradingEngine:
 
             self._journal.record_outcome(signal_id, outcome, pnl, stake, contract_id, self.execution_mode, martingale_step)
 
-            # Add closed P&L to the global app-wide session.
             global_state = self._global_risk.add_trade_pnl(trade_id, pnl)
+            self._last_global_state = global_state
+            self._last_global_check = time.monotonic()
 
             if bool(global_state.get("stop_all", False)):
                 self.state.request_stop()
@@ -761,10 +783,11 @@ class TradingEngine:
     async def _monitor_contract(self, contract_id: int, buy_price: float, payout: float) -> Tuple[str, float]:
         expected = self._contract_duration_seconds()
         deadline = time.time() + max(20.0, expected + 20.0)
+        fast_until = time.time() + max(2.0, expected + 2.0)
 
         while time.time() < deadline:
             if not self._client.connected and not await self._reconnect(max_attempts=2):
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.2)
                 continue
 
             try:
@@ -785,10 +808,10 @@ class TradingEngine:
 
                     return ("WON" if name == "won" or profit > 0 else "LOST", round(profit, 2))
 
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.10 if time.time() < fast_until else 0.25)
 
             except (DerivAPIError, TypeError, ValueError) as exc:
                 logger.warning("Digit contract poll failed for %s: %s", contract_id, exc)
-                await asyncio.sleep(0.75)
+                await asyncio.sleep(0.5)
 
         return "UNKNOWN", 0.0
