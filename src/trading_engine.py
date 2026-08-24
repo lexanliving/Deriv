@@ -1,13 +1,10 @@
 """Live execution engine for the rolling digit Over 6 strategy.
 
-The engine is intentionally separate from the candle strategy. It consumes raw
-quotes, asks the strategy for a digit signal, requests a live proposal, and
-only buys after the digit, account, operational, and proposal-validity gates pass.
-
-Proposal payout is logged for audit; estimated edge is not an execution gate.
-
-Daily trade cap behavior:
-MAX_TRADES_PER_DAY = 0 disables the daily trade cap completely.
+Changes:
+- Window toggles are passed to the strategy.
+- Per-market take-profit is removed.
+- Global app-wide take-profit coordinates all running markets/pages.
+- Daily trade cap is disabled when MAX_TRADES_PER_DAY is zero.
 """
 from __future__ import annotations
 
@@ -21,7 +18,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from config import CURRENCY, DEFAULT_INITIAL_STAKE, MAX_TRADES_PER_DAY, MARTINGALE_MULTIPLIER
 from src.api_client import DerivAPIClient, DerivAPIError
-from src.coordination import SharedMarketCoordinator
+from src.coordination import GlobalRiskCoordinator, SharedMarketCoordinator
 from src.digit_strategy import DigitStrategyEngine
 from src.journal import get_journal
 from src.logger import get_logger
@@ -84,6 +81,7 @@ class TradingEngine:
         review_interval_seconds: float = 60.0,
         take_profit_target: float = 0.0,
         digit_windows: Optional[Dict[str, int]] = None,
+        digit_window_enabled: Optional[Dict[str, bool]] = None,
         **_: Any,
     ) -> None:
         self.api_token = str(api_token or "").strip()
@@ -110,13 +108,20 @@ class TradingEngine:
         self.lower_tick_max = int(lower_tick_max)
         self.required_lower_confirmations = max(1, min(3, int(required_lower_confirmations)))
         self.review_interval_seconds = float(review_interval_seconds)
-        self.take_profit_target = max(0.0, float(take_profit_target))
+
+        # Per-market take-profit is intentionally ignored.
+        # Global app-wide take-profit is handled by GlobalRiskCoordinator.
+        self.take_profit_target = 0.0
+
+        self.digit_windows = dict(digit_windows or {})
+        self.digit_window_enabled = dict(digit_window_enabled or {})
 
         self._client: Optional[DerivAPIClient] = None
         self._strategy = DigitStrategyEngine(
             contract_duration_ticks=self.contract_duration,
             quote_precision=self.quote_precision,
-            windows=digit_windows,
+            windows=self.digit_windows,
+            window_enabled=self.digit_window_enabled,
             min_over6_share=self.min_over6_share,
             low_digit_max=self.lower_tick_max,
             review_interval_seconds=self.review_interval_seconds,
@@ -124,6 +129,7 @@ class TradingEngine:
         )
 
         self._journal = get_journal()
+        self._global_risk = GlobalRiskCoordinator()
 
         self._active_contract_id: Optional[int] = None
         self._trade_in_progress = False
@@ -148,8 +154,6 @@ class TradingEngine:
         self._shared_trade_bought = False
         self._buy_attempted = False
 
-    # ------------------------------------------------------------- utilities
-
     @staticmethod
     def _precision_from_symbol(symbol_info: Dict[str, Any], fallback: int = 2) -> int:
         for key in ("pip_size", "pip", "pipSize"):
@@ -168,9 +172,6 @@ class TradingEngine:
                     return max(0, min(10, -exponent))
 
             if numeric.is_integer() and 0 <= numeric <= 10:
-                # Some Deriv responses expose the number of decimal places;
-                # others expose pip itself. This is the useful interpretation
-                # for digit extraction and is checked against live quotes.
                 return int(numeric)
 
         return fallback
@@ -198,11 +199,11 @@ class TradingEngine:
         if MAX_TRADES_PER_DAY > 0 and self._daily_trade_count >= MAX_TRADES_PER_DAY:
             return False, f"daily trade cap ({MAX_TRADES_PER_DAY}) reached"
 
-        if self.take_profit_target > 0:
-            pnl = float(self.state.get_performance_stats().get("session_pnl", 0.0))
-            if pnl >= self.take_profit_target:
-                self.state.request_stop()
-                return False, f"session take-profit reached ({pnl:.2f} / {self.take_profit_target:.2f})"
+        global_state = self._global_risk.snapshot()
+
+        if bool(global_state.get("stop_all", False)):
+            self.state.request_stop()
+            return False, str(global_state.get("stop_reason") or "global stop active")
 
         warmup = INITIAL_WARMUP_COOLDOWN_SECONDS - (now_mono - self._engine_ready_monotonic)
         if warmup > 0:
@@ -262,8 +263,6 @@ class TradingEngine:
         self._journal.record_evaluation(record)
 
     def _confirmation_gate(self, entry_record: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
-        """Require strategy-produced lower-digit evidence before any proposal."""
-
         if not isinstance(entry_record, dict):
             return False, "lower-digit confirmation evidence missing"
 
@@ -303,8 +302,6 @@ class TradingEngine:
             return False, "entry tick was not strictly after the minute review boundary"
 
         return True, "lower-digit confirmation and post-review timing verified"
-
-    # --------------------------------------------------------------- lifecycle
 
     async def _validate_symbol(self) -> None:
         try:
@@ -370,7 +367,10 @@ class TradingEngine:
 
         self._engine_ready_monotonic = time.monotonic()
 
-        target_text = f" · take-profit {self.take_profit_target:.2f}" if self.take_profit_target > 0 else ""
+        global_state = self._global_risk.snapshot()
+        target = float(global_state.get("take_profit_target", 0.0))
+        target_text = f" · global take-profit {target:.2f}" if target > 0 else " · global take-profit disabled"
+
         self.state.set_status(
             f"Live digit review on {self.symbol_display}. Reviewing every minute; lower confirmation N="
             f"{self.required_lower_confirmations}; first eligible tick must be strictly after the review timestamp; "
@@ -387,6 +387,12 @@ class TradingEngine:
                     await self._reconnect()
 
                 self._roll_daily_trade_count()
+
+                global_state = self._global_risk.snapshot()
+                if bool(global_state.get("stop_all", False)):
+                    self.state.request_stop()
+                    self.state.set_status(str(global_state.get("stop_reason") or "Global stop active."))
+                    continue
 
                 review = self._strategy.review_if_due()
                 if review:
@@ -496,8 +502,6 @@ class TradingEngine:
         self.state.set_running(False)
         self.state.set_status("Stopped.")
 
-    # ------------------------------------------------------------------ ticks
-
     async def _on_tick(self, tick_data: Dict[str, Any]) -> None:
         try:
             price = float(tick_data.get("quote", 0))
@@ -511,11 +515,7 @@ class TradingEngine:
         except Exception as exc:
             logger.exception("Error processing digit tick: %s", exc)
 
-    # ---------------------------------------------------------------- execution
-
     async def _claim_shared_entry(self, trade_id: str) -> Tuple[bool, str]:
-        """Reserve the account/symbol slot before reading stake or sending a proposal."""
-
         try:
             acquired = await self._market_coordinator.acquire(timeout_seconds=8.0)
             if not acquired:
@@ -639,32 +639,14 @@ class TradingEngine:
                 self._record_entry_decision(entry_record, False, reason)
                 self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
                 self.state.set_error(reason)
-                self._journal.record_outcome(
-                    signal_id,
-                    "CANCELLED",
-                    0.0,
-                    stake,
-                    None,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
                 return
 
             if not self._client.connected and not await self._reconnect():
                 reason = "Order not sent: could not restore Deriv connection."
                 self._record_entry_decision(entry_record, False, reason)
                 self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
-                self._journal.record_outcome(
-                    signal_id,
-                    "CANCELLED",
-                    0.0,
-                    stake,
-                    None,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
                 return
 
             proposal = await self._client.get_proposal(
@@ -684,10 +666,6 @@ class TradingEngine:
             if not proposal_id or ask_price <= 0 or payout <= 0:
                 raise DerivAPIError("Deriv returned an invalid digit proposal.", "INVALID_RESPONSE")
 
-            # The proposal is required for the actual stake/price, but the
-            # previous estimated-edge heuristic is intentionally not a gate.
-            # The digit condition itself controls qualification; ask and payout
-            # remain in the journal for audit and settlement reconciliation.
             self._record_entry_decision(entry_record, True, "", ask_price, payout)
 
             if self.state.stop_requested:
@@ -714,9 +692,7 @@ class TradingEngine:
             self.state.update_trade_pacing()
             self._daily_trade_count += 1
 
-            self.state.set_status(
-                f"Over 6 contract {contract_id} active · awaiting {self.contract_duration} tick result"
-            )
+            self.state.set_status(f"Over 6 contract {contract_id} active · awaiting {self.contract_duration} tick result")
 
             outcome, pnl = await self._monitor_contract(contract_id, buy_price, buy_payout)
 
@@ -725,16 +701,7 @@ class TradingEngine:
                 self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                 self.state.set_error(reason)
                 self.state.request_stop()
-                self._journal.record_outcome(
-                    signal_id,
-                    "UNKNOWN",
-                    0.0,
-                    stake,
-                    contract_id,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, contract_id, self.execution_mode, martingale_step, note=reason)
                 return
 
             self.state.update_trade_outcome(trade_id, outcome, pnl)
@@ -746,15 +713,14 @@ class TradingEngine:
                 self.state.on_trade_loss(self.martingale_multiplier, self.max_martingale_steps)
                 self.state.set_status(f"Over 6 LOST · next stake {self.state.get_martingale_state()['stake']:.2f}")
 
-            self._journal.record_outcome(
-                signal_id,
-                outcome,
-                pnl,
-                stake,
-                contract_id,
-                self.execution_mode,
-                martingale_step,
-            )
+            self._journal.record_outcome(signal_id, outcome, pnl, stake, contract_id, self.execution_mode, martingale_step)
+
+            # Add closed P&L to the global app-wide session.
+            global_state = self._global_risk.add_trade_pnl(trade_id, pnl)
+
+            if bool(global_state.get("stop_all", False)):
+                self.state.request_stop()
+                self.state.set_status(str(global_state.get("stop_reason") or "Global take-profit reached"))
 
         except DerivAPIError as exc:
             reason = f"Digit order failed: {exc.message} ({exc.code})."
@@ -763,29 +729,11 @@ class TradingEngine:
                 self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                 self.state.request_stop()
                 outcome = "UNKNOWN"
-                self._journal.record_outcome(
-                    signal_id,
-                    outcome,
-                    0.0,
-                    stake,
-                    self._active_contract_id,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, outcome, 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason)
             else:
                 self._record_entry_decision(entry_record, False, reason)
                 self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
-                self._journal.record_outcome(
-                    signal_id,
-                    "CANCELLED",
-                    0.0,
-                    stake,
-                    None,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
 
             self.state.set_error(reason)
             self.state.set_status(reason)
@@ -796,30 +744,11 @@ class TradingEngine:
             if self._active_contract_id is not None:
                 self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                 self.state.request_stop()
-                outcome = "UNKNOWN"
-                self._journal.record_outcome(
-                    signal_id,
-                    outcome,
-                    0.0,
-                    stake,
-                    self._active_contract_id,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, self.execution_mode, martingale_step, note=reason)
             else:
                 self._record_entry_decision(entry_record, False, reason)
                 self.state.update_trade_outcome(trade_id, "CANCELLED", 0.0, reason)
-                self._journal.record_outcome(
-                    signal_id,
-                    "CANCELLED",
-                    0.0,
-                    stake,
-                    None,
-                    self.execution_mode,
-                    martingale_step,
-                    note=reason,
-                )
+                self._journal.record_outcome(signal_id, "CANCELLED", 0.0, stake, None, self.execution_mode, martingale_step, note=reason)
 
             self.state.set_error(reason)
 
