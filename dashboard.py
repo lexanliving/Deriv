@@ -33,11 +33,14 @@ from config import (
     DIGIT_DEFAULT_RECOVERY_MULTIPLIER,
     DIGIT_MAX_RECOVERY_STEPS,
     DIGIT_LOWER_CONFIRM_MAX,
-    DIGIT_MIN_OVER6_SHARE,
+    DIGIT_LOWER_CONFIRMATION_MAX,
+    DIGIT_MIN_OVER6_SHARES,
     DIGIT_REVIEW_INTERVAL_SECONDS,
     DIGIT_TICK_DURATION_OPTIONS,
     DIGIT_WINDOWS,
     DIGIT_WINDOW_ENABLED,
+    DIGIT_UPPER_MODE,
+    GLOBAL_TAKE_PROFIT_TARGET,
     DERIV_APP_ID,
     DERIV_API_TOKEN,
 )
@@ -226,12 +229,14 @@ def _launch_engine(config: Dict[str, Any], reset_state: bool) -> bool:
             real_execution_confirmed=config["real_execution_confirmed"],
             martingale_multiplier=config["martingale_multiplier"],
             quote_precision=config.get("quote_precision", 2),
-            min_over6_share=config["min_over6_share"],
+            min_over6_share=config.get("min_over6_share", 0.31),
+            min_over6_shares=config.get("min_over6_shares"),
             lower_tick_max=config["lower_tick_max"],
             review_interval_seconds=config["review_interval_seconds"],
             required_lower_confirmations=config.get("required_lower_confirmations", 1),
-            digit_windows=config["digit_windows"],
+            digit_windows=config.get("digit_windows"),
             digit_window_enabled=config.get("digit_window_enabled"),
+            upper_mode=config.get("upper_mode", "kill"),
         )
 
         if not reset_state:
@@ -370,7 +375,7 @@ with st.sidebar:
             disabled=state.is_running,
             format_func=lambda value: (
                 f"{normalize_account_type(account_map[value].get('account_type', 'UNKNOWN'))} · {value} · "
-                f"{account_map[value].get('currency', 'USD')} {float(account_map[value].get('balance', 0)):,.2f}"
+                f"{account_map[value].get('currency', 'USD')} {float(account_map[value].get('balance', 0) or 0):,.2f}"
             ),
         )
 
@@ -379,7 +384,7 @@ with st.sidebar:
         account_type = normalize_account_type(selected_account.get("account_type", "UNKNOWN"))
         account_currency = str(selected_account.get("currency", "USD")).upper()
 
-        st.success(f"{account_type} account · {account_currency} {float(selected_account.get('balance', 0)):,.2f}")
+        st.success(f"{account_type} account · {account_currency} {float(selected_account.get('balance', 0) or 0):,.2f}")
 
     st.divider()
 
@@ -412,58 +417,139 @@ with st.sidebar:
         format_func=lambda value: f"{value} tick" if value == 1 else f"{value} ticks",
     )
 
-    lower_confirmations = st.select_slider(
+    engine_cfg = st.session_state.engine_config if isinstance(st.session_state.engine_config, dict) else {}
+
+    default_lower = int(engine_cfg.get("required_lower_confirmations", 1)) if state.is_running else 1
+
+    lower_confirmations = st.number_input(
         "Lower-tick confirmations before entry",
-        options=[1, 2, 3],
-        value=1,
+        min_value=1,
+        max_value=int(DIGIT_LOWER_CONFIRMATION_MAX),
+        value=default_lower,
+        step=1,
         disabled=state.is_running,
-        format_func=lambda value: f"{value} lower tick" if value == 1 else f"{value} consecutive lower ticks",
+        help="1 to 20 consecutive lower digits 0–6. The final lower digit triggers entry.",
+    )
+
+    upper_options = ["kill", "reset"]
+    default_upper = str(engine_cfg.get("upper_mode", DIGIT_UPPER_MODE)).lower() if state.is_running else str(DIGIT_UPPER_MODE).lower()
+    if default_upper not in upper_options:
+        default_upper = "kill"
+
+    upper_mode = st.selectbox(
+        "Upper-digit behavior",
+        options=upper_options,
+        index=upper_options.index(default_upper),
+        disabled=state.is_running,
+        format_func=lambda value: "Kill signal on 7–9" if value == "kill" else "Reset sequence on 7–9",
+        help=(
+            "Kill: any 7–9 before the lower sequence completes kills the signal for that review window. "
+            "Reset: any 7–9 before completion resets the lower sequence."
+        ),
     )
 
     st.caption(
         "This is an entry-timing trigger only: the concentration rule still comes from the 7–9 review. "
-        "The final required lower digit itself triggers entry; a higher digit resets the sequence."
+        "The final required lower digit itself triggers entry."
     )
 
     st.divider()
 
-    st.markdown("#### Strategy rule")
-
-    min_over6_share_pct = st.slider(
-        "Minimum recent 7–9 share (%)",
-        30,
-        60,
-        int(round(DIGIT_MIN_OVER6_SHARE * 100)),
-        1,
-        disabled=state.is_running,
-    )
-    min_over6_share = min_over6_share_pct / 100.0
-
     st.markdown("#### Rolling window gates")
 
-    current_window_cfg = (
-        st.session_state.engine_config.get("digit_window_enabled", DIGIT_WINDOW_ENABLED)
-        if state.is_running and isinstance(st.session_state.engine_config, dict)
-        else DIGIT_WINDOW_ENABLED
-    )
+    window_cfg = engine_cfg.get("digit_windows", DIGIT_WINDOWS) if state.is_running else DIGIT_WINDOWS
+    enabled_cfg = engine_cfg.get("digit_window_enabled", DIGIT_WINDOW_ENABLED) if state.is_running else DIGIT_WINDOW_ENABLED
+    share_cfg = engine_cfg.get("min_over6_shares", DIGIT_MIN_OVER6_SHARES) if state.is_running else DIGIT_MIN_OVER6_SHARES
+
+    window_cfg = window_cfg or DIGIT_WINDOWS
+    enabled_cfg = enabled_cfg or DIGIT_WINDOW_ENABLED
+    share_cfg = share_cfg or DIGIT_MIN_OVER6_SHARES
 
     use_fast = st.checkbox(
         "Use fast window",
-        value=bool(current_window_cfg.get("fast", True)),
+        value=bool(enabled_cfg.get("fast", True)),
         disabled=state.is_running,
         key="use_fast_window",
     )
+
+    f1, f2 = st.columns(2)
+
+    fast_ticks = f1.number_input(
+        "Fast ticks",
+        min_value=5,
+        max_value=10000,
+        value=int(window_cfg.get("fast", DIGIT_WINDOWS.get("fast", 20))),
+        step=1,
+        disabled=state.is_running or not use_fast,
+        key="fast_ticks",
+    )
+
+    fast_pct = f2.number_input(
+        "Fast 7–9 %",
+        min_value=0.0,
+        max_value=100.0,
+        value=round(float(share_cfg.get("fast", DIGIT_MIN_OVER6_SHARES.get("fast", 0.31))) * 100.0, 2),
+        step=1.0,
+        disabled=state.is_running or not use_fast,
+        key="fast_pct",
+    )
+
     use_medium = st.checkbox(
         "Use medium window",
-        value=bool(current_window_cfg.get("medium", True)),
+        value=bool(enabled_cfg.get("medium", True)),
         disabled=state.is_running,
         key="use_medium_window",
     )
+
+    m1, m2 = st.columns(2)
+
+    medium_ticks = m1.number_input(
+        "Medium ticks",
+        min_value=5,
+        max_value=10000,
+        value=int(window_cfg.get("medium", DIGIT_WINDOWS.get("medium", 50))),
+        step=1,
+        disabled=state.is_running or not use_medium,
+        key="medium_ticks",
+    )
+
+    medium_pct = m2.number_input(
+        "Medium 7–9 %",
+        min_value=0.0,
+        max_value=100.0,
+        value=round(float(share_cfg.get("medium", DIGIT_MIN_OVER6_SHARES.get("medium", 0.31))) * 100.0, 2),
+        step=1.0,
+        disabled=state.is_running or not use_medium,
+        key="medium_pct",
+    )
+
     use_slow = st.checkbox(
         "Use slow window",
-        value=bool(current_window_cfg.get("slow", True)),
+        value=bool(enabled_cfg.get("slow", True)),
         disabled=state.is_running,
         key="use_slow_window",
+    )
+
+    s1, s2 = st.columns(2)
+
+    slow_ticks = s1.number_input(
+        "Slow ticks",
+        min_value=5,
+        max_value=10000,
+        value=int(window_cfg.get("slow", DIGIT_WINDOWS.get("slow", 200))),
+        step=1,
+        disabled=state.is_running or not use_slow,
+        key="slow_ticks",
+    )
+
+    slow_pct = s2.number_input(
+        "Slow 7–9 %",
+        min_value=0.0,
+        max_value=100.0,
+        value=round(float(share_cfg.get("slow", DIGIT_MIN_OVER6_SHARES.get("slow", 0.30))) * 100.0, 2),
+        step=1.0,
+        disabled=state.is_running or not use_slow,
+        key="slow_pct",
     )
 
     windows_enabled = bool(use_fast or use_medium or use_slow)
@@ -481,7 +567,7 @@ with st.sidebar:
     st.markdown("#### Global app take-profit")
 
     g_state = global_risk.snapshot()
-    current_global_target = float(g_state.get("take_profit_target", 0.0))
+    current_global_target = float(g_state.get("take_profit_target", GLOBAL_TAKE_PROFIT_TARGET))
 
     global_target = st.number_input(
         "App-wide take-profit target",
@@ -496,10 +582,10 @@ with st.sidebar:
     c_target, c_reset = st.columns(2)
 
     with c_target:
-        apply_global_target = st.button("Apply target", use_container_width=True)
+        apply_global_target = st.button("Apply target", use_container_width=True, key="apply_global_target")
 
     with c_reset:
-        reset_global_session = st.button("Reset global P&L", use_container_width=True)
+        reset_global_session = st.button("Reset global P&L", use_container_width=True, key="reset_global_session")
 
     if apply_global_target:
         global_risk.set_target(float(global_target))
@@ -573,7 +659,8 @@ with st.sidebar:
 
     st.caption(
         "Recovery: 1.10 means the next stake is 110% of the previous stake after a loss. "
-        "There is no session loss-stop. Per-market take-profit has been replaced by the global app-wide take-profit above."
+        "There is no session loss-stop. Per-market take-profit has been replaced by the global app-wide take-profit above. "
+        "Daily trade cap is disabled."
     )
 
     st.divider()
@@ -609,16 +696,26 @@ with st.sidebar:
                     "symbol_display": market_display,
                     "duration_ticks": int(duration_ticks),
                     "quote_precision": 2,
-                    "min_over6_share": float(min_over6_share),
+                    "min_over6_share": float(medium_pct) / 100.0,
+                    "min_over6_shares": {
+                        "fast": float(fast_pct) / 100.0,
+                        "medium": float(medium_pct) / 100.0,
+                        "slow": float(slow_pct) / 100.0,
+                    },
                     "lower_tick_max": DIGIT_LOWER_CONFIRM_MAX,
                     "required_lower_confirmations": int(lower_confirmations),
                     "review_interval_seconds": DIGIT_REVIEW_INTERVAL_SECONDS,
-                    "digit_windows": dict(DIGIT_WINDOWS),
+                    "digit_windows": {
+                        "fast": int(fast_ticks),
+                        "medium": int(medium_ticks),
+                        "slow": int(slow_ticks),
+                    },
                     "digit_window_enabled": {
                         "fast": bool(use_fast),
                         "medium": bool(use_medium),
                         "slow": bool(use_slow),
                     },
+                    "upper_mode": str(upper_mode).lower(),
                 }
             )
             st.rerun()
@@ -705,8 +802,8 @@ def metrics_fragment():
         with col:
             st.markdown(
                 f'<div class="mm-card"><div class="mm-label">{label}</div>'
-                f'<div class="mm-value">{html.escape(value)}</div>'
-                f'<div class="mm-small">{html.escape(sub)}</div></div>',
+                f'<div class="mm-value">{html.escape(str(value))}</div>'
+                f'<div class="mm-small">{html.escape(str(sub))}</div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -746,7 +843,7 @@ def digit_panel_fragment():
 
         st.caption(
             "Example: 60.0% in a 20-tick window means 12 of 20 ticks ended in 7, 8, or 9. "
-            "The strategy compares average frequency per digit as well: 60% ÷ 3 = 20% for each 7–9 digit group, versus the 1–6 average."
+            "Each enabled window uses its own percentage threshold."
         )
 
         armed = bool(s.get("digit_armed"))
@@ -837,6 +934,7 @@ def journal_fragment():
         "taken",
         "rejection_reason",
         "score",
+        "threshold",
         "p_over6_fast",
         "p_over6_medium",
         "p_over6_slow",
