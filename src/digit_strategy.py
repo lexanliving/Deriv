@@ -1,13 +1,9 @@
-"""Rolling last-digit strategy — final combined build.
+"""Rolling last-digit strategy for short Deriv Over/Under contracts.
 
-Rules:
-- reviews occur once per minute;
-- enabled rolling windows must meet their own 7–9 threshold;
-- enabled windows must also beat the 1–6 average per-digit frequency;
-- after a qualifying review, the bot waits for N consecutive lower digits 0–6;
-- if any 7–9 digit appears before N lower digits complete, the signal is killed;
-- no reset and no delayed retry;
-- lower confirmation length can be used up to 20 from the dashboard.
+Window stage toggles:
+- fast, medium, and slow windows can be individually enabled/disabled.
+- disabled windows are ignored completely.
+- rejection reasons only come from enabled windows.
 """
 from __future__ import annotations
 
@@ -25,16 +21,14 @@ REVIEW_INTERVAL_SECONDS = 60.0
 DEFAULT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
 DEFAULT_WINDOW_ENABLED = {"fast": True, "medium": True, "slow": True}
 DEFAULT_MIN_OVER6_SHARE = 0.31
-DEFAULT_MIN_OVER6_SHARES = {"fast": 0.31, "medium": 0.31, "slow": 0.30}
 DEFAULT_LOW_DIGIT_MAX = 6
 DEFAULT_REQUIRED_LOWER_CONFIRMATIONS = 1
-MAX_REQUIRED_LOWER_CONFIRMATIONS = 100
 COMPARISON_LOW_DIGITS = tuple(range(1, 7))
 SIGNAL_MAX_AGE_SECONDS = 10.0
 
 
 class DigitStrategyEngine:
-    """Deterministic rolling-frequency strategy for Over 6."""
+    """A deterministic rolling-frequency strategy for Over 6."""
 
     def __init__(
         self,
@@ -43,7 +37,6 @@ class DigitStrategyEngine:
         windows: Optional[Dict[str, int]] = None,
         window_enabled: Optional[Dict[str, bool]] = None,
         min_over6_share: float = DEFAULT_MIN_OVER6_SHARE,
-        min_over6_shares: Optional[Dict[str, float]] = None,
         low_digit_max: int = DEFAULT_LOW_DIGIT_MAX,
         review_interval_seconds: float = REVIEW_INTERVAL_SECONDS,
         required_lower_confirmations: int = DEFAULT_REQUIRED_LOWER_CONFIRMATIONS,
@@ -59,26 +52,9 @@ class DigitStrategyEngine:
             self.window_enabled.setdefault(name, True)
 
         self.min_over6_share = float(min_over6_share)
-
-        self.min_over6_shares: Dict[str, float] = {}
-        provided_shares = dict(min_over6_shares or {})
-
-        for name in self.windows:
-            if name in provided_shares:
-                default_value = float(provided_shares[name])
-            elif name == "slow":
-                default_value = max(0.30, self.min_over6_share - 0.01)
-            else:
-                default_value = self.min_over6_share
-
-            self.min_over6_shares[name] = max(0.0, min(1.0, float(default_value)))
-
         self.low_digit_max = int(low_digit_max)
         self.review_interval_seconds = float(review_interval_seconds)
-        self.required_lower_confirmations = max(
-            1,
-            min(MAX_REQUIRED_LOWER_CONFIRMATIONS, int(required_lower_confirmations)),
-        )
+        self.required_lower_confirmations = max(1, min(3, int(required_lower_confirmations)))
 
         enabled_sizes = [
             int(size)
@@ -88,7 +64,6 @@ class DigitStrategyEngine:
         all_sizes = [int(size) for size in self.windows.values() if int(size) > 0]
         base_buffer_window = max(enabled_sizes or all_sizes or [20])
 
-        # Keep enough buffer for large rolling windows and long lower sequences.
         self._max_buffer = max(100, int(base_buffer_window) * 5)
 
         self._digits: Deque[int] = deque(maxlen=self._max_buffer)
@@ -127,31 +102,12 @@ class DigitStrategyEngine:
         self._state_version = 0
         self._state_signature: Optional[Tuple[Any, ...]] = None
 
-    # ------------------------------------------------------------------ utils
-
     def _active_windows(self) -> Dict[str, int]:
         return {
             name: int(size)
             for name, size in self.windows.items()
             if self.window_enabled.get(name, True) and int(size) > 0
         }
-
-    def _threshold_for(self, name: str) -> float:
-        try:
-            return max(0.0, min(1.0, float(self.min_over6_shares.get(name, self.min_over6_share))))
-        except (TypeError, ValueError):
-            return self.min_over6_share
-
-    def _primary_threshold(self) -> float:
-        active = self._active_windows()
-
-        if not active:
-            return self.min_over6_share
-
-        if "medium" in active and self.window_enabled.get("medium", True):
-            return self._threshold_for("medium")
-
-        return self._threshold_for(next(iter(active)))
 
     def _digit_from_price(self, price: float) -> int:
         scaled = Decimal(str(price)) * (Decimal(10) ** self.quote_precision)
@@ -160,15 +116,15 @@ class DigitStrategyEngine:
 
     def seed_ticks(self, prices: Iterable[Any], epochs: Optional[Iterable[Any]] = None) -> None:
         epoch_list = list(epochs or [])
+
         for index, price in enumerate(prices):
             try:
                 epoch = float(epoch_list[index]) if index < len(epoch_list) else time.time()
                 self.process_tick(float(price), epoch, allow_signal=False)
             except (TypeError, ValueError):
                 continue
-        self._sync_state_version()
 
-    # ------------------------------------------------------------------- tick
+        self._sync_state_version()
 
     def process_tick(self, price: float, epoch: Optional[float] = None, allow_signal: bool = True) -> Optional[str]:
         try:
@@ -193,8 +149,7 @@ class DigitStrategyEngine:
         if allow_signal and self._armed and self._pending_signal is None:
             tick_bucket = int(tick_epoch // self.review_interval_seconds)
 
-            # Strict bucket/boundary rule.
-            if self._last_review_bucket is None or tick_bucket != self._last_review_bucket:
+            if self._last_review_bucket is None or tick_bucket > self._last_review_bucket:
                 self._last_rejection = "waiting for the current minute review before confirmation"
             elif self._confirmation_boundary_epoch is None or tick_epoch <= self._confirmation_boundary_epoch:
                 self._last_rejection = "waiting for first tick after the minute review boundary"
@@ -215,65 +170,19 @@ class DigitStrategyEngine:
                             f"lower-tick confirmation {self._lower_confirmation_count}/{self.required_lower_confirmations} received ({digit})"
                         )
                 else:
-                    # Final requested behavior:
-                    # no reset. Any upper digit before completion kills the setup.
-                    self._kill_signal_for_review_window(
-                        digit=digit,
-                        reason=(
-                            f"higher digit {digit} appeared before "
-                            f"{self.required_lower_confirmations} lower ticks completed — "
-                            "signal killed for this review window"
-                        ),
-                    )
+                    self._lower_confirmation_count = 0
+                    self._confirmation_digit = None
+                    self._confirmation_epoch = None
+                    self._last_rejection = f"higher digit {digit} reset lower-tick confirmation sequence"
             else:
-                # Should normally not be reached because completion queues immediately.
-                if digit <= self.low_digit_max:
-                    self._queue_signal(digit, tick_epoch)
-                else:
-                    self._kill_signal_for_review_window(
-                        digit=digit,
-                        reason=(
-                            f"higher digit {digit} appeared after confirmation state — "
-                            "signal killed for this review window"
-                        ),
-                    )
+                self._queue_signal(digit, tick_epoch)
 
         self._sync_state_version()
         return self._pending_signal
 
-    def _kill_signal_for_review_window(self, digit: Optional[int] = None, reason: str = "") -> None:
-        """Kill the current setup completely."""
-        self._armed = False
-        self._condition_valid = False
-        self._armed_context = None
-        self._last_qualifying_context = None
-
-        self._confirmation_seen = False
-        self._lower_confirmation_count = 0
-        self._confirmation_digit = None
-        self._confirmation_epoch = None
-        self._confirmation_boundary_epoch = None
-
-        self._pending_signal = None
-        self._pending_signal_id = None
-        self._entry_evaluation = None
-
-        if reason:
-            self._last_rejection = reason
-        elif digit is not None:
-            self._last_rejection = (
-                f"higher digit {digit} appeared before required lower ticks completed — "
-                "signal killed for this review window"
-            )
-        else:
-            self._last_rejection = "signal killed for this review window"
-
-        self._sync_state_version()
-
-    # ---------------------------------------------------------------- review
-
     def _window_stats(self, window: int) -> Optional[Dict[str, Any]]:
         window = int(window)
+
         if window <= 0:
             return None
 
@@ -314,7 +223,7 @@ class DigitStrategyEngine:
         active = self._active_windows()
 
         if not active:
-            return False, "no rolling windows are enabled"
+            return False, "no rolling windows enabled"
 
         for name, size in active.items():
             stat = stats.get(name)
@@ -322,7 +231,9 @@ class DigitStrategyEngine:
             if not stat:
                 return False, f"warming up — need {size} ticks for the {name} window"
 
-            threshold = self._threshold_for(name)
+            threshold = self.min_over6_share
+            if name == "slow":
+                threshold = max(0.30, self.min_over6_share - 0.01)
 
             if stat["p_over6"] < threshold:
                 return False, f"{name} 7–9 share {stat['p_over6']:.1%} below {threshold:.1%}"
@@ -332,7 +243,7 @@ class DigitStrategyEngine:
                     f"average 7–9 digit share does not exceed average 1–6 digit share in the {name} window"
                 )
 
-        return True, "all enabled rolling windows qualify with their own thresholds"
+        return True, "enabled rolling windows qualify"
 
     def review_if_due(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         current = float(now if now is not None else time.time())
@@ -355,25 +266,20 @@ class DigitStrategyEngine:
         stats = {name: self._window_stats(size) for name, size in self.windows.items()}
         qualifies, reason = self._candidate(stats)
 
-        active = self._active_windows()
+        active_names = list(self._active_windows().keys())
         score_stat = None
 
-        if self.window_enabled.get("medium", True) and stats.get("medium"):
+        if "medium" in active_names:
             score_stat = stats.get("medium")
-        else:
-            for name in active:
-                if stats.get(name):
-                    score_stat = stats.get(name)
-                    break
+        elif active_names:
+            score_stat = stats.get(active_names[0])
 
         self._last_signal_score = int(round((score_stat or {}).get("p_over6", 0.0) * 100))
+
         self._last_signal_score_breakdown = {
             "fast_over6_pct": round((stats.get("fast") or {}).get("p_over6", 0.0) * 100, 2),
             "medium_over6_pct": round((stats.get("medium") or {}).get("p_over6", 0.0) * 100, 2),
             "p_over6_slow": round((stats.get("slow") or {}).get("p_over6", 0.0) * 100, 2),
-            "threshold_fast_pct": round(self._threshold_for("fast") * 100, 2),
-            "threshold_medium_pct": round(self._threshold_for("medium") * 100, 2),
-            "threshold_slow_pct": round(self._threshold_for("slow") * 100, 2),
             "p_over6_avg_fast": round((stats.get("fast") or {}).get("p_over6_avg", 0.0) * 100, 2),
             "p_over6_avg_medium": round((stats.get("medium") or {}).get("p_over6_avg", 0.0) * 100, 2),
             "p_over6_avg_slow": round((stats.get("slow") or {}).get("p_over6_avg", 0.0) * 100, 2),
@@ -401,8 +307,7 @@ class DigitStrategyEngine:
                 self._lower_confirmation_count = 0
                 self._armed_context = dict(self._last_qualifying_context)
                 self._last_rejection = (
-                    f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) "
-                    "after the review boundary; any 7–9 digit before completion kills the signal"
+                    f"armed — waiting for {self.required_lower_confirmations} consecutive lower ticks (0–6) after the review boundary"
                 )
         else:
             self._condition_valid = False
@@ -422,6 +327,7 @@ class DigitStrategyEngine:
         self._last_review = record
         self._last_evaluation = record
         self._sync_state_version()
+
         return record
 
     def _review_record(
@@ -449,13 +355,12 @@ class DigitStrategyEngine:
             "executed": "FALSE",
             "rejection_reason": "" if qualifies else reason,
             "note": (
-                f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks; "
-                "any 7–9 digit before completion kills the signal"
+                f"armed; waiting for {self.required_lower_confirmations} consecutive lower ticks"
                 if qualifies
                 else ""
             ),
             "score": self._last_signal_score,
-            "threshold": round(self._primary_threshold() * 100, 2),
+            "threshold": round(self.min_over6_share * 100, 2),
             "regime": "DIGIT",
             "duration_min": round(self.contract_duration_ticks / 60.0, 4),
             "strategy_mode": "DIGIT_OVER_6",
@@ -544,16 +449,13 @@ class DigitStrategyEngine:
         self._last_rejection = "signal queued — Over 6 entry"
 
         logger.info(
-            "DIGIT OVER6 signal | id=%s | entry_digit=%d | lower_confirmation=%s | required=%d",
+            "DIGIT OVER6 signal | id=%s | entry_digit=%d | lower_confirmation=%s",
             self._pending_signal_id,
             entry_digit,
             self._confirmation_digit,
-            self.required_lower_confirmations,
         )
 
         self._sync_state_version()
-
-    # ---------------------------------------------------------------- signals
 
     def consume_signal(self) -> Optional[str]:
         signal = self._pending_signal
@@ -576,15 +478,24 @@ class DigitStrategyEngine:
             and signal_boundary is not None
             and signal_boundary < self._confirmation_boundary_epoch
         ):
-            self._kill_signal_for_review_window(
-                reason="stale digit signal discarded after a newer minute review boundary"
-            )
+            self._armed = False
+            self._armed_context = None
+            self._confirmation_seen = False
+            self._lower_confirmation_count = 0
+            self._confirmation_digit = None
+            self._confirmation_epoch = None
+            self._confirmation_boundary_epoch = None
+            self._entry_evaluation = None
+            self._last_rejection = "stale digit signal discarded after a newer minute review boundary"
+            self._sync_state_version()
             return None
 
         if time.time() - self._pending_signal_time > SIGNAL_MAX_AGE_SECONDS:
-            self._kill_signal_for_review_window(
-                reason="stale digit signal discarded"
-            )
+            self._armed = False
+            self._confirmation_seen = False
+            self._lower_confirmation_count = 0
+            self._last_rejection = "stale digit signal discarded"
+            self._sync_state_version()
             return None
 
         self._armed = False
@@ -636,8 +547,7 @@ class DigitStrategyEngine:
             self._confirmation_boundary_epoch = self._last_tick_epoch if self._last_tick_epoch is not None else time.time()
             self._lower_confirmation_count = 0
             self._last_rejection = (
-                f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks "
-                "after the new entry boundary; any 7–9 digit before completion kills the signal"
+                f"trade finished — condition still valid; waiting for {self.required_lower_confirmations} lower ticks after the new entry boundary"
             )
         else:
             self._armed = False
@@ -654,9 +564,16 @@ class DigitStrategyEngine:
         self._sync_state_version()
 
     def on_signal_skipped(self) -> None:
-        self._kill_signal_for_review_window(
-            reason="signal skipped by execution gate — signal killed, not retried"
-        )
+        self._armed = False
+        self._armed_context = None
+        self._confirmation_seen = False
+        self._confirmation_digit = None
+        self._confirmation_epoch = None
+        self._lower_confirmation_count = 0
+        self._pending_signal = None
+        self._pending_signal_id = None
+        self._last_rejection = "signal skipped by execution gate"
+        self._sync_state_version()
 
     def get_last_evaluation(self) -> Optional[Dict[str, Any]]:
         record = self._last_evaluation
@@ -699,7 +616,6 @@ class DigitStrategyEngine:
             "digit_counts": {str(d): int(counts[d]) for d in range(10)},
             "digit_windows": stats,
             "digit_window_enabled": dict(self.window_enabled),
-            "digit_min_over6_shares": dict(self.min_over6_shares),
             "digit_armed": self._armed,
             "digit_condition_valid": self._condition_valid,
             "digit_lower_confirmed": self._confirmation_seen,
@@ -725,18 +641,17 @@ class DigitStrategyEngine:
             windows=self.windows,
             window_enabled=self.window_enabled,
             min_over6_share=self.min_over6_share,
-            min_over6_shares=self.min_over6_shares,
             low_digit_max=self.low_digit_max,
             review_interval_seconds=self.review_interval_seconds,
             required_lower_confirmations=self.required_lower_confirmations,
         )
 
-    # --------------------------------------------------------------- internals
-
     def _sync_state_version(self) -> None:
+        active = self._active_windows()
+
         stats = tuple(
             round((self._window_stats(size) or {}).get("p_over6", -1.0), 4)
-            for size in self.windows.values()
+            for size in [active[name] for name in sorted(active)]
         )
 
         signature = (
