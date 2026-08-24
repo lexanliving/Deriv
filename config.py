@@ -22,12 +22,7 @@ DERIV_APP_ID = os.getenv("DERIV_APP_ID") or _streamlit_secret("DERIV_APP_ID") or
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN") or _streamlit_secret("DERIV_API_TOKEN") or ""
 DERIV_WS_URL = ""
 
-# Broad local catalogue used immediately by the selector. At startup the engine
-# also asks Deriv for the live symbol catalogue and validates the chosen symbol.
-# Unsupported symbol/contract combinations are rejected safely at proposal time.
 AVAILABLE_MARKETS = {
-    # Derived indices only. Financial markets such as forex, commodities,
-    # stocks, and crypto are intentionally not included in the fallback list.
     "Volatility 10 (1s)": "1HZ10V",
     "Volatility 25 (1s)": "1HZ25V",
     "Volatility 50 (1s)": "1HZ50V",
@@ -68,7 +63,6 @@ DIGIT_REVIEW_INTERVAL_SECONDS = 60.0
 
 DIGIT_WINDOWS = {"fast": 20, "medium": 50, "slow": 200}
 
-# Optional window toggles / per-window thresholds for newer dashboard versions.
 DIGIT_WINDOW_ENABLED = {
     "fast": True,
     "medium": True,
@@ -76,32 +70,16 @@ DIGIT_WINDOW_ENABLED = {
 }
 
 DIGIT_MIN_OVER6_SHARE = 0.31
-
-DIGIT_MIN_OVER6_SHARES = {
-    "fast": 0.31,
-    "medium": 0.31,
-    "slow": 0.30,
-}
-
-# Lower digit values are still 0 through 6 for Over 6.
 DIGIT_LOWER_CONFIRM_MAX = 6
-
-# Maximum selectable lower-tick confirmation length in newer dashboard versions.
-DIGIT_LOWER_CONFIRMATION_MAX = 20
-
-# Default lower confirmation count.
-DIGIT_DEFAULT_LOWER_CONFIRMATIONS = 1
-
 DIGIT_DEFAULT_RECOVERY_MULTIPLIER = 1.1
 DIGIT_DEFAULT_RECOVERY_ENABLED = True
 DIGIT_MAX_RECOVERY_STEPS = 10
 
-# This is the default take-profit amount in account currency.
-# Set it to 0 in the sidebar if you do not want take-profit.
-DIGIT_DEFAULT_PROFIT_TARGET = 1.0
+# Global app-wide take-profit target.
+# 0 disables global take-profit.
+GLOBAL_TAKE_PROFIT_TARGET = 50.0
 
 # 0 disables the daily trade cap completely.
-# The bot may take as many trades as the strategy produces.
 MAX_TRADES_PER_DAY = 0
 
 CURRENCY = "USD"
