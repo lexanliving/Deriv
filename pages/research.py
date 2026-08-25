@@ -1,5 +1,4 @@
 """pages/research.py — Digit Research Lab with full bot-lifecycle backtest.
-
 Read-only research page.
 Places no trades.
 Does not modify live strategy behavior.
@@ -18,7 +17,6 @@ import streamlit as st
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
-
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
@@ -27,8 +25,10 @@ from config import (
     DEFAULT_MARKET_DISPLAY,
     DERIV_APP_ID,
     DERIV_API_TOKEN,
+    MARKET_ICONS,
 )
 from src import research_lab as rl
+from src.coordination import GlobalRiskCoordinator
 from src.journal import get_journal
 from src.persistence import (
     export_archive_csv_bytes,
@@ -36,12 +36,15 @@ from src.persistence import (
     import_journal,
 )
 
-st.set_page_config(
-    page_title="Digit Research Lab",
-    page_icon="🧪",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+try:
+    st.set_page_config(
+        page_title="Digit Research Lab",
+        page_icon="🧪",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+except Exception:
+    pass
 
 st.markdown(
     """
@@ -51,17 +54,14 @@ st.markdown(
         color: #c7d2e0;
         font-family: Inter, system-ui, sans-serif;
     }
-
     [data-testid="stSidebar"] {
         background: #0a0f1c;
         border-right: 1px solid #1b2740;
     }
-
     [data-testid="stMainBlockContainer"] {
         max-width: 1520px;
         padding-top: 1.1rem;
     }
-
     .rl-panel {
         background: linear-gradient(160deg, #0c1322, #0a101d);
         border: 1px solid #18233a;
@@ -69,7 +69,6 @@ st.markdown(
         padding: 16px 18px;
         margin-bottom: 14px;
     }
-
     .rl-h {
         font-size: .68rem;
         font-weight: 800;
@@ -78,20 +77,17 @@ st.markdown(
         color: #8294b0;
         margin-bottom: 10px;
     }
-
     .rl-kpis {
         display: grid;
         grid-template-columns: repeat(6, 1fr);
         gap: 12px;
         margin: 4px 0 16px 0;
     }
-
     @media (max-width: 1100px) {
         .rl-kpis {
             grid-template-columns: repeat(3, 1fr);
         }
     }
-
     .rl-kpi {
         background: linear-gradient(160deg, #0c1322, #0a101d);
         border: 1px solid #18233a;
@@ -99,7 +95,6 @@ st.markdown(
         padding: 12px 14px;
         border-left: 3px solid var(--ac, #33507e);
     }
-
     .rl-kpi-l {
         font-size: .58rem;
         font-weight: 700;
@@ -107,7 +102,6 @@ st.markdown(
         text-transform: uppercase;
         color: #6b7c97;
     }
-
     .rl-kpi-v {
         font-family: monospace;
         font-weight: 800;
@@ -115,25 +109,21 @@ st.markdown(
         color: #eef3fb;
         margin-top: 7px;
     }
-
     .rl-kpi-s {
         font-family: monospace;
         font-size: .64rem;
         color: #6b7c97;
         margin-top: 4px;
     }
-
     .pos { color: #4ade80; }
     .neg { color: #fb7185; }
     .mut { color: #6b7c97; }
-
     .cal {
         width: 100%;
         border-collapse: collapse;
         font-family: monospace;
         table-layout: fixed;
     }
-
     .cal th {
         color: #6b7c97;
         font-size: .65rem;
@@ -141,7 +131,6 @@ st.markdown(
         text-transform: uppercase;
         border-bottom: 1px solid #18233a;
     }
-
     .cal td {
         border: 1px solid #18233a;
         height: 70px;
@@ -149,37 +138,30 @@ st.markdown(
         padding: 6px;
         background: #0a101d;
     }
-
     .cal td.empty {
         background: transparent;
         border: none;
     }
-
     .cal .day {
         font-weight: 700;
         color: #8294b0;
     }
-
     .cal .cellpnl {
         font-size: .7rem;
         margin-top: 6px;
     }
-
     .pos-day {
         background: rgba(34, 197, 94, 0.12);
         border-left: 3px solid #22c55e;
     }
-
     .neg-day {
         background: rgba(239, 68, 68, 0.12);
         border-left: 3px solid #ef4444;
     }
-
     .rev-day {
         background: rgba(56, 132, 255, 0.08);
         border-left: 3px solid #3884ff;
     }
-
     .none {
         color: #42506b;
     }
@@ -187,6 +169,77 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+SYMBOL_TO_LABEL = {str(v): str(k) for k, v in AVAILABLE_MARKETS.items()}
+
+
+def _market_label(symbol: str) -> str:
+    symbol = str(symbol or "").strip()
+    return SYMBOL_TO_LABEL.get(symbol, f"{MARKET_ICONS.get(symbol, '📈')} {symbol}")
+
+
+def _market_contributions(rows, collective_pnl: float):
+    data = {}
+
+    for symbol, label in SYMBOL_TO_LABEL.items():
+        data[symbol] = {
+            "Market": label,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "pnl": 0.0,
+        }
+
+    for row in rows:
+        if row.get("is_review", False):
+            continue
+        if not row.get("taken", False):
+            continue
+        if row.get("outcome", "") not in {"WON", "LOST"}:
+            continue
+
+        symbol = str(row.get("symbol", "") or "UNKNOWN").strip()
+        if symbol not in data:
+            data[symbol] = {
+                "Market": _market_label(symbol),
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "pnl": 0.0,
+            }
+
+        item = data[symbol]
+        item["trades"] += 1
+        item["pnl"] += float(row.get("pnl", 0.0) or 0.0)
+        if row.get("outcome", "") == "WON":
+            item["wins"] += 1
+        else:
+            item["losses"] += 1
+
+    total_journal_pnl = sum(float(item["pnl"]) for item in data.values())
+
+    out = []
+    for item in data.values():
+        trades = int(item["trades"])
+        wins = int(item["wins"])
+        losses = int(item["losses"])
+        pnl = float(item["pnl"])
+
+        out.append(
+            {
+                "Market": item["Market"],
+                "Trades": trades,
+                "Wins": wins,
+                "Losses": losses,
+                "Win rate %": round((wins / trades * 100.0) if trades else 0.0, 1),
+                "Market P&L": round(pnl, 2),
+                "Journal share %": round((pnl / total_journal_pnl * 100.0) if total_journal_pnl else 0.0, 1),
+                "Collective share %": round((pnl / collective_pnl * 100.0) if collective_pnl else 0.0, 1),
+            }
+        )
+
+    out.sort(key=lambda x: x["Market P&L"], reverse=True)
+    return out
 
 
 def _kpi(label: str, value: str, sub: str, accent: str) -> str:
@@ -203,24 +256,20 @@ def _table(df: pd.DataFrame, height: int = 320) -> None:
     if df is None or df.empty:
         st.info("No rows yet.")
         return
-
     st.dataframe(df, use_container_width=True, height=height, hide_index=True)
 
 
 def _render_month_calendar(year: int, month: int, days: dict) -> str:
     cal = calendar.Calendar(firstweekday=0)
     parts = []
-
     parts.append('<table class="cal"><thead><tr>')
 
     for day_name in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
         parts.append(f"<th>{day_name}</th>")
-
     parts.append("</tr></thead><tbody>")
 
     for week in cal.monthdayscalendar(year, month):
         parts.append("<tr>")
-
         for day in week:
             if day == 0:
                 parts.append('<td class="empty"></td>')
@@ -232,12 +281,10 @@ def _render_month_calendar(year: int, month: int, days: dict) -> str:
             if row and int(row.get("closed", 0)) > 0:
                 pnl = float(row.get("pnl", 0.0))
                 css = "pos-day" if pnl >= 0 else "neg-day"
-
                 title = (
                     f"P&L {pnl:+.2f} | trades {row.get('closed', 0)} | "
                     f"win rate {row.get('win_rate_pct', 0)}%"
                 )
-
                 parts.append(
                     f'<td class="{css}" title="{html.escape(title, quote=True)}">'
                     f'<div class="day">{day}</div>'
@@ -246,7 +293,6 @@ def _render_month_calendar(year: int, month: int, days: dict) -> str:
                 )
             elif row and int(row.get("reviews", 0)) > 0:
                 title = f"reviews {row.get('reviews', 0)} | arms {row.get('arms', 0)}"
-
                 parts.append(
                     f'<td class="rev-day" title="{html.escape(title, quote=True)}">'
                     f'<div class="day">{day}</div>'
@@ -257,11 +303,9 @@ def _render_month_calendar(year: int, month: int, days: dict) -> str:
                 parts.append(
                     f'<td class="none"><div class="day">{day}</div></td>'
                 )
-
         parts.append("</tr>")
 
     parts.append("</tbody></table>")
-
     return "".join(parts)
 
 
@@ -273,7 +317,6 @@ def _db_token():
             return rl.RESEARCH_DB, stat.st_mtime, stat.st_size
     except OSError:
         pass
-
     return rl.RESEARCH_DB, 0, 0
 
 
@@ -281,7 +324,6 @@ def _db_token():
 def _journal_token():
     journal = get_journal()
     tokens = []
-
     for path in (getattr(journal, "_live", ""), getattr(journal, "_archive", "")):
         try:
             if path and os.path.exists(path):
@@ -291,7 +333,6 @@ def _journal_token():
                 tokens.append((path, 0, 0))
         except OSError:
             tokens.append((path, 0, 0))
-
     return tuple(tokens)
 
 
@@ -313,12 +354,12 @@ def _load_accounts(app_id: str, token: str):
 st.markdown(
     """
     <div class="rl-panel">
-        <div class="rl-h">Digit Research Lab · full bot-lifecycle backtest · calendar · advisor</div>
-        <div class="mut">
-            Read-only research branch. This page places no trades and does not modify live strategy behavior.
-            It can run alongside the real bot. Simulated backtests include cooldowns, recovery, daily cap,
-            lower-digit sequence behavior, and the payout assumption.
-        </div>
+      <div class="rl-h">Digit Research Lab · full bot-lifecycle backtest · calendar · advisor · market contribution</div>
+      <div class="mut">
+        Read-only research branch. This page places no trades and does not modify live strategy behavior.
+        It can run alongside the real bot. Simulated backtests include cooldowns, recovery, daily cap,
+        lower-digit sequence behavior, and the payout assumption.
+      </div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -332,9 +373,20 @@ actual_rows = _actual_rows(_journal_token())
 actual_summary = rl.compute_actual_summary(actual_rows)
 actual_daily = rl.compute_actual_daily(actual_rows)
 tape_rows = _tape_summary(_db_token())
-
 best_condition = st.session_state.get("best_condition")
 sim_daily = st.session_state.get("sim_daily") or []
+
+try:
+    collective_snapshot = GlobalRiskCoordinator().snapshot()
+except Exception:
+    collective_snapshot = {
+        "session_pnl": 0.0,
+        "take_profit_target": 0.0,
+        "stop_all": False,
+        "stop_reason": "",
+    }
+
+collective_pnl = float(collective_snapshot.get("session_pnl", 0.0))
 
 net_accent = "#22c55e" if actual_summary["net_pnl"] >= 0 else "#ef4444"
 wr_accent = (
@@ -360,10 +412,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 with tab_overview:
-    st.markdown('<div class="rl-h">Actual journal daily progress</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rl-h">Collective P&L contribution by market</div>', unsafe_allow_html=True)
 
+    if bool(collective_snapshot.get("stop_all", False)):
+        st.error(str(collective_snapshot.get("stop_reason") or "Global stop active."))
+
+    contribution_rows = _market_contributions(actual_rows, collective_pnl)
+    _table(pd.DataFrame(contribution_rows), height=360)
+
+    st.caption(
+        f"Global collective closed P&L currently stored by the risk coordinator: {collective_pnl:+.2f}. "
+        "Market P&L below is derived from closed journal rows. If the global session was reset, the collective "
+        "figure and the historical journal sum can differ."
+    )
+
+    st.markdown('<div class="rl-h">Actual journal daily progress</div>', unsafe_allow_html=True)
     if not actual_daily:
         st.info("No digit journal rows yet.")
     else:
@@ -378,13 +442,11 @@ with tab_overview:
 
     if sim_daily:
         st.markdown('<div class="rl-h">Simulated best-condition daily progress</div>', unsafe_allow_html=True)
-
         sim_df = pd.DataFrame(sim_daily)
         _table(sim_df, height=380)
 
         st.markdown('<div class="rl-h">Simulated cumulative paper P&L</div>', unsafe_allow_html=True)
         st.line_chart(sim_df.set_index("date")[["cum_pnl"]])
-
 
 with tab_calendar:
     st.markdown('<div class="rl-h">Progress calendar</div>', unsafe_allow_html=True)
@@ -414,7 +476,6 @@ with tab_calendar:
             st.info("No valid dates yet.")
         else:
             now = datetime.now(timezone.utc)
-
             year = st.selectbox(
                 "Year",
                 options=years,
@@ -432,7 +493,6 @@ with tab_calendar:
 
             default_month = now.month if int(year) == now.year else 1
             month_index = months.index(default_month) if default_month in months else len(months) - 1
-
             month = st.selectbox(
                 "Month",
                 options=months,
@@ -450,16 +510,15 @@ with tab_calendar:
             yearly = rl.aggregate_yearly(daily_for_calendar)
             _table(pd.DataFrame(yearly), height=260)
 
-
 with tab_evidence:
     st.markdown(
         """
         <div class="rl-panel">
-            <div class="rl-h">Research evidence collector</div>
-            <div class="mut">
-                This fetches Deriv tick history and stores it locally in logs/research.db.
-                It is read-only. It does not trade. It can run while the live bot is running.
-            </div>
+          <div class="rl-h">Research evidence collector</div>
+          <div class="mut">
+            This fetches Deriv tick history and stores it locally in logs/research.db.
+            It is read-only. It does not trade. It can run while the live bot is running.
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -481,7 +540,6 @@ with tab_evidence:
                 if account.get("account_id")
             }
             account_options = list(account_map)
-
             account_id = st.selectbox(
                 "Account for evidence collection",
                 options=account_options,
@@ -494,7 +552,6 @@ with tab_evidence:
             )
 
             market_labels = list(rl.available_markets().keys())
-
             default_label = (
                 DEFAULT_MARKET_DISPLAY
                 if DEFAULT_MARKET_DISPLAY in market_labels
@@ -522,13 +579,10 @@ with tab_evidence:
                     st.warning("Select at least one market.")
                 else:
                     market_map = rl.available_markets()
-
                     for label in selected_labels:
                         symbol = market_map.get(label)
-
                         if not symbol:
                             continue
-
                         try:
                             with st.spinner(f"Collecting {label}…"):
                                 result = rl.collect_symbol_history(
@@ -538,7 +592,6 @@ with tab_evidence:
                                     symbol,
                                     count,
                                 )
-
                             st.success(
                                 f"{label}: fetched {result['fetched']}, "
                                 f"inserted {result['inserted']}, precision {result['precision']}"
@@ -549,33 +602,29 @@ with tab_evidence:
                     st.cache_data.clear()
                     st.rerun()
 
-        st.divider()
-
-        st.markdown('<div class="rl-h">Research tape summary</div>', unsafe_allow_html=True)
-
-        if tape_rows:
-            _table(pd.DataFrame(tape_rows), height=320)
-        else:
-            st.info("No research tape stored yet.")
-
+    st.divider()
+    st.markdown('<div class="rl-h">Research tape summary</div>', unsafe_allow_html=True)
+    if tape_rows:
+        _table(pd.DataFrame(tape_rows), height=320)
+    else:
+        st.info("No research tape stored yet.")
 
 with tab_backtest:
     st.markdown(
         """
         <div class="rl-panel">
-            <div class="rl-h">Full bot-lifecycle backtest</div>
-            <div class="mut">
-                Simulates your bot logic against the collected tape:
-                reviews, lower sequence, cooldowns, recovery, daily cap, warmup,
-                one attempt per UTC minute bucket, and optional take-profit.
-            </div>
+          <div class="rl-h">Full bot-lifecycle backtest</div>
+          <div class="mut">
+            Simulates your bot logic against the collected tape:
+            reviews, lower sequence, cooldowns, recovery, daily cap, warmup,
+            one attempt per UTC minute bucket, and optional take-profit.
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     symbols = [row["symbol"] for row in tape_rows]
-
     if not symbols:
         st.info("Collect research evidence first.")
     else:
@@ -644,7 +693,6 @@ with tab_backtest:
             use_cooldown = st.checkbox("Use cooldown gates", value=True, key="backtest_use_cooldown")
 
             c1, c2, c3 = st.columns(3)
-
             initial_stake = c1.number_input(
                 "Initial stake",
                 min_value=0.35,
@@ -653,7 +701,6 @@ with tab_backtest:
                 step=0.05,
                 key="backtest_initial_stake",
             )
-
             martingale_multiplier = c2.number_input(
                 "Recovery multiplier",
                 min_value=1.00,
@@ -662,7 +709,6 @@ with tab_backtest:
                 step=0.01,
                 key="backtest_multiplier",
             )
-
             max_martingale_steps = c3.number_input(
                 "Max recovery steps",
                 min_value=0,
@@ -673,7 +719,6 @@ with tab_backtest:
             )
 
             d1, d2, d3 = st.columns(3)
-
             daily_cap = d1.number_input(
                 "Daily filled-trade cap",
                 min_value=0,
@@ -682,7 +727,6 @@ with tab_backtest:
                 step=1,
                 key="backtest_daily_cap",
             )
-
             take_profit_target = d2.number_input(
                 "Take-profit target (0 disables)",
                 min_value=0.0,
@@ -691,7 +735,6 @@ with tab_backtest:
                 step=1.0,
                 key="backtest_take_profit",
             )
-
             warmup_seconds = d3.number_input(
                 "Warmup seconds",
                 min_value=0,
@@ -785,15 +828,12 @@ with tab_backtest:
                 st.rerun()
 
         results = st.session_state.get("research_results")
-
         if results:
             st.markdown('<div class="rl-h">Full bot-lifecycle condition results</div>', unsafe_allow_html=True)
-
             results_df = pd.DataFrame(results)
             _table(results_df.head(200), height=420)
 
             csv_bytes = results_df.to_csv(index=False).encode("utf-8")
-
             st.download_button(
                 "Download full backtest CSV",
                 data=csv_bytes,
@@ -804,16 +844,15 @@ with tab_backtest:
         else:
             st.info("No backtest results yet.")
 
-
 with tab_advisor:
     st.markdown(
         """
         <div class="rl-panel">
-            <div class="rl-h">Advisor · proposal only</div>
-            <div class="mut">
-                The advisor ranks collected evidence using the full bot-lifecycle simulation.
-                It never changes the live bot. Forward-test any proposal on demo first.
-            </div>
+          <div class="rl-h">Advisor · proposal only</div>
+          <div class="mut">
+            The advisor ranks collected evidence using the full bot-lifecycle simulation.
+            It never changes the live bot. Forward-test any proposal on demo first.
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -826,7 +865,6 @@ with tab_advisor:
         st.info("Run the full bot backtest first.")
     else:
         c1, c2, c3, c4 = st.columns(4)
-
         c1.metric(
             "Condition",
             f"{best_condition['window_set']} · {best_condition['threshold_pct']}% · N={best_condition['lower_N']} · {best_condition['upper_mode']}",
@@ -873,7 +911,6 @@ with tab_advisor:
         ]
 
         preset_text = "\n".join(preset_lines)
-
         st.code(preset_text, language="text")
 
         st.download_button(
@@ -889,16 +926,15 @@ with tab_advisor:
             "It is an observation from collected evidence and simulated paper trades."
         )
 
-
 with tab_backup:
     st.markdown(
         """
         <div class="rl-panel">
-            <div class="rl-h">Journal backup & restore</div>
-            <div class="mut">
-                Export or import the live digit journal archive.
-                Import is idempotent.
-            </div>
+          <div class="rl-h">Journal backup & restore</div>
+          <div class="mut">
+            Export or import the live digit journal archive.
+            Import is idempotent.
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -907,7 +943,6 @@ with tab_backup:
     journal = get_journal()
 
     c1, c2 = st.columns(2)
-
     with c1:
         st.download_button(
             "Download master archive CSV",
@@ -916,7 +951,6 @@ with tab_backup:
             mime="text/csv",
             use_container_width=True,
         )
-
     with c2:
         st.download_button(
             "Download merged JSON",
