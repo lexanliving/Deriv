@@ -30,9 +30,9 @@ MARKET_ICONS = {
     "1HZ100V": "🚀",
     "R_10": "🧭",
     "R_100": "💎",
-    "1HZ150V": "🌪️",
-    "1HZ200V": "🌌",
-    "1HZ300V": "🪐",
+    "1HZ15V": "🌱",
+    "1HZ30V": "🌀",
+    "1HZ90V": "🌠",
 }
 
 AVAILABLE_MARKETS = {
@@ -43,9 +43,9 @@ AVAILABLE_MARKETS = {
     "🚀 Volatility 100 (1s)": "1HZ100V",
     "🧭 Volatility 10": "R_10",
     "💎 Volatility 100": "R_100",
-    "🌪️ Volatility 150 (1s)": "1HZ150V",
-    "🌌 Volatility 200 (1s)": "1HZ200V",
-    "🪐 Volatility 300 (1s)": "1HZ300V",
+    "🌱 Volatility 15 (1s)": "1HZ15V",
+    "🌀 Volatility 30 (1s)": "1HZ30V",
+    "🌠 Volatility 90 (1s)": "1HZ90V",
 }
 
 DEFAULT_MARKET_DISPLAY = "⚡ Volatility 10 (1s)"
