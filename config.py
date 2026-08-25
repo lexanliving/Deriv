@@ -22,39 +22,36 @@ DERIV_APP_ID = os.getenv("DERIV_APP_ID") or _streamlit_secret("DERIV_APP_ID") or
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN") or _streamlit_secret("DERIV_API_TOKEN") or ""
 DERIV_WS_URL = ""
 
-AVAILABLE_MARKETS = {
-    "Volatility 10 (1s)": "1HZ10V",
-    "Volatility 25 (1s)": "1HZ25V",
-    "Volatility 50 (1s)": "1HZ50V",
-    "Volatility 75 (1s)": "1HZ75V",
-    "Volatility 100 (1s)": "1HZ100V",
-    "Volatility 150 (1s)": "1HZ150V",
-    "Volatility 200 (1s)": "1HZ200V",
-    "Volatility 300 (1s)": "1HZ300V",
-    "Volatility 10": "R_10",
-    "Volatility 25": "R_25",
-    "Volatility 50": "R_50",
-    "Volatility 75": "R_75",
-    "Volatility 100": "R_100",
-    "Jump 10": "JD10",
-    "Jump 25": "JD25",
-    "Jump 50": "JD50",
-    "Jump 75": "JD75",
-    "Jump 100": "JD100",
-    "Boom 300": "BOOM300N",
-    "Boom 500": "BOOM500",
-    "Boom 1000": "BOOM1000",
-    "Crash 300": "CRASH300N",
-    "Crash 500": "CRASH500",
-    "Crash 1000": "CRASH1000",
-    "Step Index": "stpRNG",
-    "Range Break 100": "RDBEAR",
-    "Range Break 200": "RDBULL",
+MARKET_ICONS = {
+    "1HZ10V": "⚡",
+    "1HZ25V": "🔥",
+    "1HZ50V": "🌊",
+    "1HZ75V": "🛰️",
+    "1HZ100V": "🚀",
+    "R_10": "🧭",
+    "R_100": "💎",
+    "1HZ150V": "🌪️",
+    "1HZ200V": "🌌",
+    "1HZ300V": "🪐",
 }
 
-DEFAULT_MARKET_DISPLAY = "Volatility 10 (1s)"
+AVAILABLE_MARKETS = {
+    "⚡ Volatility 10 (1s)": "1HZ10V",
+    "🔥 Volatility 25 (1s)": "1HZ25V",
+    "🌊 Volatility 50 (1s)": "1HZ50V",
+    "🛰️ Volatility 75 (1s)": "1HZ75V",
+    "🚀 Volatility 100 (1s)": "1HZ100V",
+    "🧭 Volatility 10": "R_10",
+    "💎 Volatility 100": "R_100",
+    "🌪️ Volatility 150 (1s)": "1HZ150V",
+    "🌌 Volatility 200 (1s)": "1HZ200V",
+    "🪐 Volatility 300 (1s)": "1HZ300V",
+}
+
+DEFAULT_MARKET_DISPLAY = "⚡ Volatility 10 (1s)"
 SYMBOL = AVAILABLE_MARKETS[DEFAULT_MARKET_DISPLAY]
 SYMBOL_DISPLAY = DEFAULT_MARKET_DISPLAY
+MANAGED_SYMBOLS = list(AVAILABLE_MARKETS.values())
 
 DIGIT_DEFAULT_BARRIER = 6
 DIGIT_TICK_DURATION_OPTIONS = [1, 2]
