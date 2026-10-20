@@ -1,4 +1,4 @@
-"""Live execution engine for the manual Touch / No Touch reversal bot.
+"""Live execution engine for the manual ONE TOUCH reversal bot.
 
 This engine is built for speed:
 - signal is evaluated directly inside the tick callback
@@ -6,9 +6,9 @@ This engine is built for speed:
 - one trade per start
 - after settlement, the engine stops automatically
 
-Default behavior:
-- +0.08 bias -> wait for up ticks, then enter on down reversal
-- -0.08 bias -> wait for down ticks, then enter on up reversal
+Behavior:
+- + barrier -> wait for consecutive up ticks, then buy ONE TOUCH on the first down tick
+- - barrier -> wait for consecutive down ticks, then buy ONE TOUCH on the first up tick
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ class TradingEngine:
         barrier_sign: str = "+",
         barrier_offset: float = 0.08,
         barrier_decimal_places: int = 2,
-        contract_style: str = "NOTOUCH",
+        contract_style: str = "ONETOUCH",
         required_trend_ticks: int = 3,
         ignore_flat_ticks: bool = True,
         exact_streak_only: bool = False,
@@ -104,11 +104,9 @@ class TradingEngine:
         self.barrier_decimal_places = max(0, int(barrier_decimal_places))
         self.barrier = self._build_barrier()
 
-        raw_contract = str(contract_style or "NOTOUCH").strip().upper().replace(" ", "").replace("_", "")
-        if raw_contract in {"TOUCH", "ONETOUCH", "ONETOUCH"}:
-            self.contract_type = "ONETOUCH"
-        else:
-            self.contract_type = "NOTOUCH"
+        # ONE TOUCH ONLY.
+        # Any supplied contract style is intentionally forced to ONETOUCH.
+        self.contract_type = "ONETOUCH"
 
         self.required_trend_ticks = max(1, int(required_trend_ticks))
         self.ignore_flat_ticks = bool(ignore_flat_ticks)
@@ -140,7 +138,7 @@ class TradingEngine:
         self._active_contract_id: Optional[int] = None
 
         self.state.update_strategy_state(
-            strategy_mode="MANUAL_TOUCH",
+            strategy_mode="MANUAL_ONE_TOUCH",
             manual_mode=self.barrier_sign,
             manual_barrier=self.barrier,
             manual_contract_type=self.contract_type,
@@ -167,7 +165,7 @@ class TradingEngine:
     def _push_state(self) -> None:
         try:
             self.state.update_strategy_state(
-                strategy_mode="MANUAL_TOUCH",
+                strategy_mode="MANUAL_ONE_TOUCH",
                 manual_mode=self.barrier_sign,
                 manual_barrier=self.barrier,
                 manual_contract_type=self.contract_type,
@@ -176,7 +174,7 @@ class TradingEngine:
                 **self._strategy.get_state(),
             )
         except Exception:
-            logger.exception("Could not push manual strategy state.")
+            logger.exception("Could not push manual one-touch strategy state.")
 
     def _record_evaluation(self, record: Optional[Dict[str, Any]]) -> None:
         if not self._journal or not record:
@@ -220,7 +218,7 @@ class TradingEngine:
         self._reconnect_lock = asyncio.Lock()
 
         logger.info(
-            "Manual touch engine start | market=%s mode=%s contract=%s barrier=%s duration=%dt required_ticks=%d",
+            "Manual one-touch engine start | market=%s mode=%s contract=%s barrier=%s duration=%dt required_ticks=%d",
             self.symbol,
             self.execution_mode,
             self.contract_type,
@@ -273,7 +271,7 @@ class TradingEngine:
             reversal = "DOWN" if self.barrier_sign == "+" else "UP"
             self.state.set_status(
                 f"Armed on {self.symbol_display}: waiting for {self.required_trend_ticks} {side} ticks, "
-                f"then a {reversal} tick to buy {self.contract_type} {self.barrier} for {self.contract_duration} ticks."
+                f"then a {reversal} tick to buy ONE TOUCH {self.barrier} for {self.contract_duration} ticks."
             )
 
             while True:
@@ -293,18 +291,18 @@ class TradingEngine:
         except asyncio.CancelledError:
             raise
         except DerivAPIError as exc:
-            logger.error("API error in manual touch engine: %s", exc)
+            logger.error("API error in manual one-touch engine: %s", exc)
             self.state.set_error(str(exc))
             self.state.set_status("Engine stopped due to API error.")
         except Exception as exc:
-            logger.exception("Unexpected error in manual touch engine: %s", exc)
+            logger.exception("Unexpected error in manual one-touch engine: %s", exc)
             self.state.set_error(f"Unexpected error: {exc}")
             self.state.set_status("Engine stopped due to an unexpected error.")
         finally:
             await self._shutdown()
 
     async def _shutdown(self) -> None:
-        logger.info("Manual touch engine shutting down…")
+        logger.info("Manual one-touch engine shutting down…")
 
         if self._trade_in_progress:
             self.state.set_status("Stopping — letting the open contract finish…")
@@ -378,7 +376,7 @@ class TradingEngine:
 
         if signal == "ENTRY":
             self._trade_in_progress = True
-            self.state.set_status("Reversal detected — executing immediately…")
+            self.state.set_status("Reversal detected — executing ONE TOUCH immediately…")
             await self._execute_trade()
 
     # ------------------------------------------------------------------ execution
@@ -418,12 +416,12 @@ class TradingEngine:
                 "taken": "TRUE",
                 "executed": "FALSE",
                 "rejection_reason": "",
-                "note": str(self._strategy.last_rejection or "Manual reversal trigger"),
+                "note": str(self._strategy.last_rejection or "Manual one-touch reversal trigger"),
                 "score": "",
                 "threshold": "",
-                "regime": "MANUAL_TOUCH",
+                "regime": "MANUAL_ONE_TOUCH",
                 "duration_min": round(self.contract_duration / 60.0, 4),
-                "strategy_mode": "MANUAL_TOUCH",
+                "strategy_mode": "MANUAL_ONE_TOUCH",
                 "barrier": self.barrier,
                 "duration_unit": "t",
                 "digit_precision": "",
@@ -451,7 +449,7 @@ class TradingEngine:
             if self.state.stop_requested:
                 raise DerivAPIError("Stop requested before buy; no order was submitted.", "STOP_REQUESTED")
 
-            self.state.set_status(f"Requesting {self.contract_type} {self.barrier} quote…")
+            self.state.set_status(f"Requesting ONE TOUCH {self.barrier} quote…")
 
             proposal = await self._client.get_proposal(
                 symbol=self.symbol,
@@ -468,12 +466,12 @@ class TradingEngine:
             payout = float(proposal.get("payout"))
 
             if not proposal_id or ask_price <= 0 or payout <= 0:
-                raise DerivAPIError("Deriv returned an invalid touch/no-touch proposal.", "INVALID_RESPONSE")
+                raise DerivAPIError("Deriv returned an invalid one-touch proposal.", "INVALID_RESPONSE")
 
             if self.state.stop_requested:
                 raise DerivAPIError("Stop requested before buy; no order was submitted.", "STOP_REQUESTED")
 
-            self.state.set_status(f"Buying {self.contract_type} {self.barrier} at {ask_price:.2f}…")
+            self.state.set_status(f"Buying ONE TOUCH {self.barrier} at {ask_price:.2f}…")
 
             buy = await self._client.buy_contract(proposal_id=proposal_id, price=ask_price)
             contract_id = buy.get("contract_id")
@@ -481,13 +479,13 @@ class TradingEngine:
             buy_payout = float(buy.get("payout", payout))
 
             if not isinstance(contract_id, int) or isinstance(contract_id, bool):
-                raise DerivAPIError("No valid contract ID in touch/no-touch buy response.", "NO_CONTRACT_ID")
+                raise DerivAPIError("No valid contract ID in one-touch buy response.", "NO_CONTRACT_ID")
 
             self._active_contract_id = contract_id
             trade_record.contract_id = contract_id
             self.state.update_trade_pacing()
             self.state.set_status(
-                f"Contract {contract_id} active · {self.contract_type} {self.barrier} · awaiting settlement"
+                f"Contract {contract_id} active · ONE TOUCH {self.barrier} · awaiting settlement"
             )
 
             outcome, pnl = await self._monitor_contract(contract_id, buy_price, buy_payout)
@@ -504,15 +502,15 @@ class TradingEngine:
 
             if outcome == "WON":
                 self.state.on_trade_win()
-                self.state.set_status(f"{self.contract_type} {self.barrier} WON · P&L {pnl:+.2f}")
+                self.state.set_status(f"ONE TOUCH {self.barrier} WON · P&L {pnl:+.2f}")
             else:
                 self.state.on_trade_loss(1.0, 0)
-                self.state.set_status(f"{self.contract_type} {self.barrier} LOST · P&L {pnl:+.2f}")
+                self.state.set_status(f"ONE TOUCH {self.barrier} LOST · P&L {pnl:+.2f}")
 
             self._record_outcome(signal_id, outcome, pnl, stake, contract_id)
 
         except DerivAPIError as exc:
-            reason = f"Manual touch order failed: {exc.message} ({exc.code})."
+            reason = f"One-touch order failed: {exc.message} ({exc.code})."
             if self._active_contract_id is not None:
                 self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                 self._record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, note=reason)
@@ -523,7 +521,7 @@ class TradingEngine:
             self.state.set_status(reason)
 
         except Exception as exc:
-            reason = f"Unexpected manual touch execution failure: {exc}"
+            reason = f"Unexpected one-touch execution failure: {exc}"
             if self._active_contract_id is not None:
                 self.state.update_trade_outcome(trade_id, "UNKNOWN", 0.0, reason)
                 self._record_outcome(signal_id, "UNKNOWN", 0.0, stake, self._active_contract_id, note=reason)
