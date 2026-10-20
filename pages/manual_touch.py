@@ -109,7 +109,7 @@ st.markdown(
       <div class="mt-h">Manual ONE TOUCH · Speed Bot</div>
       <div class="mut">
         You analyze the market, choose the bias, press START, and the bot waits for the first reversal tick.
-        After one trade, it stops automatically.
+        It keeps a hot proposal ready so the buy request fires immediately.
       </div>
     </div>
     """,
@@ -239,20 +239,57 @@ with st.sidebar:
 
     st.markdown("### Speed settings")
 
+    proposal_hot_mode = st.selectbox(
+        "Proposal pre-cache",
+        options=["ARMED", "ALWAYS", "OFF"],
+        format_func=lambda x: {
+            "ARMED": "When armed (recommended)",
+            "ALWAYS": "Always (most aggressive)",
+            "OFF": "Off",
+        }.get(x, x),
+        index=0,
+        key="mt_proposal_hot_mode",
+        help=(
+            "When armed keeps a proposal ready as soon as the trend condition is armed. "
+            "Always keeps requesting proposals even before the setup is armed. "
+            "Off disables pre-caching and will be slower."
+        ),
+    )
+
+    proposal_refresh_seconds = st.number_input(
+        "Proposal refresh seconds",
+        min_value=0.05,
+        max_value=2.0,
+        value=0.30,
+        step=0.05,
+        key="mt_proposal_refresh",
+        help="How often the bot refreshes the cached proposal while hot caching is active.",
+    )
+
+    proposal_max_age_seconds = st.number_input(
+        "Max proposal age seconds",
+        min_value=0.10,
+        max_value=5.0,
+        value=1.00,
+        step=0.05,
+        key="mt_proposal_max_age",
+        help="If the cached proposal is older than this, the bot will not use it.",
+    )
+
     proposal_timeout = st.number_input(
         "Proposal timeout (seconds)",
-        min_value=0.5,
+        min_value=0.25,
         max_value=5.0,
-        value=1.5,
+        value=0.9,
         step=0.1,
         key="mt_proposal_timeout",
     )
 
     request_timeout = st.number_input(
         "General request timeout (seconds)",
-        min_value=1.0,
+        min_value=0.5,
         max_value=10.0,
-        value=3.0,
+        value=2.0,
         step=0.1,
         key="mt_request_timeout",
     )
@@ -316,6 +353,9 @@ if start_clicked and can_start and not engine_active:
         stop_after_trade=True,
         proposal_timeout=float(proposal_timeout),
         request_timeout=float(request_timeout),
+        proposal_hot_mode=str(proposal_hot_mode),
+        proposal_refresh_seconds=float(proposal_refresh_seconds),
+        proposal_max_age_seconds=float(proposal_max_age_seconds),
     )
 
     def _run_engine(engine_instance: TradingEngine, shared_state: StateManager):
