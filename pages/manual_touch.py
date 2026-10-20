@@ -253,6 +253,20 @@ with st.sidebar:
         help="0 disables the safety timeout.",
     )
 
+    st.markdown("### Market")
+
+    symbol = st.text_input(
+        "Symbol",
+        value="1HZ10V",
+        key="mt_symbol",
+        help="Volatility 10 (1s) index symbol is 1HZ10V.",
+    )
+    symbol_display = st.text_input(
+        "Symbol display",
+        value="Volatility 10 (1s)",
+        key="mt_symbol_display",
+    )
+
     st.markdown("### Speed settings")
 
     proposal_refresh_seconds = st.number_input(
