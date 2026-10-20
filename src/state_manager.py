@@ -1,4 +1,7 @@
 """src/state_manager.py — thread-safe shared state between engine and UI."""
+
+from __future__ import annotations
+
 import threading
 import time
 from collections import deque
@@ -31,6 +34,7 @@ class TradeRecord:
 
 class StateManager:
     _STRATEGY_STATE_ATTRS = {
+        # Legacy / compatibility fields
         "trend_direction": "_current_trend_direction",
         "trend_tick_count": "_trend_tick_count",
         "trend_kind": "_trend_kind",
@@ -60,19 +64,37 @@ class StateManager:
         "digit_confirmation_boundary_epoch": "_digit_confirmation_boundary_epoch",
         "digit_last_rejection": "_digit_last_rejection",
         "digit_contract_duration_ticks": "_digit_contract_duration_ticks",
+
+        # Manual touch fields
+        "manual_mode": "_manual_mode",
+        "manual_barrier": "_manual_barrier",
+        "manual_contract_type": "_manual_contract_type",
+        "manual_duration_ticks": "_manual_duration_ticks",
+        "manual_required_ticks": "_manual_required_ticks",
+        "manual_trend_ticks": "_manual_trend_ticks",
+        "manual_armed": "_manual_armed",
+        "manual_triggered": "_manual_triggered",
+        "manual_last_move": "_manual_last_move",
+        "manual_last_rejection": "_manual_last_rejection",
     }
 
     def __init__(self):
         self._lock = threading.Lock()
 
+        # Engine / session
         self._is_running = False
         self._stop_requested = False
+        self._status_message = "Stopped."
+        self._error_message = ""
+        self._engine_heartbeat = 0.0
 
+        # Market data
         self._current_price = 0.0
         self._recent_ticks = deque(maxlen=TICK_BUFFER_SIZE)
         self._tick_timestamps = deque(maxlen=TICK_BUFFER_SIZE)
         self._total_ticks_processed = 0
 
+        # Legacy strategy state kept for compatibility
         self._current_trend_direction: Optional[str] = None
         self._trend_tick_count = 0
         self._trend_kind: Optional[str] = None
@@ -80,7 +102,6 @@ class StateManager:
         self._in_cooldown = False
         self._pattern_stage = "IDLE"
         self._pattern_ticks: List[float] = []
-
         self._mtf_bias: Optional[str] = None
         self._mtf_agreement = 0
         self._mtf_tf_biases: Dict[str, str] = {}
@@ -88,9 +109,8 @@ class StateManager:
         self._last_entry_mode: Optional[str] = None
         self._last_signal_score = 0
         self._last_signal_score_breakdown: Dict[str, int] = {}
-
-        self._strategy_mode = "CANDLE"
-        self._digit_barrier = 6
+        self._strategy_mode = "MANUAL_TOUCH"
+        self._digit_barrier = ""
         self._digit_precision = 2
         self._last_digit = None
         self._digit_counts: Dict[str, int] = {}
@@ -105,33 +125,42 @@ class StateManager:
         self._digit_last_rejection = ""
         self._digit_contract_duration_ticks = 0
 
+        # Manual touch state
+        self._manual_mode = "+"
+        self._manual_barrier = ""
+        self._manual_contract_type = "NOTOUCH"
+        self._manual_duration_ticks = 5
+        self._manual_required_ticks = 3
+        self._manual_trend_ticks = 0
+        self._manual_armed = False
+        self._manual_triggered = False
+        self._manual_last_move = 0.0
+        self._manual_last_rejection = "Stopped."
+
+        # Money / trade management
         self._current_martingale_step = 0
         self._current_stake = DEFAULT_INITIAL_STAKE
         self._initial_stake = DEFAULT_INITIAL_STAKE
         self._last_trade_time = 0.0
-
         self._session_pnl = 0.0
         self._consecutive_losses = 0
 
+        # Trades / performance
         self._trade_history: deque = deque(maxlen=TRADE_HISTORY_LIMIT)
         self._trades_by_id: Dict[str, TradeRecord] = {}
-
         self._total_pnl = 0.0
         self._wins = 0
         self._losses = 0
         self._total_won = 0.0
         self._total_lost = 0.0
 
+        # Execution context
         self._execution_context: Dict[str, str] = {
             "account_id": "",
             "account_type": "UNKNOWN",
             "currency": "USD",
             "execution_mode": "UNCONFIGURED",
         }
-
-        self._status_message = "Stopped."
-        self._error_message = ""
-        self._engine_heartbeat = 0.0
 
     # ------------------------------------------------------------- running
 
@@ -142,7 +171,7 @@ class StateManager:
 
     def set_running(self, value: bool):
         with self._lock:
-            self._is_running = value
+            self._is_running = bool(value)
             if value:
                 self._stop_requested = False
                 self._engine_heartbeat = time.time()
@@ -174,9 +203,9 @@ class StateManager:
 
     def update_tick(self, price, timestamp):
         with self._lock:
-            self._current_price = price
-            self._recent_ticks.append(price)
-            self._tick_timestamps.append(timestamp)
+            self._current_price = float(price)
+            self._recent_ticks.append(float(price))
+            self._tick_timestamps.append(float(timestamp))
             self._total_ticks_processed += 1
 
     @property
@@ -201,6 +230,7 @@ class StateManager:
     def get_strategy_state(self):
         with self._lock:
             return {
+                # Legacy compatibility
                 "trend_direction": self._current_trend_direction,
                 "trend_tick_count": self._trend_tick_count,
                 "trend_kind": self._trend_kind,
@@ -230,6 +260,18 @@ class StateManager:
                 "digit_confirmation_boundary_epoch": self._digit_confirmation_boundary_epoch,
                 "digit_last_rejection": self._digit_last_rejection,
                 "digit_contract_duration_ticks": self._digit_contract_duration_ticks,
+
+                # Manual touch
+                "manual_mode": self._manual_mode,
+                "manual_barrier": self._manual_barrier,
+                "manual_contract_type": self._manual_contract_type,
+                "manual_duration_ticks": self._manual_duration_ticks,
+                "manual_required_ticks": self._manual_required_ticks,
+                "manual_trend_ticks": self._manual_trend_ticks,
+                "manual_armed": self._manual_armed,
+                "manual_triggered": self._manual_triggered,
+                "manual_last_move": self._manual_last_move,
+                "manual_last_rejection": self._manual_last_rejection,
             }
 
     def update_strategy_state(self, **kwargs):
@@ -244,9 +286,9 @@ class StateManager:
 
     def update_tick_and_strategy_state(self, price, timestamp, **strategy_kwargs):
         with self._lock:
-            self._current_price = price
-            self._recent_ticks.append(price)
-            self._tick_timestamps.append(timestamp)
+            self._current_price = float(price)
+            self._recent_ticks.append(float(price))
+            self._tick_timestamps.append(float(timestamp))
             self._total_ticks_processed += 1
             self._apply_strategy_state(strategy_kwargs)
 
@@ -262,8 +304,8 @@ class StateManager:
 
     def set_initial_stake(self, stake):
         with self._lock:
-            self._initial_stake = stake
-            self._current_stake = stake
+            self._initial_stake = float(stake)
+            self._current_stake = float(stake)
 
     def on_trade_win(self):
         with self._lock:
@@ -288,19 +330,8 @@ class StateManager:
                 self._current_stake = self._initial_stake
 
     def _cooldown_remaining_unsafe(self):
-        if self._last_trade_time == 0.0:
-            return 0.0
-
-        elapsed = time.time() - self._last_trade_time
-
-        if self._consecutive_losses >= 2:
-            required = 180.0
-        elif self._consecutive_losses >= 1:
-            required = 90.0
-        else:
-            required = 30.0
-
-        return max(0.0, required - elapsed)
+        # Manual mode does not force cooldowns.
+        return 0.0
 
     def get_cooldown_remaining(self):
         with self._lock:
@@ -317,7 +348,6 @@ class StateManager:
             if len(self._trade_history) == self._trade_history.maxlen:
                 evicted = self._trade_history.popleft()
                 self._trades_by_id.pop(evicted.trade_id, None)
-
             self._trade_history.append(trade)
             self._trades_by_id[trade.trade_id] = trade
 
@@ -332,6 +362,7 @@ class StateManager:
 
             trade.status = status
             trade.pnl = pnl
+
             if error_message:
                 trade.error_message = error_message
 
@@ -405,7 +436,7 @@ class StateManager:
 
     def set_status(self, message):
         with self._lock:
-            self._status_message = message
+            self._status_message = str(message)
 
     @property
     def error_message(self):
@@ -414,7 +445,7 @@ class StateManager:
 
     def set_error(self, message):
         with self._lock:
-            self._error_message = message
+            self._error_message = str(message)
 
     def clear_error(self):
         with self._lock:
@@ -426,6 +457,9 @@ class StateManager:
         with self._lock:
             self._is_running = False
             self._stop_requested = False
+            self._status_message = "Stopped."
+            self._error_message = ""
+            self._engine_heartbeat = 0.0
 
             self._current_price = 0.0
             self._recent_ticks.clear()
@@ -439,7 +473,6 @@ class StateManager:
             self._in_cooldown = False
             self._pattern_stage = "IDLE"
             self._pattern_ticks = []
-
             self._mtf_bias = None
             self._mtf_agreement = 0
             self._mtf_tf_biases = {}
@@ -447,9 +480,8 @@ class StateManager:
             self._last_entry_mode = None
             self._last_signal_score = 0
             self._last_signal_score_breakdown = {}
-
-            self._strategy_mode = "CANDLE"
-            self._digit_barrier = 6
+            self._strategy_mode = "MANUAL_TOUCH"
+            self._digit_barrier = ""
             self._digit_precision = 2
             self._last_digit = None
             self._digit_counts = {}
@@ -464,21 +496,31 @@ class StateManager:
             self._digit_last_rejection = ""
             self._digit_contract_duration_ticks = 0
 
+            self._manual_mode = "+"
+            self._manual_barrier = ""
+            self._manual_contract_type = "NOTOUCH"
+            self._manual_duration_ticks = 5
+            self._manual_required_ticks = 3
+            self._manual_trend_ticks = 0
+            self._manual_armed = False
+            self._manual_triggered = False
+            self._manual_last_move = 0.0
+            self._manual_last_rejection = "Stopped."
+
             self._current_martingale_step = 0
-            self._initial_stake = initial_stake
-            self._current_stake = initial_stake
+            self._initial_stake = float(initial_stake)
+            self._current_stake = float(initial_stake)
+            self._last_trade_time = 0.0
+            self._session_pnl = 0.0
+            self._consecutive_losses = 0
 
             self._trade_history = deque(maxlen=TRADE_HISTORY_LIMIT)
             self._trades_by_id = {}
-
             self._total_pnl = 0.0
             self._wins = 0
             self._losses = 0
             self._total_won = 0.0
             self._total_lost = 0.0
-            self._session_pnl = 0.0
-            self._last_trade_time = 0.0
-            self._consecutive_losses = 0
 
             self._execution_context = {
                 "account_id": "",
@@ -486,7 +528,3 @@ class StateManager:
                 "currency": "USD",
                 "execution_mode": "UNCONFIGURED",
             }
-
-            self._status_message = "Stopped."
-            self._error_message = ""
-            self._engine_heartbeat = 0.0
