@@ -65,7 +65,7 @@ class StateManager:
         "digit_last_rejection": "_digit_last_rejection",
         "digit_contract_duration_ticks": "_digit_contract_duration_ticks",
 
-        # Manual touch fields
+        # Manual one-touch fields
         "manual_mode": "_manual_mode",
         "manual_barrier": "_manual_barrier",
         "manual_contract_type": "_manual_contract_type",
@@ -109,7 +109,7 @@ class StateManager:
         self._last_entry_mode: Optional[str] = None
         self._last_signal_score = 0
         self._last_signal_score_breakdown: Dict[str, int] = {}
-        self._strategy_mode = "MANUAL_TOUCH"
+        self._strategy_mode = "MANUAL_ONE_TOUCH"
         self._digit_barrier = ""
         self._digit_precision = 2
         self._last_digit = None
@@ -125,10 +125,10 @@ class StateManager:
         self._digit_last_rejection = ""
         self._digit_contract_duration_ticks = 0
 
-        # Manual touch state
+        # Manual one-touch state
         self._manual_mode = "+"
         self._manual_barrier = ""
-        self._manual_contract_type = "NOTOUCH"
+        self._manual_contract_type = "ONETOUCH"
         self._manual_duration_ticks = 5
         self._manual_required_ticks = 3
         self._manual_trend_ticks = 0
@@ -261,7 +261,7 @@ class StateManager:
                 "digit_last_rejection": self._digit_last_rejection,
                 "digit_contract_duration_ticks": self._digit_contract_duration_ticks,
 
-                # Manual touch
+                # Manual one-touch
                 "manual_mode": self._manual_mode,
                 "manual_barrier": self._manual_barrier,
                 "manual_contract_type": self._manual_contract_type,
@@ -480,7 +480,7 @@ class StateManager:
             self._last_entry_mode = None
             self._last_signal_score = 0
             self._last_signal_score_breakdown = {}
-            self._strategy_mode = "MANUAL_TOUCH"
+            self._strategy_mode = "MANUAL_ONE_TOUCH"
             self._digit_barrier = ""
             self._digit_precision = 2
             self._last_digit = None
@@ -498,7 +498,7 @@ class StateManager:
 
             self._manual_mode = "+"
             self._manual_barrier = ""
-            self._manual_contract_type = "NOTOUCH"
+            self._manual_contract_type = "ONETOUCH"
             self._manual_duration_ticks = 5
             self._manual_required_ticks = 3
             self._manual_trend_ticks = 0
