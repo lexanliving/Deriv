@@ -1,14 +1,11 @@
 """Live execution engine for the manual ONE TOUCH reversal bot.
 
-This engine is built for speed:
-- signal is evaluated directly inside the tick callback
-- entry is fired immediately on the reversal tick
-- one trade per start
-- after settlement, the engine stops automatically
-
-Behavior:
-- + barrier -> wait for consecutive up ticks, then buy ONE TOUCH on the first down tick
-- - barrier -> wait for consecutive down ticks, then buy ONE TOUCH on the first up tick
+Speed upgrades:
+- ONE TOUCH only
+- keeps a hot proposal ready while armed / always
+- fires buy immediately on the reversal tick
+- avoids waiting for a fresh proposal in the normal entry path
+- uses a lower-latency WebSocket connection mode
 """
 
 from __future__ import annotations
@@ -18,6 +15,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
+
+import websockets
+from websockets.exceptions import WebSocketException
 
 from config import CURRENCY, DEFAULT_INITIAL_STAKE
 
@@ -54,6 +54,58 @@ def resolve_execution_mode(account_type: str, real_execution_confirmed: bool) ->
     return "BLOCKED"
 
 
+class FastDerivAPIClient(DerivAPIClient):
+    """Lower-latency Deriv client.
+
+    Disables websocket compression and built-in websocket ping overhead.
+    The existing Deriv API ping loop still keeps the session alive.
+    """
+
+    async def connect(self) -> bool:
+        if self._ws is not None or self._listener_task is not None:
+            await self.disconnect()
+
+        self.last_error = ""
+
+        try:
+            await self.authorize()
+            websocket_url = await self._websocket_url()
+
+            try:
+                self._ws = await websockets.connect(
+                    websocket_url,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    open_timeout=10,
+                    close_timeout=5,
+                    max_size=2**20,
+                    compression=None,
+                )
+            except TypeError:
+                # Fallback for older websockets versions where compression is unavailable.
+                self._ws = await websockets.connect(
+                    websocket_url,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    open_timeout=10,
+                    close_timeout=5,
+                    max_size=2**20,
+                )
+
+            self._connected = True
+            self._listener_task = asyncio.create_task(self._message_listener(), name="deriv-message-listener")
+            self._ping_task = asyncio.create_task(self._ping_loop(), name="deriv-api-ping")
+
+            logger.info("Fast Deriv connection established for account %s.", self.account_id)
+            return True
+
+        except (DerivAPIError, WebSocketException, OSError, asyncio.TimeoutError) as exc:
+            self.last_error = str(exc)
+            logger.warning("Deriv connection failed: %s", exc)
+            await self.disconnect()
+            return False
+
+
 class TradingEngine:
     def __init__(
         self,
@@ -77,8 +129,12 @@ class TradingEngine:
         ignore_flat_ticks: bool = True,
         exact_streak_only: bool = False,
         stop_after_trade: bool = True,
-        proposal_timeout: float = 1.5,
-        request_timeout: float = 3.0,
+        proposal_timeout: float = 0.9,
+        request_timeout: float = 2.0,
+        keep_proposal_hot: bool = True,
+        proposal_hot_mode: str = "",
+        proposal_refresh_seconds: float = 0.30,
+        proposal_max_age_seconds: float = 1.00,
         **_: Any,
     ) -> None:
         self.api_token = str(api_token or "").strip()
@@ -105,7 +161,6 @@ class TradingEngine:
         self.barrier = self._build_barrier()
 
         # ONE TOUCH ONLY.
-        # Any supplied contract style is intentionally forced to ONETOUCH.
         self.contract_type = "ONETOUCH"
 
         self.required_trend_ticks = max(1, int(required_trend_ticks))
@@ -113,12 +168,22 @@ class TradingEngine:
         self.exact_streak_only = bool(exact_streak_only)
         self.stop_after_trade = bool(stop_after_trade)
 
-        self.proposal_timeout = max(0.5, float(proposal_timeout))
-        self.request_timeout = max(1.0, float(request_timeout))
+        self.proposal_timeout = max(0.25, float(proposal_timeout))
+        self.request_timeout = max(0.5, float(request_timeout))
 
-        # Tighten request behavior for speed.
+        # Speed-critical Deriv client behavior.
         api_client_module.PROPOSAL_REQUEST_TIMEOUT = self.proposal_timeout
         DerivAPIClient.REQUEST_TIMEOUT = self.request_timeout
+
+        # Hot proposal behavior.
+        raw_mode = str(proposal_hot_mode or "").strip().upper()
+        if raw_mode in {"ALWAYS", "ARMED", "OFF"}:
+            self.proposal_hot_mode = raw_mode
+        else:
+            self.proposal_hot_mode = "ARMED" if keep_proposal_hot else "OFF"
+
+        self.proposal_refresh_seconds = max(0.05, float(proposal_refresh_seconds))
+        self.proposal_max_age_seconds = max(0.10, float(proposal_max_age_seconds))
 
         self._strategy = ManualTouchStrategy(
             barrier_sign=self.barrier_sign,
@@ -132,10 +197,18 @@ class TradingEngine:
         except Exception:
             self._journal = None
 
-        self._client: Optional[DerivAPIClient] = None
+        self._client: Optional[FastDerivAPIClient] = None
         self._reconnect_lock: Optional[asyncio.Lock] = None
         self._trade_in_progress = False
         self._active_contract_id: Optional[int] = None
+
+        # Hot proposal cache.
+        self._proposal_lock: Optional[asyncio.Lock] = None
+        self._proposal_keeper_task: Optional[asyncio.Task] = None
+        self._hot_proposal: Optional[Dict[str, Any]] = None
+        self._hot_proposal_time = 0.0
+        self._hot_proposal_stake = 0.0
+        self._last_proposal_error = ""
 
         self.state.update_strategy_state(
             strategy_mode="MANUAL_ONE_TOUCH",
@@ -212,19 +285,142 @@ class TradingEngine:
     def _contract_duration_seconds(self) -> float:
         return max(5.0, float(self.contract_duration) + 5.0)
 
+    # ------------------------------------------------------------ hot proposal
+
+    def _hot_proposal_needed(self) -> bool:
+        if self.execution_mode == "BLOCKED":
+            return False
+
+        if self._trade_in_progress:
+            return False
+
+        if self.proposal_hot_mode == "OFF":
+            return False
+
+        if self.proposal_hot_mode == "ALWAYS":
+            return True
+
+        # ARMED mode.
+        return bool(getattr(self._strategy, "armed", False) or getattr(self._strategy, "triggered", False))
+
+    def _valid_hot_proposal(self) -> Optional[Dict[str, Any]]:
+        if self.proposal_hot_mode == "OFF":
+            return None
+
+        if self._hot_proposal is None:
+            return None
+
+        age = time.time() - self._hot_proposal_time
+        if age < 0 or age > self.proposal_max_age_seconds:
+            return None
+
+        try:
+            proposal_id = self._hot_proposal.get("id")
+            ask_price = float(self._hot_proposal.get("ask_price"))
+            payout = float(self._hot_proposal.get("payout"))
+        except (TypeError, ValueError):
+            return None
+
+        if not proposal_id or ask_price <= 0 or payout <= 0:
+            return None
+
+        current_stake = float(self.state.get_martingale_state().get("stake", self.initial_stake))
+        if abs(current_stake - float(self._hot_proposal_stake)) > 0.001:
+            return None
+
+        return self._hot_proposal
+
+    async def _refresh_hot_proposal(self) -> None:
+        if self._proposal_lock is None:
+            self._proposal_lock = asyncio.Lock()
+
+        async with self._proposal_lock:
+            if not self._hot_proposal_needed():
+                return
+
+            if not self._client or not self._client.connected:
+                return
+
+            stake = float(self.state.get_martingale_state().get("stake", self.initial_stake))
+
+            try:
+                proposal = await self._client.get_proposal(
+                    symbol=self.symbol,
+                    contract_type=self.contract_type,
+                    stake=stake,
+                    duration=self.contract_duration,
+                    duration_unit="t",
+                    barrier=self.barrier,
+                    currency=self.account_currency,
+                )
+
+                proposal_id = proposal.get("id")
+                ask_price = float(proposal.get("ask_price"))
+                payout = float(proposal.get("payout"))
+
+                if not proposal_id or ask_price <= 0 or payout <= 0:
+                    raise DerivAPIError("Deriv returned an invalid hot proposal.", "INVALID_RESPONSE")
+
+                self._hot_proposal = proposal
+                self._hot_proposal_time = time.time()
+                self._hot_proposal_stake = stake
+                self._last_proposal_error = ""
+
+            except Exception as exc:
+                self._hot_proposal = None
+                self._hot_proposal_time = 0.0
+                self._hot_proposal_stake = 0.0
+                self._last_proposal_error = str(exc)
+                logger.debug("Hot proposal refresh failed: %s", exc)
+
+    def _schedule_hot_refresh(self) -> None:
+        if not self._hot_proposal_needed():
+            return
+
+        now = time.time()
+        if self._hot_proposal is None or now - self._hot_proposal_time >= self.proposal_refresh_seconds:
+            try:
+                asyncio.create_task(self._refresh_hot_proposal())
+            except RuntimeError:
+                pass
+
+    async def _proposal_keeper(self) -> None:
+        while True:
+            try:
+                if self.state.stop_requested and not self._trade_in_progress:
+                    break
+
+                if not self._hot_proposal_needed():
+                    await asyncio.sleep(0.05)
+                    continue
+
+                now = time.time()
+                if self._hot_proposal is None or now - self._hot_proposal_time >= self.proposal_refresh_seconds:
+                    await self._refresh_hot_proposal()
+
+                await asyncio.sleep(0.02)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Hot proposal keeper failed.")
+                await asyncio.sleep(0.10)
+
     # ------------------------------------------------------------------ lifecycle
 
     async def run(self) -> None:
         self._reconnect_lock = asyncio.Lock()
+        self._proposal_lock = asyncio.Lock()
 
         logger.info(
-            "Manual one-touch engine start | market=%s mode=%s contract=%s barrier=%s duration=%dt required_ticks=%d",
+            "Manual one-touch engine start | market=%s mode=%s contract=%s barrier=%s duration=%dt required_ticks=%d hot=%s",
             self.symbol,
             self.execution_mode,
             self.contract_type,
             self.barrier,
             self.contract_duration,
             self.required_trend_ticks,
+            self.proposal_hot_mode,
         )
 
         self.state.set_execution_context(
@@ -243,7 +439,7 @@ class TradingEngine:
             return
 
         self.state.set_status(f"Connecting to Deriv ({self.execution_mode.lower()})…")
-        self._client = DerivAPIClient(self.api_token, self.app_id, self.account_id)
+        self._client = FastDerivAPIClient(self.api_token, self.app_id, self.account_id)
 
         if not await self._client.connect():
             detail = self._client.last_error if self._client else ""
@@ -254,7 +450,7 @@ class TradingEngine:
             return
 
         try:
-            # Seed a little history so the bot can arm quickly if a trend is already running.
+            # Seed history so the bot can arm quickly if a trend is already running.
             try:
                 history = await self._client.get_ticks_history(
                     self.symbol,
@@ -264,14 +460,24 @@ class TradingEngine:
             except Exception as exc:
                 logger.warning("Could not seed tick history: %s", exc)
 
+            # Pre-cache a proposal immediately if the strategy is already armed from history.
+            if self._hot_proposal_needed():
+                await self._refresh_hot_proposal()
+
             await self._client.subscribe_ticks(self.symbol, self._on_tick)
             self._push_state()
+
+            self._proposal_keeper_task = asyncio.create_task(
+                self._proposal_keeper(),
+                name="one-touch-hot-proposal-keeper",
+            )
 
             side = "UP" if self.barrier_sign == "+" else "DOWN"
             reversal = "DOWN" if self.barrier_sign == "+" else "UP"
             self.state.set_status(
                 f"Armed on {self.symbol_display}: waiting for {self.required_trend_ticks} {side} ticks, "
-                f"then a {reversal} tick to buy ONE TOUCH {self.barrier} for {self.contract_duration} ticks."
+                f"then a {reversal} tick to fire ONE TOUCH {self.barrier} for {self.contract_duration} ticks. "
+                f"Hot proposal mode: {self.proposal_hot_mode}."
             )
 
             while True:
@@ -303,6 +509,15 @@ class TradingEngine:
 
     async def _shutdown(self) -> None:
         logger.info("Manual one-touch engine shutting down…")
+
+        if self._proposal_keeper_task is not None:
+            self._proposal_keeper_task.cancel()
+            try:
+                await self._proposal_keeper_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("Proposal keeper shutdown failed.", exc_info=True)
 
         if self._trade_in_progress:
             self.state.set_status("Stopping — letting the open contract finish…")
@@ -366,18 +581,22 @@ class TradingEngine:
         if price <= 0:
             return
 
-        self.state.update_tick(price, epoch)
-
         if self._trade_in_progress or self.state.stop_requested or not self.state.is_running:
             return
 
         signal = self._strategy.process_tick(price, epoch, allow_signal=True)
-        self._push_state()
 
         if signal == "ENTRY":
             self._trade_in_progress = True
-            self.state.set_status("Reversal detected — executing ONE TOUCH immediately…")
+            self.state.update_tick(price, epoch)
+            self.state.set_status("Reversal detected — firing cached ONE TOUCH order immediately…")
             await self._execute_trade()
+            self._push_state()
+            return
+
+        self.state.update_tick(price, epoch)
+        self._push_state()
+        self._schedule_hot_refresh()
 
     # ------------------------------------------------------------------ execution
 
@@ -429,6 +648,8 @@ class TradingEngine:
             }
         )
 
+        proposal_source = ""
+
         try:
             if self.execution_mode == "BLOCKED":
                 reason = "Order blocked: use a demo account or type LIVE exactly for a real account."
@@ -449,17 +670,21 @@ class TradingEngine:
             if self.state.stop_requested:
                 raise DerivAPIError("Stop requested before buy; no order was submitted.", "STOP_REQUESTED")
 
-            self.state.set_status(f"Requesting ONE TOUCH {self.barrier} quote…")
-
-            proposal = await self._client.get_proposal(
-                symbol=self.symbol,
-                contract_type=self.contract_type,
-                stake=stake,
-                duration=self.contract_duration,
-                duration_unit="t",
-                barrier=self.barrier,
-                currency=self.account_currency,
-            )
+            proposal = self._valid_hot_proposal()
+            if proposal is not None:
+                proposal_source = "HOT_PROPOSAL"
+            else:
+                proposal_source = "LIVE_PROPOSAL"
+                self.state.set_status(f"No fresh cached proposal — requesting ONE TOUCH {self.barrier} quote…")
+                proposal = await self._client.get_proposal(
+                    symbol=self.symbol,
+                    contract_type=self.contract_type,
+                    stake=stake,
+                    duration=self.contract_duration,
+                    duration_unit="t",
+                    barrier=self.barrier,
+                    currency=self.account_currency,
+                )
 
             proposal_id = proposal.get("id")
             ask_price = float(proposal.get("ask_price"))
@@ -471,9 +696,43 @@ class TradingEngine:
             if self.state.stop_requested:
                 raise DerivAPIError("Stop requested before buy; no order was submitted.", "STOP_REQUESTED")
 
-            self.state.set_status(f"Buying ONE TOUCH {self.barrier} at {ask_price:.2f}…")
+            self.state.set_status(f"Firing ONE TOUCH {self.barrier} using {proposal_source.lower()}…")
 
-            buy = await self._client.buy_contract(proposal_id=proposal_id, price=ask_price)
+            try:
+                buy = await self._client.buy_contract(proposal_id=proposal_id, price=ask_price)
+            except DerivAPIError as buy_exc:
+                # If the cached proposal was rejected as stale/invalid, make one emergency attempt
+                # with a fresh proposal. Do not retry on timeout/connection loss to avoid duplicates.
+                code = str(buy_exc.code or "").upper()
+                message = str(buy_exc.message or "").upper()
+                recoverable = any(
+                    word in code or word in message
+                    for word in ("PROPOSAL", "PRICE", "EXPIRED", "INVALID")
+                )
+
+                if not recoverable or self.state.stop_requested:
+                    raise
+
+                proposal_source = f"{proposal_source}+RECOVERED"
+                proposal = await self._client.get_proposal(
+                    symbol=self.symbol,
+                    contract_type=self.contract_type,
+                    stake=stake,
+                    duration=self.contract_duration,
+                    duration_unit="t",
+                    barrier=self.barrier,
+                    currency=self.account_currency,
+                )
+
+                proposal_id = proposal.get("id")
+                ask_price = float(proposal.get("ask_price"))
+                payout = float(proposal.get("payout"))
+
+                if not proposal_id or ask_price <= 0 or payout <= 0:
+                    raise DerivAPIError("Deriv returned an invalid recovered proposal.", "INVALID_RESPONSE")
+
+                buy = await self._client.buy_contract(proposal_id=proposal_id, price=ask_price)
+
             contract_id = buy.get("contract_id")
             buy_price = float(buy.get("buy_price", ask_price))
             buy_payout = float(buy.get("payout", payout))
@@ -481,11 +740,16 @@ class TradingEngine:
             if not isinstance(contract_id, int) or isinstance(contract_id, bool):
                 raise DerivAPIError("No valid contract ID in one-touch buy response.", "NO_CONTRACT_ID")
 
+            # Invalidate the used proposal.
+            self._hot_proposal = None
+            self._hot_proposal_time = 0.0
+            self._hot_proposal_stake = 0.0
+
             self._active_contract_id = contract_id
             trade_record.contract_id = contract_id
             self.state.update_trade_pacing()
             self.state.set_status(
-                f"Contract {contract_id} active · ONE TOUCH {self.barrier} · awaiting settlement"
+                f"Contract {contract_id} active · ONE TOUCH {self.barrier} · {proposal_source}"
             )
 
             outcome, pnl = await self._monitor_contract(contract_id, buy_price, buy_payout)
@@ -507,7 +771,7 @@ class TradingEngine:
                 self.state.on_trade_loss(1.0, 0)
                 self.state.set_status(f"ONE TOUCH {self.barrier} LOST · P&L {pnl:+.2f}")
 
-            self._record_outcome(signal_id, outcome, pnl, stake, contract_id)
+            self._record_outcome(signal_id, outcome, pnl, stake, contract_id, note=proposal_source)
 
         except DerivAPIError as exc:
             reason = f"One-touch order failed: {exc.message} ({exc.code})."
