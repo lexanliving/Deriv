@@ -1,4 +1,4 @@
-"""pages/manual_touch.py — Manual ONE TOUCH speed bot UI."""
+"""pages/manual_touch.py — Manual ONE TOUCH one-shot speed bot UI."""
 
 from __future__ import annotations
 
@@ -106,10 +106,12 @@ engine_active = state.is_running or (thread is not None and thread.is_alive())
 st.markdown(
     """
     <div class="mt-panel">
-      <div class="mt-h">Manual ONE TOUCH · Speed Bot</div>
+      <div class="mt-h">Manual ONE TOUCH · One-Shot Speed Bot</div>
       <div class="mut">
-        You analyze the market, choose the bias, press START, and the bot waits for the first reversal tick.
-        It keeps a hot proposal ready so the buy request fires immediately.
+        START sends the proposal immediately.
+        Then the bot waits for 3 trend ticks.
+        If the 4th tick is the reversal, it buys instantly.
+        If the sequence breaks, it invalidates and stops.
       </div>
     </div>
     """,
@@ -224,46 +226,43 @@ with st.sidebar:
         key="mt_required_ticks",
     )
 
-    ignore_flat_ticks = st.checkbox("Ignore flat ticks", value=True, key="mt_ignore_flat")
-    exact_streak_only = st.checkbox(
-        "Require exactly N trend ticks",
-        value=False,
-        help="If enabled, the bot only enters after exactly N trend ticks, not more.",
-        key="mt_exact_streak",
+    flat_invalid = st.checkbox(
+        "Flat tick invalidates sequence",
+        value=True,
+        key="mt_flat_invalid",
+        help="If enabled, a flat tick cancels the one-shot setup.",
     )
 
-    st.markdown("### Market")
-
-    symbol = st.text_input("Symbol", value="1HZ10V", key="mt_symbol")
-    symbol_display = st.text_input("Symbol display", value="Volatility 10 (1s)", key="mt_symbol_display")
-
-    st.markdown("### Speed settings")
-
-    proposal_hot_mode = st.selectbox(
-        "Proposal pre-cache",
-        options=["ARMED", "ALWAYS", "OFF"],
-        format_func=lambda x: {
-            "ARMED": "When armed (recommended)",
-            "ALWAYS": "Always (most aggressive)",
-            "OFF": "Off",
-        }.get(x, x),
-        index=0,
-        key="mt_proposal_hot_mode",
+    exact_one_shot = st.checkbox(
+        "Exact one-shot: 3 trend ticks then reversal",
+        value=True,
+        key="mt_exact_one_shot",
         help=(
-            "When armed keeps a proposal ready as soon as the trend condition is armed. "
-            "Always keeps requesting proposals even before the setup is armed. "
-            "Off disables pre-caching and will be slower."
+            "If enabled, the setup invalidates if the 4th tick is not the reversal. "
+            "This matches the one-shot behavior."
         ),
     )
+
+    max_wait_seconds = st.number_input(
+        "Max wait seconds before invalidating",
+        min_value=0.0,
+        max_value=300.0,
+        value=15.0,
+        step=1.0,
+        key="mt_max_wait",
+        help="0 disables the safety timeout.",
+    )
+
+    st.markdown("### Speed settings")
 
     proposal_refresh_seconds = st.number_input(
         "Proposal refresh seconds",
         min_value=0.05,
         max_value=2.0,
-        value=0.30,
+        value=0.25,
         step=0.05,
         key="mt_proposal_refresh",
-        help="How often the bot refreshes the cached proposal while hot caching is active.",
+        help="How often the held proposal is silently refreshed while waiting.",
     )
 
     proposal_max_age_seconds = st.number_input(
@@ -273,7 +272,6 @@ with st.sidebar:
         value=1.00,
         step=0.05,
         key="mt_proposal_max_age",
-        help="If the cached proposal is older than this, the bot will not use it.",
     )
 
     proposal_timeout = st.number_input(
@@ -348,14 +346,14 @@ if start_clicked and can_start and not engine_active:
         barrier_decimal_places=int(barrier_decimals),
         contract_style="ONETOUCH",
         required_trend_ticks=int(required_trend_ticks),
-        ignore_flat_ticks=bool(ignore_flat_ticks),
-        exact_streak_only=bool(exact_streak_only),
+        flat_invalid=bool(flat_invalid),
+        exact_one_shot=bool(exact_one_shot),
         stop_after_trade=True,
-        proposal_timeout=float(proposal_timeout),
-        request_timeout=float(request_timeout),
-        proposal_hot_mode=str(proposal_hot_mode),
+        max_wait_seconds=float(max_wait_seconds),
         proposal_refresh_seconds=float(proposal_refresh_seconds),
         proposal_max_age_seconds=float(proposal_max_age_seconds),
+        proposal_timeout=float(proposal_timeout),
+        request_timeout=float(request_timeout),
     )
 
     def _run_engine(engine_instance: TradingEngine, shared_state: StateManager):
@@ -368,7 +366,7 @@ if start_clicked and can_start and not engine_active:
 
     state.set_running(True)
     state.clear_error()
-    state.set_status("Starting manual one-touch engine…")
+    state.set_status("START pressed — sending proposal immediately…")
 
     worker = threading.Thread(
         target=_run_engine,
