@@ -1,4 +1,4 @@
-"""pages/manual_touch.py — Manual Touch / No Touch speed bot UI."""
+"""pages/manual_touch.py — Manual ONE TOUCH speed bot UI."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from src.trading_engine import TradingEngine
 
 try:
     st.set_page_config(
-        page_title="Manual Touch Bot",
+        page_title="Manual One Touch Bot",
         page_icon="⚡",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -106,9 +106,9 @@ engine_active = state.is_running or (thread is not None and thread.is_alive())
 st.markdown(
     """
     <div class="mt-panel">
-      <div class="mt-h">Manual Touch / No Touch · Speed Bot</div>
+      <div class="mt-h">Manual ONE TOUCH · Speed Bot</div>
       <div class="mut">
-        You analyze the market, choose the bias, press START, and the bot waits for the reversal tick.
+        You analyze the market, choose the bias, press START, and the bot waits for the first reversal tick.
         After one trade, it stops automatically.
       </div>
     </div>
@@ -183,8 +183,8 @@ with st.sidebar:
     barrier_choice = st.radio(
         "Barrier bias",
         options=[
-            "+0.08 — wait for UP ticks, enter on DOWN reversal",
-            "-0.08 — wait for DOWN ticks, enter on UP reversal",
+            "+0.08 — wait for UP ticks, enter ONE TOUCH +0.08 on first DOWN tick",
+            "-0.08 — wait for DOWN ticks, enter ONE TOUCH -0.08 on first UP tick",
         ],
         key="mt_barrier_choice",
     )
@@ -208,13 +208,6 @@ with st.sidebar:
         key="mt_barrier_decimals",
     )
 
-    contract_type = st.selectbox(
-        "Contract type",
-        options=["NOTOUCH", "ONETOUCH"],
-        format_func=lambda x: "No Touch" if x == "NOTOUCH" else "One Touch",
-        key="mt_contract_type",
-    )
-
     duration_ticks = st.slider(
         "Duration ticks",
         min_value=1,
@@ -235,7 +228,7 @@ with st.sidebar:
     exact_streak_only = st.checkbox(
         "Require exactly N trend ticks",
         value=False,
-        help="If enabled, the bot only enters after exactly 3 trend ticks, not 4 or more.",
+        help="If enabled, the bot only enters after exactly N trend ticks, not more.",
         key="mt_exact_streak",
     )
 
@@ -316,7 +309,7 @@ if start_clicked and can_start and not engine_active:
         barrier_sign=barrier_sign,
         barrier_offset=float(barrier_offset),
         barrier_decimal_places=int(barrier_decimals),
-        contract_style=contract_type,
+        contract_style="ONETOUCH",
         required_trend_ticks=int(required_trend_ticks),
         ignore_flat_ticks=bool(ignore_flat_ticks),
         exact_streak_only=bool(exact_streak_only),
@@ -335,7 +328,7 @@ if start_clicked and can_start and not engine_active:
 
     state.set_running(True)
     state.clear_error()
-    state.set_status("Starting manual touch engine…")
+    state.set_status("Starting manual one-touch engine…")
 
     worker = threading.Thread(
         target=_run_engine,
@@ -364,7 +357,7 @@ m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Engine", "RUNNING" if state.is_running else "STOPPED")
 m2.metric("Price", f"{state.current_price:.5f}" if state.current_price else "—")
 m3.metric("Barrier", strategy_state.get("manual_barrier", ""))
-m4.metric("Contract", strategy_state.get("manual_contract_type", ""))
+m4.metric("Contract", "ONETOUCH")
 m5.metric("Armed", "YES" if strategy_state.get("manual_armed") else "NO")
 m6.metric("Trend ticks", strategy_state.get("manual_trend_ticks", 0))
 
